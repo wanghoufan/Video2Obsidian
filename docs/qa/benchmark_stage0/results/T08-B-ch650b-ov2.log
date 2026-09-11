@@ -1,0 +1,27 @@
+model=mlx-community/whisper-large-v3-turbo load_s=1.1 rss_before=159MB rss_after_load=1712MB
+{
+ "run_id": "T08-B-ch650b-ov2",
+ "status": "OK",
+ "media": "/Users/zzymima0000/Developer/coding/1.Active/ing丨 0910 本地视频转文字工具/008林粒粒AI编程/第三周/2026-08-03第二周答疑直播-上.mp4",
+ "audio_duration_s": 1300.6,
+ "audio_mode": "temp",
+ "audio_note": "16k-mono-wav-temp",
+ "model": "mlx-community/whisper-large-v3-turbo",
+ "word_timestamps": false,
+ "prompt_chars": 0,
+ "clip": "648,1300",
+ "no_speech_threshold": 0.6,
+ "prep_s": 1.1,
+ "model_load_s": 1.1,
+ "transcribe_s": 55.4,
+ "rtf": 0.0426,
+ "rss_before_mb": 158.5,
+ "rss_after_load_mb": 1712.3,
+ "rss_peak_mb": 3413.3,
+ "text_chars": 4567,
+ "segments": 423,
+ "words": null,
+ "text_sha256": "c563d3f43c4e8b05c234dea87e4a6d9c220e66f3a4377c1ede7e14ba4ff57529",
+ "transcript": "/var/folders/mp/mnxk3h8x4wq5ztr7__vlplp40000gn/T/opencode/stage0bench/T08-B-ch650b-ov2.txt",
+ "log": "/var/folders/mp/mnxk3h8x4wq5ztr7__vlplp40000gn/T/opencode/stage0bench/T08-B-ch650b-ov2.log"
+}

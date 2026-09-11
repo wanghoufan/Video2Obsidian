@@ -1,0 +1,27 @@
+# 素材与本地数据（4G+，永不进仓）
+008林粒粒AI编程/
+*.mp4
+*.mov
+*.mkv
+*.m4a
+*.wav
+*.aiff
+
+# 运行产物与数据库
+*.sqlite
+*.sqlite-*
+*.db
+data/
+v2o-*.log
+
+# 基准大文件（报告json/txt/log可进，wav不进）
+docs/qa/benchmark_stage0/results/*.wav
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# 系统
+.DS_Store

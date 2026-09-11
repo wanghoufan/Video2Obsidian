@@ -1,0 +1,40 @@
+
+# CODE REVIEW
+
+- Task: Stage3 builder复核（src/stage3/ 6文件：__init__/artifact_commit/normalize/render/derive/lineage，对照STAGE3-PLAN S3-T01~T05验收 + STOP EXPANSION（Stage3 only，Stage4+禁入）+ 纯函数/不可变门）
+- Commit: n/a（非git仓库；复核对象为工作区src/stage3/共6文件现状）
+- Reviewer: code-reviewer（opencode-go/glm-5.3-flash）
+- Result: 过（PASS，无P0；P1×2＋P2×5＋P3×4共11项 backlog，不卡Stage3 QA，builder 在产品收尾前修完 P1）
+
+> Dispatch / Evidence ID 系字段 2.0 已废弃，不填。
+
+## P0 / P1 Findings
+
+- 无P0。S3-T01~T05 计划对照全过，STOP EXPANSION 硬门全过，纯函数/不可变门全过，自验旁证如下：
+  - S3-T01（artifact_commit.py 894行）：tmp→flush→fsync→复解析+schema校验→expected hash→中央 artifacts 行 PREPARED→COMMIT 事务→atomic rename→fsync(parent)→final hash 校验→Manifest COMMITTED Receipt→SQLite COMMITTED，全链齐备；PREPARED Receipt 缺失即拒（ArtifactRefused），hash 不等永判无效（ArtifactInvalid，三处 NEVER valid 分支：final已存在/tmponly/rename后），与计划 §37-§41 一致；`TYPE_SUBDIR` 白名单强制 normalized→`normalized/*.json`、rendered→`render/*.md`，`_resolve_paths` 挡 `../` 逃逸（实测）与跨 subdir 错放（实测）；`_ensure_committed_manifest` 只追不改（已含 COMMITTED 同 artifact 去重），不碰顶层 `state`/`stage`；`recover_artifact` 三分支齐（COMMITTED 幂等核验＋manifest 前向补 / PREPARED+Final 修补 / PREPARED+tmp-only 续 Commit），双缺拒绝编造字节；成功字典全带 `whisper_calls == 0`。
+  - S3-T02（normalize.py）：profile 六字段常量与 §29 逐字（correction/hallu/dedup/chunknorm/mech/qual），规范 JSON（sort_keys＋紧分隔）→SHA256，六字段逐一变 hash 全变（实测）、键序无关（实测）、缺字段/空串拒；`revision_id_for(raw|hash)` 确定性 12hex，Case 4 新 profile 即新 rev；`apply_corrections` 纯函数经 AST 审计无 IO/网络/model import，运行时深拷贝对照输入零变更（实测），`dict(seg)` 拷贝逐段替换，未知 rules_rev 拒；生命周期 PENDING→NORMALIZING→COMMITTING→COMPLETED＋FAILED_RETRYABLE/FAILED_FINAL 旁路齐，变迁逐条记 `state_events(entity_type='normalization_revision')`，字段与中央表 DDL（§33 七列）对齐；Raw 经 `stage1.prepare.validate_raw_artifact` 只读门＋artifact_id 对请求一致性检查；Run 行零读写（只透传 source_id/run_id 到 artifacts 溯源列）。
+  - S3-T03（render.py）：profile 五字段常量与 §30 逐字，hash 同上（五字段逐一变 hash 全变，实测）；`render_paragraphs` 纯函数 AST 无 IO，运行时输入零变更（实测），暂停/强标点/目标长/硬上限四例各断各续（实测：gap>thr 断、强标点+target 断、hard_max 强制断）；`assemble_markdown` 纯；`render_revision_id_for(normalized|hash)` 确定性；主链 PENDING→RENDERING→ARTIFACT_COMMITTING→ARTIFACT_COMPLETED→PUBLISH_EVALUATION 后停止，verdict 双值齐（诱饵存在→CANONICAL_OUTPUT_EXISTS／缺席→PENDING_PUBLISH），`evaluate_publish` 只 `isfile` 探针零写盘＋`canonical_writes==0` 防御断言；字段与中央表 DDL（§34 七列）对齐。
+  - S3-T04（derive.py）：Case 4 复用同 raw 建新 NormRev＋下游新 RenderRev；Case 5 复用同 normalized ID 且以中央表全局计数断言 NormRev＋0（+0 为 0 否则 DeriveError）；Case 6 构造性成立（两路径零读零写 processing_runs，run 状态原样保留）；模块及全包零 import 转写入口（`run_asr_single_file` 全仓零命中；`whisper/mlx/ffmpeg` 仅命中 `whisper_calls` 计数键与注释，零执行调用）。
+  - S3-T05（lineage.py）：`record_lineage_manifest` 追记去重（stage/state/artifact/id/rev/verdict 六元键）＋metadata 标量史胜出、list 并集合并（实测），历史条目永不改写；`get_lineage` 组装 §4 全链 Source→Run→Raw→NormRev→Normalized→RenderRev→Rendered→Evaluation，缺环显式 `{"status":"missing"}` 不编造（未知根键抛 KeyError 属调用方错误，合理）；`_job_id_of_raw(raw_<job_id>)` 与 stage1 `f"raw_{job_id}"` 铸造式一致（已核 prepare.py:241）；evaluation 取证序 manifest 收据优先、state_events reason 回退。
+  - STOP EXPANSION：`PUBLISHING`/`PUBLISHED` 精确 token 全包零命中（仅允许的 PUBLISH_EVALUATION/PENDING_PUBLISH/CANONICAL_OUTPUT_EXISTS 存在）；`publish_records`/`archive_commits` 零写（INSERT/UPDATE 审计仅 artifacts/normalization_revisions/render_revisions/state_events 四表）；`processing_runs`/`sources` 仅 lineage SELECT 只读，零 UPDATE；无后台监听/线程/进程/云/LLM/队列/向量 import（import 表仅 stdlib＋stage1 只读一函数＋stage2 central_db_path 只读）；`src/stage1/`、`src/stage2/` 零改（本轮非 git，diff 口径 N/A；stage3 对 stage1/2 仅只读 import，无写回；未把 Raw 专用函数改通用，S3-T01 独立新实现）；py_compile 6 文件 OK。
+  - 纯函数/不可变门：`apply_corrections`/`render_paragraphs`/`assemble_markdown`/双 profile_hash 经 AST＋运行时双证无 IO、无网络、无模型且输入不可变；派生幂等（同 raw＋profile→同 NormRev COMPLETED 原样返回；同 normalized＋profile→同 RenderRev PUBLISH_EVALUATION 原样返回）；artifact COMMITTED 后重 PREPARE 拒（immutable）；Raw 路径全包仅 `rb` 读，零 `wb`/rename/chmod 落 Raw。
+- P1-1 render.py:349 重试门过严（中途态不可续，应修）：`if existing[4] not in (STATUS_PENDING,)` 把 RENDERING/ARTIFACT_COMMITTING/ARTIFACT_COMPLETED 残留判作“另起新 profile”，与 Repair-Forward 语义冲突——崩溃在 RENDERING→COMMITTING 之间后，同 profile 重调本应经 S3-T01 tmp/final 证据续行，现直接抛错致该 revision_id 永久卡死（normalize 侧无此门，同 profile 可续，前后不对称；render 又无 FAILED 终态，见 P1 相关）。改法：与 normalize 对齐——COMPLETED 系（此处即 PUBLISH_EVALUATION）幂等返回；PENDING/RENDERING/ARTIFACT_COMMITTING/ARTIFACT_COMPLETED 落入续行分支（先 `_set_status` 回到可续点，再走 prepare 幂等门＋commit/recover），仅对未知状态抛错；并给 render 补 FAILED_RETRYABLE/FAILED_FINAL 终态（或文档明确“失败即废该 revision_id，另起 profile”，二选一，别留卡死态）。
+- P1-2 render.py:330-348 幂等返回重探 verdict（revision 内 verdict 非确定，应修）：COMPLETED 系命中时 verdict 现场 `evaluate_publish(canonical_probe_path)` 重算，而非读该 revision 已落盘的 verdict——诱饵在两次调用间增删即致同一 revision 两次返回不同 verdict，与 manifest 首写收据及 `state_events` reason 分叉（lineage `_evaluation_for` 优先读 manifest，会与本返回值打架）。改法：幂等分支改读已存 verdict（`_evaluation_for`-style：先 manifest 收据，后 state_events `verdict=` 回退；两者皆无才探针并注明 `evidence="re-probed"`），保证同 revision_id verdict 单调。
+
+## P2 / P3 Backlog Findings
+
+- P2-1 normalize.py:267-269＋render.py:331-333 幂等分支裸 `open(final,"rb")`（文件被删即 FileNotFoundError 外泄，应为 NormalizationError/RenderError）：DB 记 COMPLETED 但 final 丢失时（误删/盘坏），正确行为是 fail-closed 的领域异常＋指引 recover，而非裸 IO 异常。改法：包 `try/except OSError` 转领域异常（信息带 artifact/revision_id＋“refusing to fabricate，run recover_artifact”），与 artifact_commit 双缺分支同语义。
+- P2-2 normalize.py:169-186＋render.py:218-235 `event_id` 秒级哈希（同 rev 同迁同秒重试即主键冲突）：`sha256(rev+from+to+秒)` 12hex＋一秒一戳，两次 `_utc_now_iso()` 调用还可能跨秒（hash 用戳≠落库戳）。现状单线程串行基本撞不见，QA 并发/极速重试可撞（IntegrityError 掩盖真错）。改法：`event_id="evt_"+uuid4().hex[:12]`（或 time_ns 纳入哈希），且同一 transition 内单取一次 now 复用。
+- P2-3 derive.py:83-94 Case 5 计数器是全局表计数（多 job 并发可误杀）：`SELECT COUNT(*) FROM normalization_revisions` 不分 job/raw，别的 job 并发落 NormRev 即让本次 formatter-change 被误判“新建了 NormRev”。单 job 测试无碍。改法：改断言作用域——记 `before/after` 改为按 `normalized_artifact_id`（或按本 job raw 集合）计数，或直接断言“本次调用前后无 INSERT 且返回 rend 的 normalized_id==入参”，二选一。
+- P2-4 render.py:91-118 profile 字段类型门比 normalize 松（非串非空可过 hash）：normalize 要求六字段全非空串，render 仅拒 None/""——`paragraph_formatter_version=5` 这类 int 可混进 hash 定义域。改法：与 normalize 对齐，四串字段强制非空 str（paragraph_parameters 保持 dict＋三阈值校验不变）。
+- P2-5 render.py:175-189 强标点规则被弱标点规则吞并（优先级 vacuous，待与 V1.8 §47 逐字核）：规则 2（STRONG＋≥target）与规则 3（WEAK＋≥target）同阈值同动作且 STRONG⊂WEAK，`elif` 致规则 3 对强标点永不可达——若 §47 本意是强标点更短即断（如独立短阈值），此处即错实现；若 §47 本就是同阈值，排序只是文档 tie-break，则无错。改法：QA 补一例“同长度下强标点 vs 弱标点（，）行为差”并逐字核 §47；若 §47 有差值，按 §47 给强规则独立阈值并记入 profile（即 Case 5 可证）。
+- P3-1 artifact_commit.py:428-445 manifest 落盘缺 fsync(parent)（与 final rename 不对称，崩溃窗）：manifest 全文件重写后只 fsync 了文件。改法：`_write_fsync_json(manifest_path,…)` 后补 `_fsync_parent(dirname)`（与 `_fsync_parent` 在 commit 后的用法一致），或文档注明沿 stage1 commit 语义。
+- P3-2 artifact_commit.py:613-644 repair-forward 后残 tmp 未清：final-valid 分支调 commit 走“final 已存在”路，未删同名 `.tmp`（若 tmp 与 final 同 hash 残留）。无害但下次审计碍眼。改法：repair-forward 成功后若 tmp 存在且 hash==expected 则 unlink（hash 不等已在上游拒，此处只删一致的）。
+- P3-3 lineage.py:126-131 `_row_dict` tuple 分支必炸（`dict(tuple_row)`）：`_open_central_ro` 恒设 Row 工厂故现状不可达，但与 artifact_commit `_row_get`（Row/tuple 双兼容）不对称，外来 con（tuple 工厂的单测 con）即炸。改法：删 tuple 分支或照 `_row_get` 列名映射实现，二选一。
+- P3-4 __init__.py:5-8 docstring 夸大 import（实际全懒 import，包级零 import）：文档说“imports stage1.prepare and stage2.store”，实际顶层无 import 语句（函数内按需）。无功能影响。改法：把 doc 改为“read-only reuses … via function-local imports”。
+
+> QA 必验（S3-T06 交接，不属本复核 FAIL 口径）：happy 全链 1 遍＋异常 6 路（Case 4/5/6、PREPARED＋Final 修补、tmp-only 续 Commit、Final 篡改判无效），每例附 publish/archive 双表 0 行、Whisper 0、Raw hash 不变、诱饵字节不变、Run=COMPLETED 六证据；另加 P1-1 同 profile 崩溃续行、P1-2 诱饵增删后幂等 verdict 稳定、P2-5 强/弱标点对照三例。
+
+## P1 复核（2026-09-11 builder 修后，code-reviewer 追加，只增不改原文）
+- P1-1 CLOSED：render.py:54-55 补 FAILED_RETRYABLE/FINAL 双终态，386-407 PUBLISH_EVALUATION 幂等返回保留，408-414 FAILED 双态抛错换 profile，415-422 仅 PENDING/RENDERING/ARTIFACT_COMMITTING/ARTIFACT_COMPLETED 落续行分支；实测同 profile 三中途态重调均续至 PUBLISH_EVALUATION（RESUME_*_OK），FAILED_RETRYABLE 抛错（FAILED_TERMINAL_RAISE_OK），与复核要求一致。
+- P1-2 CLOSED：render.py:285-336 新增 _stored_verdict（manifest 收据优先→state_events verdict= 回退→re-probed），390-392 幂等分支改读 stored 并回 verdict_evidence；实测诱饵新增后同 rev 仍 PENDING_PUBLISH（evidence=manifest，P1-2_STABLE），未翻转。

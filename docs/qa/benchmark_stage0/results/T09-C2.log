@@ -1,0 +1,27 @@
+model=mlx-community/whisper-large-v3-turbo load_s=0.8 rss_before=158MB rss_after_load=1711MB
+{
+ "run_id": "T09-C2",
+ "status": "OK",
+ "media": "/Users/zzymima0000/Developer/coding/1.Active/ing丨 0910 本地视频转文字工具/008林粒粒AI编程/第四周/37.Codex 进阶：上手 AI 编程超级工具.mp4",
+ "audio_duration_s": 620.83,
+ "audio_mode": "temp",
+ "audio_note": "16k-mono-wav-temp",
+ "model": "mlx-community/whisper-large-v3-turbo",
+ "word_timestamps": false,
+ "prompt_chars": 0,
+ "clip": "0",
+ "no_speech_threshold": 0.6,
+ "prep_s": 0.5,
+ "model_load_s": 0.8,
+ "transcribe_s": 76.9,
+ "rtf": 0.1239,
+ "rss_before_mb": 157.6,
+ "rss_after_load_mb": 1711.3,
+ "rss_peak_mb": 3357.8,
+ "text_chars": 7284,
+ "segments": 630,
+ "words": null,
+ "text_sha256": "28b81fc521d5ed17eb2b4ddb9444a9388620b537a32cc7bb957f016c102dd914",
+ "transcript": "/var/folders/mp/mnxk3h8x4wq5ztr7__vlplp40000gn/T/opencode/stage0bench/T09-C2.txt",
+ "log": "/var/folders/mp/mnxk3h8x4wq5ztr7__vlplp40000gn/T/opencode/stage0bench/T09-C2.log"
+}

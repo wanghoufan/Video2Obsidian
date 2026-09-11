@@ -1,0 +1,27 @@
+{
+ "run_id": "VAD-B",
+ "status": "OK",
+ "audio_s": 1300.6,
+ "vad_model": "silero-vad package inclusions (onnx)",
+ "model_load_s": 0.0,
+ "candidates": {
+  "0.3": {
+   "n_segments": 157,
+   "speech_s": 1160.1,
+   "speech_ratio": 0.892,
+   "infer_s": 3.3
+  },
+  "0.5": {
+   "n_segments": 265,
+   "speech_s": 1121.8,
+   "speech_ratio": 0.8625,
+   "infer_s": 3.2
+  },
+  "0.7": {
+   "n_segments": 321,
+   "speech_s": 1098.1,
+   "speech_ratio": 0.8443,
+   "infer_s": 3.2
+  }
+ }
+}

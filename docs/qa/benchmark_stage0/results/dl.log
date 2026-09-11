@@ -1,0 +1,2 @@
+Fetching 4 files:   0%|          | 0/4 [00:00<?, ?it/s]Fetching 4 files:  25%|██▌       | 1/4 [00:00<00:02,  1.48it/s]Fetching 4 files:  50%|█████     | 2/4 [00:00<00:00,  2.18it/s]Fetching 4 files: 100%|██████████| 4/4 [06:47<00:00, 127.51s/it]Fetching 4 files: 100%|██████████| 4/4 [06:47<00:00, 101.80s/it]
+SNAPSHOT_DONE /Users/zzymima0000/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo/snapshots/a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb

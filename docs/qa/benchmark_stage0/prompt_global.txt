@@ -1,0 +1,1 @@
+林粒粒，Vibe Coding，氛围编程，Codex，扣子编程，API，大模型，智能体，数据库，主键，外键，SBTI，短剧分镜，提示工程，部署，服务器，后端，Agent，Token，Prompt，工作流，自动化接力，小红书，副业，Cursor，Claude，GPT，Anthropic，OpenAI，Embedding，向量数据库，微服务，Docker，中间件，并发，缓存，索引，事务，范式，API Key，JSON，Markdown，Obsidian， Whisper，转写，时间戳，VAD，Chunk，Overlap，FFmpeg，MLX，Apple Silicon，Mac mini，LaunchAgent，SQLite，发布，归档。

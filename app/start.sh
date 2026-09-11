@@ -1,0 +1,40 @@
+#!/bin/sh
+# V2O 本机控制台一键启动：选 python -> 起 127.0.0.1:8765 -> 打开浏览器。
+set -eu
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+PY=""
+for cand in "$ROOT/stage0bench/bin/python" "$ROOT/.venv/bin/python" "$ROOT/venv/bin/python"; do
+  if [ -x "$cand" ]; then PY="$cand"; break; fi
+done
+if [ -z "$PY" ]; then
+  PY="python3"
+  echo "WARN: 未找到 stage0bench/.venv/venv，转写需要 mlx 的 python；先用 $PY 起控制台（/api/start 会 400 提示换 venv）。"
+else
+  echo "venv 复核：$PY"
+  "$PY" -c "import sys; print('复核 python：' + sys.executable)"
+fi
+
+# P0-6：转写必须在有 mlx 的 python 下跑；缺则只告警（控制台仍可起，/api/start 会 400 明确提示）。
+if "$PY" -c "import mlx_whisper" 2>/dev/null; then
+  echo "mlx_whisper 就绪，转写可用。"
+else
+  echo "WARN: $PY 缺 mlx_whisper，转写 /api/start 会 400（PRECHECK_MLX_MISSING）；请进 stage0bench venv 后重起。" >&2
+fi
+
+echo "用 $PY 启动 V2O 本机控制台…"
+"$PY" app/server.py &
+SRV=$!
+sleep 1
+if ! kill -0 $SRV 2>/dev/null; then
+  echo "启动失败，查看上方报错。" >&2
+  exit 1
+fi
+echo "已起 http://127.0.0.1:8765/（Ctrl+C 停止）"
+if command -v open >/dev/null 2>&1; then
+  open "http://127.0.0.1:8765/"
+elif command -v xdg-open >/dev/null 2>&1; then
+  xdg-open "http://127.0.0.1:8765/"
+fi
+wait $SRV

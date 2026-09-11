@@ -1,0 +1,27 @@
+model=mlx-community/whisper-large-v3-turbo load_s=1.2 rss_before=158MB rss_after_load=1711MB
+{
+ "run_id": "T05-B-wordON",
+ "status": "OK",
+ "media": "/Users/zzymima0000/Developer/coding/1.Active/ing丨 0910 本地视频转文字工具/008林粒粒AI编程/第三周/2026-08-03第二周答疑直播-上.mp4",
+ "audio_duration_s": 1300.6,
+ "audio_mode": "temp",
+ "audio_note": "16k-mono-wav-temp",
+ "model": "mlx-community/whisper-large-v3-turbo",
+ "word_timestamps": true,
+ "prompt_chars": 0,
+ "clip": "0",
+ "no_speech_threshold": 0.6,
+ "prep_s": 0.9,
+ "model_load_s": 1.2,
+ "transcribe_s": 148.8,
+ "rtf": 0.1144,
+ "rss_before_mb": 157.8,
+ "rss_after_load_mb": 1711.3,
+ "rss_peak_mb": 3411.4,
+ "text_chars": 9111,
+ "segments": 884,
+ "words": 7257,
+ "text_sha256": "157e0e679881ac635a44f00ae3bfdeec6848c92f796a64a743015fe959e2d946",
+ "transcript": "/var/folders/mp/mnxk3h8x4wq5ztr7__vlplp40000gn/T/opencode/stage0bench/T05-B-wordON.txt",
+ "log": "/var/folders/mp/mnxk3h8x4wq5ztr7__vlplp40000gn/T/opencode/stage0bench/T05-B-wordON.log"
+}

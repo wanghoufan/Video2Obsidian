@@ -106,8 +106,10 @@ footer{max-width:1280px;margin:0 auto;padding:0 20px 20px;color:var(--dim);font-
 #progress{margin:0 0 10px;padding:8px 10px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;font-size:12px}
 #progText{font-size:12px;margin-bottom:6px;word-break:break-all}
 #progStageText{font-size:12px;color:var(--dim);margin:6px 0 4px;word-break:break-all}
-.bar{height:8px;background:var(--input-bg);border:1px solid var(--line);border-radius:4px;overflow:hidden;margin-bottom:4px}
-#progFill{height:100%;width:0%;background:var(--green);transition:width .3s}
+.bar{height:8px;background:var(--input-bg);border:1px solid var(--line);border-radius:4px;overflow:hidden;margin-bottom:4px;display:flex}
+#progFillOk{height:100%;width:0%;background:var(--green);transition:width .3s}
+#progFillFail{height:100%;width:0%;background:var(--red);transition:width .3s}
+#progFillPending{height:100%;width:0%;background:var(--dim);opacity:.45;transition:width .3s}
 #progStageFill{height:100%;width:0%;background:var(--orange);transition:width .3s}
 .stageNote{font-size:11px;color:var(--dim)}
 #toasts{position:fixed;right:16px;bottom:16px;z-index:99;display:flex;flex-direction:column;gap:8px}
@@ -118,6 +120,14 @@ footer{max-width:1280px;margin:0 auto;padding:0 20px 20px;color:var(--dim);font-
 .notebox{margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel2)}
 .notebox pre{white-space:pre-wrap;word-break:break-all;font-family:var(--sans);font-size:12px;max-height:40vh;overflow:auto;margin:6px 0 0}
 .obdis{color:var(--dim);cursor:not-allowed;text-decoration:none}
+header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
+.mini.go,.outrow .mini.go{background:var(--orange);border:none;color:#fff;font-weight:700}
+.runsheadbtns{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}
+.runsheadbtns button{font-size:12px;padding:4px 10px;border-radius:4px;border:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}
+.runsheadbtns button.go{background:var(--orange);border:none;color:#fff;font-weight:700}
+.notestatus{margin:6px 0;padding:6px 8px;border-radius:4px;font-size:12px;word-break:break-all;line-height:1.6}
+.notestatus.warn{background:rgba(217,164,65,.14);border:1px solid var(--yellow);color:var(--yellow)}
+.notestatus.ok{color:var(--dim)}
 .btnrow{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .outrow{display:flex;gap:6px;align-items:center;justify-content:flex-start;flex-wrap:nowrap}
 .outrow .mini,.outrow .obbtn{flex:0 0 auto;height:24px;line-height:22px;padding:0 10px;font-size:12px;
@@ -129,6 +139,9 @@ footer{max-width:1280px;margin:0 auto;padding:0 20px 20px;color:var(--dim);font-
 #vocabBox{margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel2)}
 #vocabBox h3{margin:0 0 6px;font-size:13px}
 #vocabList{font-size:12px;font-family:var(--mono);margin-bottom:6px}
+#presetBox{margin:2px 0 6px;font-size:12px}
+#presetBox label{margin-right:12px;cursor:pointer;white-space:nowrap}
+#presetBox .mini{margin-left:4px}
 #vocabList .vrow{display:flex;gap:6px;align-items:center;padding:3px 0;border-bottom:1px dashed var(--line)}
 #vocabList .vrow span{flex:1;word-break:break-all}
 </style>
@@ -184,7 +197,8 @@ footer{max-width:1280px;margin:0 auto;padding:0 20px 20px;color:var(--dim);font-
     <p class="hint" id="preview"></p>
     <p class="hint warn" id="longHint" style="display:none"></p>
     <p class="hint" id="worker"></p>
-    <div id="progress"><div id="progText">空闲：暂无排队视频</div><div class="bar"><div id="progFill"></div></div><div id="queueLine"></div><div id="progStageText" style="display:none"></div><div class="bar" id="stageBarWrap" style="display:none"><div id="progStageFill"></div></div><div class="stageNote" id="stageNote" style="display:none">步骤进度非精确百分比，仅表示当前在哪一步</div></div>
+    <div id="progress"><div id="progText">空闲：暂无排队视频</div><div class="bar"><div id="progFillOk"></div><div id="progFillFail"></div><div id="progFillPending"></div></div><div id="queueLine"></div><div id="progStageText" style="display:none"></div><div class="bar" id="stageBarWrap" style="display:none"><div id="progStageFill"></div></div><div class="stageNote" id="stageNote" style="display:none">步骤进度非精确百分比，仅表示当前在哪一步</div></div>
+    <div id="runsHead" class="hint" style="display:none"></div>
     <div id="runsWrap"><table>
       <thead><tr><th>任务</th><th>来源</th><th>状态</th><th>输出</th><th>更新时间</th><th>操作</th></tr></thead>
       <tbody id="runs"></tbody>
@@ -193,6 +207,8 @@ footer{max-width:1280px;margin:0 auto;padding:0 20px 20px;color:var(--dim);font-
     <div id="vocabBox">
       <h3>词汇（错词→正词，新转写自动应用；错词至少2字，2-3字短词二次确认）</h3>
       <div class="hint" id="vocRev"></div>
+      <div id="presetBox"></div>
+      <div class="vhint" id="vPreset"></div>
       <div id="vocabList"></div>
       <div class="pathrow">
         <input id="vocWrong" placeholder="错词（转写里听错的样子）">
@@ -218,6 +234,16 @@ footer{max-width:1280px;margin:0 auto;padding:0 20px 20px;color:var(--dim);font-
   <div class="row">
     <button id="btnPick">选定当前目录</button>
     <button class="ghost" id="btnClose">关闭</button>
+  </div>
+</div></div>
+<div class="modal" id="clearModal"><div class="box">
+  <h3>清空本目录任务（先看清代价）</h3>
+  <div id="clearCost" style="font-size:13px;line-height:1.9;white-space:pre-wrap;word-break:break-all"></div>
+  <div class="hint" id="clearMsg" style="margin-top:8px"></div>
+  <div class="row">
+    <button class="ghost" id="btnClearCancel">取消</button>
+    <button id="btnClearFailed">只清失败</button>
+    <button id="btnClearAll" style="background:var(--red)">全部清空</button>
   </div>
 </div></div>
 <div id="toasts"></div>
@@ -364,6 +390,37 @@ function filenameForRunId(run_id){
   }catch(e){}
   return "未知文件";
 }
+// UX2-P1-3/P1-7：失败判定与“原因/下一步”拆解（列表头批量重试/复制原因共用）
+function isFailedRun(r){
+  var d=detailsByRun[r.run_id];
+  if(d&&d.state)return d.state==="FAIL"||d.state==="PUBLISH_BLOCKED";
+  var s=String(r.status||"");
+  return /^FAILED/.test(s)||s==="NO_SPEECH_DETECTED";
+}
+function failPartsForRun(r){
+  var d=detailsByRun[r.run_id];
+  var blocked=!!(d&&d.state==="PUBLISH_BLOCKED");
+  var v=d?String(d.verdict||""):"";
+  var parts=v.split("→");
+  var reason=(parts[0]||(blocked?"初稿已保留，入库未完成":"转写没成功")).trim()||"转写没成功";
+  var next=(parts[1]||(blocked?"检查笔记库权限后点重试入库":"点重试再试一次")).trim()||"点重试再试一次";
+  return {reason:reason,next:next,blocked:blocked};
+}
+function failedRuns(){
+  var out=[];
+  (cache.runs||[]).forEach(function(r){
+    try{ if(r&&isFailedRun(r))out.push(r); }catch(e){}
+  });
+  return out;
+}
+// UX2-P1-7：来源人话标签＝视频文件夹尾段＋文件名（哈希只进 title）
+function sourceLabelForRun(r){
+  var fn=filenameForRun(r);
+  var tail="";
+  try{ tail=String((r&&r.source_dir_tail)||""); }catch(e){ tail=""; }
+  if(tail)return tail+"/"+fn;
+  return fn;
+}
 function obLinkFor(run_id){
   var d=detailsByRun[run_id];
   var vault=(lastLock&&lastLock.ob_vault_root)||"";
@@ -428,25 +485,86 @@ function outCellFor(run_id){
   h+='</span><div class="obhint">打不开？确认OB中已打开同名库</div>';
   return h;
 }
+// UX2-P0-1：列表头一行“共N个（成功A/失败B/排队C），当前显示M个”，截断必须明示，禁静默丢
+// UX2-P1-2：失败>1给“重试全部失败（N个）”；失败>0给“复制全部失败原因”
+// UX2-P1-5：未监听（或跨多目录）时按输入目录分组列成功/失败/排队
+function renderRunsHead(snap){
+  var box=el("runsHead");
+  if(!box)return;
+  var runs=(snap&&snap.recent_runs)||[];
+  cache.runs=runs;
+  var shown=runs.length;
+  var rs=(snap&&snap.run_summary)||null;
+  var t;
+  if(!rs){
+    if(shown>0){box.style.display="block";box.className="hint";t="共 "+shown+" 个，当前显示 "+shown+" 个";}
+    else{box.style.display="none";box.innerHTML="";return;}
+  }else{
+    var total=parseInt(rs.total!=null?rs.total:0,10);if(isNaN(total))total=0;
+    var done=parseInt(rs.done!=null?rs.done:0,10);if(isNaN(done))done=0;
+    var failed=parseInt(rs.failed!=null?rs.failed:0,10);if(isNaN(failed))failed=0;
+    var pending=parseInt(rs.pending!=null?rs.pending:0,10);if(isNaN(pending))pending=0;
+    var m=parseInt(rs.shown!=null?rs.shown:shown,10);if(isNaN(m))m=shown;
+    var limit=parseInt(rs.limit!=null?rs.limit:200,10);if(isNaN(limit))limit=200;
+    var truncated=!!rs.truncated||total>m;
+    t="共 "+total+" 个（成功 "+done+"/失败 "+failed+"/排队 "+pending+"），当前显示 "+m+" 个";
+    if(truncated){
+      var left=Math.max(0,total-m);
+      t+=" · 截断：仅显示前 "+m+" 个（共 "+total+" 个，还有 "+left+" 个未显示）。本次每次最多取 "+limit+" 条，请先处理/收口，或换更小的视频文件夹再刷新。";
+      box.className="hint warn";
+    }else{
+      box.className="hint";
+    }
+    // UX2-P1-5：按输入目录分组（未监听或跨多目录时展示归属；成功/失败分input计）
+    try{
+      var groups=(rs.groups||[]);
+      var running=!!(lastLock&&lastLock.running);
+      if(groups.length>0&&(!running||groups.length>1)){
+        var gs=groups.map(function(g){
+          return esc(String(g.dir_tail||"（无归属目录）"))+" 成功"+parseInt(g.done||0,10)+"/失败"+parseInt(g.failed||0,10)+"/排队"+parseInt(g.pending||0,10)+"（共"+parseInt(g.total||0,10)+"）";
+        });
+        t+=" · 按文件夹："+gs.join(" ｜ ");
+      }
+    }catch(e){}
+  }
+  var flist=failedRuns();
+  var nRetry=flist.length;
+  var btnHtml="";
+  if(nRetry>1)btnHtml+='<button class="go" id="btnRetryAllFailed">重试全部失败（'+nRetry+'个）</button>';
+  if(nRetry>0)btnHtml+='<button id="btnCopyFailedReasons">复制全部失败原因</button>';
+  box.style.display="block";
+  box.innerHTML=esc(t)+(btnHtml?('<div class="runsheadbtns">'+btnHtml+'</div>'):"");
+  var rb=el("btnRetryAllFailed");if(rb)rb.onclick=retryAllFailed;
+  var cb=el("btnCopyFailedReasons");if(cb)cb.onclick=copyAllFailedReasons;
+}
 function renderRuns(snap){
   lastSnap=snap;
   var runs=(snap&&snap.recent_runs)||[];
   cache.runs=runs;
+  renderRunsHead(snap);
   var tb=el("runs");
   var cur=(lastLock&&lastLock.worker&&lastLock.worker.current)||null;
   tb.innerHTML=runs.map(function(r,i){
     var cn=statusCN(r,cur);
     var outCell=outCellFor(r.run_id);
     var d=detailsByRun[r.run_id];
-    var failed=d&&(d.state==="FAIL"||d.state==="PUBLISH_BLOCKED");
+    var dbFail=/^FAILED/.test(String(r.status||""))||String(r.status||"")==="NO_SPEECH_DETECTED";
+    // 详情缺失时以库状态兜底判失败（67合成只有库行时也能逐行重试）
+    var hasDetail=!!(d&&d.state);
+    var failed=hasDetail?(d.state==="FAIL"||d.state==="PUBLISH_BLOCKED"):dbFail;
+    // UX2-P1-3：行内只留一个主按钮（入库受阻→重试入库；其余失败→重试）；
+    // 重跑收进详情“应用新词库重跑”，行内禁两相似动词并排。
     var ops=[];
-    if(failed)ops.push('<button class="mini" data-retry="'+esc(r.run_id)+'" data-retryfn="'+esc(filenameForRun(r))+'">重试</button>');
-    if(d&&(d.state==="RENDER_ONLY"||d.state==="PUBLISHED"||d.state==="PUBLISH_BLOCKED"))ops.push('<button class="mini" data-reapply="'+esc(r.run_id)+'" title="应用新词库重跑（转写0次，改过的笔记跳过）">重跑</button>');
+    if(failed){
+      var mainLabel=(hasDetail&&d.state==="PUBLISH_BLOCKED")?"重试入库":"重试";
+      ops.push('<button class="mini go" data-retry="'+esc(r.run_id)+'" data-retryfn="'+esc(filenameForRun(r))+'">'+mainLabel+'</button>');
+    }
     var op=ops.length?ops.join(" "):"—";
     var fn=filenameForRun(r);
     var sid=shortId(r.run_id);
     var taskCell='<div>'+esc(fn)+'</div><div style="font-size:11px;color:var(--dim)">…'+esc(sid)+'</div>';
-    return '<tr data-i="'+i+'" class="'+(selected===i?"sel":"")+'"><td title="'+esc(r.run_id)+'">'+taskCell+'</td><td>'+esc(r.source_id)+'</td><td class="'+stClass(cn)+'">'+esc(cn)+'</td><td>'+outCell+'</td><td>'+esc(r.updated_at)+'</td><td>'+op+'</td></tr>';
+    // UX2-P1-7/P1-5：来源列显“文件夹尾段＋文件名”，裸哈希只进 title
+    return '<tr data-i="'+i+'" class="'+(selected===i?"sel":"")+'"><td title="'+esc(r.run_id)+'">'+taskCell+'</td><td title="'+esc(r.source_id||"")+'">'+esc(sourceLabelForRun(r))+'</td><td class="'+stClass(cn)+'">'+esc(cn)+'</td><td>'+outCell+'</td><td>'+esc(r.updated_at)+'</td><td>'+op+'</td></tr>';
   }).join("");
   var showEmpty=!snap||snap.ok===false||runs.length===0;
   el("empty").style.display=showEmpty?"block":"none";
@@ -498,7 +616,7 @@ function renderLineage(){
   var cur=(lastLock&&lastLock.worker&&lastLock.worker.current)||null;
   var cn=statusCN(r,cur);
   var h='<div><span class="k">任务：</span><span class="v">'+esc(r.run_id)+'</span></div>';
-  h+='<div><span class="k">来源：</span><span class="v">'+esc(r.source_id)+'</span></div>';
+  h+='<div><span class="k">来源：</span><span class="v" title="'+esc(r.source_id||"")+'">'+esc(sourceLabelForRun(r))+'</span></div>';
   h+='<div><span class="k">状态：</span><span class="v">'+esc(cn)+'</span></div>';
   h+='<div><span class="k">耗时：</span><span class="v">'+esc(fmtDur(r.created_at,r.updated_at))+'</span></div>';
   if(d&&(d.state==="PUBLISHED"||d.state==="RENDER_ONLY")){
@@ -526,7 +644,8 @@ function renderLineage(){
     var parts=String(d.verdict||(pb?"初稿已保留，入库未完成→检查笔记库权限后点重试":"转写没成功")).split("→");
     var reason=(parts[0]||"转写没成功").trim()||"转写没成功";
     var next=(parts[1]||"点重试再试一次").trim()||"点重试再试一次";
-    h+='<div class="failbox"><div class="r">原因：'+esc(reason)+'</div><div class="n">下一步：'+esc(next)+'</div><div style="margin-top:6px"><button class="go" data-retry="'+esc(r.run_id)+'">重试这个视频</button></div></div>';
+    // UX2-P1-3：入库受阻→“重试入库”；其余失败→“重试这个视频”。行内只此一个主按钮。
+    h+='<div class="failbox"><div class="r">原因：'+esc(reason)+'</div><div class="n">下一步：'+esc(next)+'</div><div style="margin-top:6px"><button class="go" data-retry="'+esc(r.run_id)+'">'+(pb?"重试入库":"重试这个视频")+'</button></div></div>';
   }else{
     if(cur&&cur.run_id===r.run_id){
       h+='<div><span class="k">结论：</span><span class="v">正在处理：'+esc(cur.stage)+'</span></div>';
@@ -535,13 +654,23 @@ function renderLineage(){
     }
     h+='<div><span class="k">输出：</span><span class="v">—</span></div>';
   }
+  // UX2-P1-3：重跑（应用新词库）收进详情“高级”，行内不再并排两个相似动词
+  var canReapply=!!(d&&(d.state==="RENDER_ONLY"||d.state==="PUBLISHED"||d.state==="PUBLISH_BLOCKED"));
   h+='<div class="btnrow" id="openRow"></div>';
+  if(canReapply){
+    h+='<details class="adv" id="advDetail"><summary>高级：应用新词库重跑</summary>'
+      +'<div class="obhint">只重排整理与成稿，转写0次（whisper 不跑）；你在库内改过的笔记会被跳过不覆盖，新稿只留数据目录。</div>'
+      +'<div class="btnrow"><button class="mini" data-reapply="'+esc(r.run_id)+'">应用新词库重跑（转写0次）</button></div></details>';
+  }
   h+='<div class="notebox" id="notePrev">笔记加载中…</div>';
   el("lineage").innerHTML=h;
   renderOpenRow(r.run_id);
   loadNote(r.run_id);
   Array.prototype.forEach.call(el("lineage").querySelectorAll("[data-retry]"),function(b){
     b.onclick=function(){retryRun(b.getAttribute("data-retry"));};
+  });
+  Array.prototype.forEach.call(el("lineage").querySelectorAll("[data-reapply]"),function(b){
+    b.onclick=function(){reapplyOne(b.getAttribute("data-reapply"));};
   });
   Array.prototype.forEach.call(el("lineage").querySelectorAll("[data-copy]"),function(b){
     b.onclick=function(){copyText(b.getAttribute("data-copy"));};
@@ -570,6 +699,16 @@ function renderOpenRow(run_id){
     a.onclick=function(e){return obClickHint(e);};
   });
 }
+function noteStatusHtml(o){
+  // UX2-P1-4：预览头状态行（复用后端 note_hint/user_edited 只读判定）
+  try{
+    if(o&&o.note_hint){
+      var edited=!!o.user_edited;
+      return '<div class="notestatus '+(edited?"warn":"ok")+'">'+(edited?"⚠ ":"")+esc(o.note_hint)+'</div>';
+    }
+  }catch(e){}
+  return "";
+}
 function loadNote(run_id){
   var box=el("notePrev");
   if(!box)return;
@@ -579,10 +718,11 @@ function loadNote(run_id){
     var nb=el("notePrev");
     if(!nb)return;
     if(!o||!o.ok){nb.textContent="笔记加载失败："+((o&&o.error)||"未知");return;}
+    var st=noteStatusHtml(o);
     if(o.text!=null){
-      nb.innerHTML='<div><span class="k">笔记正文：</span><span class="v">'+esc(o.path||"")+'</span></div><pre>'+esc(o.text)+'</pre>';
+      nb.innerHTML=st+'<div><span class="k">笔记正文：</span><span class="v">'+esc(o.path||"")+'</span></div><pre>'+esc(o.text)+'</pre>';
     }else{
-      nb.innerHTML='<div><span class="k">笔记：</span><span class="v">'+esc(o.stage_text||"排队等待处理")+'</span></div>';
+      nb.innerHTML=st+'<div><span class="k">笔记：</span><span class="v">'+esc(o.stage_text||"排队等待处理")+'</span></div>';
     }
   }).catch(function(e){
     var nb2=el("notePrev");
@@ -602,7 +742,16 @@ function renderProgress(w){
   var pending=parseInt(q.pending||0,10), done=parseInt(q.done||0,10), failed=parseInt(q.failed||0,10);
   var total=q.total!=null?parseInt(q.total||0,10):(pending+done+failed);
   if(isNaN(total))total=pending+done+failed;
-  var pct=total>0?Math.round((done+failed)*100/total):0;
+  if(total<0)total=0;
+  // UX2-P1-8：分段进度（绿成功／红失败／灰排队），失败不再计入成功，100%仅当排队0且失败0
+  var okPct=total>0?Math.round(done*100/total):0;
+  var failPct=total>0?Math.round(failed*100/total):0;
+  if(okPct+failPct>100){okPct=Math.min(okPct,100);failPct=Math.max(0,100-okPct);}
+  var pendPct=Math.max(0,100-okPct-failPct);
+  el("progFillOk").style.width=okPct+"%";
+  el("progFillFail").style.width=failPct+"%";
+  el("progFillPending").style.width=pendPct+"%";
+  var counts="成功 "+done+"/失败 "+failed+"/排队 "+pending+"，共 "+total;
   var txt="";
   var now=Date.now();
   var heart=Math.max(0,Math.round((now-lastFetchAt)/1000));
@@ -615,7 +764,7 @@ function renderProgress(w){
       if(!isNaN(t0)){stageDur=Math.max(0,Math.round((now-t0)/1000));secs=" · 已用时 "+stageDur+"s";}
     }catch(e){}
     var st=stageStep(cur.stage);
-    txt="正在"+cur.stage+" "+cur.filename+"（第 "+st.n+" 步/共 5 步：发现→听写→整理→成稿→入库）"+secs+heartS+" · 排队 "+pending+"/成功 "+done+"/失败 "+failed;
+    txt="正在"+cur.stage+" "+cur.filename+"（第 "+st.n+" 步/共 5 步：发现→听写→整理→成稿→入库）"+secs+heartS+" · "+counts;
     if(longInInput>0)txt+=" · 长视频分段中";
     if(stageDur>60)txt+=" · 还在跑，长视频请勿关闭页面";
     el("progStageText").style.display="block";
@@ -624,8 +773,12 @@ function renderProgress(w){
     el("progStageFill").style.width=st.pct+"%";
     el("stageNote").style.display="block";
   }else if(pending>0||done>0||failed>0){
-    if(pending===0)txt="空闲：暂无排队视频 · 成功 "+done+"/失败 "+failed+heartS;
-    else txt="排队 "+pending+"/成功 "+done+"/失败 "+failed+" · 等待新视频…"+heartS;
+    // 收口口径：排队0才算收口；失败>0 明示“含失败B”，绝不显示成全绿100%
+    if(pending===0){
+      txt=counts+" · 已收口"+(failed>0?("（含失败 "+failed+"）"):"（全部成功）")+heartS;
+    }else{
+      txt=counts+" · 等待新视频…"+heartS;
+    }
     el("progStageText").style.display="none";
     el("stageBarWrap").style.display="none";
     el("stageNote").style.display="none";
@@ -636,16 +789,21 @@ function renderProgress(w){
     el("stageNote").style.display="none";
   }
   el("progText").textContent=txt;
-  el("progFill").style.width=pct+"%";
 }
 var lastLock=null;
+// UX2-P1-6：停止态（{finishing,filename,message}）——current 未清前先显“正在收尾…”，不误导为未监听
+var stopState=null;
 function renderLock(o){
   lastLock=o;
   var l=el("lock");
   var running=!!(o&&o.running);
-  if(running){l.className="lock on";l.textContent="● 监听中";}
-  else{l.className="lock off";l.textContent="● 未监听";}
   var w=o&&o.worker;
+  var curNow=(w&&w.current)||null;
+  var finishing=!!(!running&&stopState&&stopState.finishing&&curNow);
+  if(stopState&&stopState.finishing&&!curNow)stopState.finishing=false;
+  if(finishing){l.className="lock warn";l.textContent="● 正在收尾…";}
+  else if(running){l.className="lock on";l.textContent="● 监听中";}
+  else{l.className="lock off";l.textContent="● 未监听";}
   detailsByRun=(w&&w.details_by_run)||{};
   if(w&&w.processed){
     var m={};
@@ -656,7 +814,17 @@ function renderLock(o){
   if(lastSnap)renderRuns(lastSnap);
   // 常驻绿条（V2.2补修 P0-3：全终态放行走“旧N条已入库，本次只转新增M个”，真半截才BLOCK）
   var bar=el("liveBar");
-  if(running){
+  if(finishing){
+    // UX2-P1-6：收尾中——三段式语义常驻，禁用重起避免与收尾线程打架
+    bar.textContent=(stopState&&stopState.message)||"已停止接新任务，当前这个会跑完收尾；重起后已完成跳过、半截重转。";
+    bar.style.display="block";
+    el("btnStart").disabled=true;
+    el("btnStart").textContent="收尾中…";
+    el("btnStop").style.display="inline-block";
+    el("btnStop").disabled=true;
+    el("btnStop").textContent="正在收尾…";
+    el("preview").textContent="";
+  }else if(running){
     var inp=(o&&o.input_root)||"";
     var hasVault=!!(o&&o.ob_vault_root);
     var t="监听中："+inp+"，把视频丢进去即可";
@@ -681,15 +849,25 @@ function renderLock(o){
     el("btnStart").disabled=true;
     el("btnStart").textContent="监听中…";
     el("btnStop").style.display="inline-block";
+    el("btnStop").disabled=false;
+    el("btnStop").textContent="停止";
     var pv=(w&&w.preview)||"";
     el("preview").textContent=pv;
     // 运行中改输入提示由 input 事件处理，这里保持
   }else{
-    bar.style.display="none";
-    bar.textContent="";
+    // UX2-P1-6：刚停过则常驻三段式停止语义，不再误显“未监听/上次监听”
+    if(stopState&&stopState.message){
+      bar.textContent=stopState.message;
+      bar.style.display="block";
+    }else{
+      bar.style.display="none";
+      bar.textContent="";
+    }
     el("btnStart").disabled=false;
     el("btnStart").textContent="开始监听";
     el("btnStop").style.display="none";
+    el("btnStop").disabled=false;
+    el("btnStop").textContent="停止";
     el("preview").textContent="";
     el("editHint").style.display="none";
     // P0-1 回填优先级：localStorage 为主，后端 last_* 为辅；清空则留空回默认，不崩
@@ -711,7 +889,7 @@ function renderLock(o){
     // P0-2 成功条：上次监听回显，一键重起（回填后点开始即可，不另加按钮）
     try{
       var lastIn=el("inInput").value.trim()||lsGet(LS_INPUT)||((o&&(o.last_input_root||o.input_root))||"");
-      if(lastIn){
+      if(lastIn&&!(stopState&&stopState.message)){
         bar.textContent="上次监听："+lastIn+"，已回填，点开始监听即重起";
         bar.style.display="block";
       }
@@ -808,6 +986,46 @@ function retryRun(run_id){
     refresh();
   }).catch(function(e){say("重试请求失败："+e,"err");});
 }
+// UX2-P1-2：一键重试全部失败（逐个调已有 /api/retry，幂等；前端给“N/total 已排队”进度）
+function retryAllFailed(){
+  var list=failedRuns();
+  if(!list.length){say("当前没有失败任务可重试。","warn");return;}
+  if(!confirm("重试全部失败 "+list.length+" 个吗？\n会逐个重新排队（幂等，成功任务不受影响）。"))return;
+  var total=list.length, okN=0, badN=0, i=0;
+  say("正在重试全部失败：0/"+total+" 已排队…");
+  function step(){
+    if(i>=total){
+      say("重试全部失败完成：已排队 "+okN+"/"+total+(badN?("，失败请求 "+badN):"")+"。","ok");
+      toast("已排队 "+okN+"/"+total+" 个失败任务","ok");
+      refresh();
+      return;
+    }
+    var rid=list[i].run_id;
+    fetch("/api/retry",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({run_id:rid})})
+    .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+    .then(function(x){if(x.code===202)okN++;else badN++;})
+    .catch(function(){badN++;})
+    .then(function(){i++;say("正在重试全部失败："+i+"/"+total+" 已排队…");step();});
+  }
+  step();
+}
+// UX2-P1-2：复制全部失败原因（文件名＋归属＋原因＋下一步）
+function copyAllFailedReasons(){
+  var list=failedRuns();
+  if(!list.length){say("当前没有失败任务可复制。","warn");return;}
+  var lines=["V2O 失败原因清单（共 "+list.length+" 个）",""];
+  list.forEach(function(r,idx){
+    var p=failPartsForRun(r);
+    var tail=String((r&&r.source_dir_tail)||"");
+    lines.push((idx+1)+". "+filenameForRun(r)+(tail?("（归属："+tail+"）"):""));
+    lines.push("   原因："+p.reason);
+    lines.push("   下一步："+p.next);
+    lines.push("");
+  });
+  lines.push("说明：可用列表头「重试全部失败」一键重新排队，或点单行按钮逐个重试。");
+  copyText(lines.join("\n"));
+}
 function reapplyPayload(extra){
   var p={};
   if(dataRoot())p.data_root=dataRoot();
@@ -878,6 +1096,43 @@ function delVocab(w){
     else say("删除失败："+((x.o&&x.o.error)||x.code),"err");
   }).catch(function(e){say("删除请求失败："+e,"err");});
 }
+function loadPresets(){
+  fetch("/api/vocab/presets").then(function(r){return r.json();}).then(function(o){
+    if(!o||!o.ok)return;
+    var ps=o.presets||[];
+    if(!ps.length){el("presetBox").innerHTML="";return;}
+    var h='<span class="hint">预置词库：</span>';
+    ps.forEach(function(p){
+      h+='<label><input type="checkbox" data-preset="'+esc(p.domain)+'"> '
+        +esc(p.label)+'（'+(p.count||0)+'）</label>';
+    });
+    h+='<button class="mini" id="btnPresetImport">一键导入所选</button>';
+    el("presetBox").innerHTML=h;
+    el("btnPresetImport").onclick=importPresets;
+  }).catch(function(){});
+}
+function importPresets(){
+  var ds=[];
+  Array.prototype.forEach.call(el("presetBox").querySelectorAll("[data-preset]"),function(c){
+    if(c.checked)ds.push(c.getAttribute("data-preset"));
+  });
+  if(!ds.length){el("vPreset").textContent="先勾选至少一个领域再导入";el("vPreset").className="vhint err";return;}
+  if(!confirm("把所选预置词库（"+ds.join("、")+"）导入你的词库吗？\n新转写自动应用；已存在的错词跳过，撞内置词库的拒收。"))return;
+  el("vPreset").textContent="正在导入…";el("vPreset").className="vhint";
+  fetch("/api/vocab/presets/import",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(reapplyPayload({domains:ds}))})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    if(x.code===200&&x.o&&x.o.ok){
+      el("vPreset").textContent=String(x.o.message||"导入完成");
+      el("vPreset").className="vhint ok";
+      loadVocab();
+    }else{
+      el("vPreset").textContent=String((x.o&&x.o.error)||("导入失败："+x.code));
+      el("vPreset").className="vhint err";
+    }
+  }).catch(function(e){el("vPreset").textContent="导入请求失败："+e;el("vPreset").className="vhint err";});
+}
 el("btnVocAdd").onclick=addVocab;
 el("btnReapplyAll").onclick=reapplyAll;
 var refreshing=false;
@@ -888,6 +1143,8 @@ function refresh(){
   el("btnRefresh").textContent="刷新中…";
   var qs=[];
   if(dataRoot())qs.push("data_root="+encodeURIComponent(dataRoot()));
+  // UX2-P0-1：必带 limit=200（否则后端默认20，67只见20且失败藏起）
+  qs.push("limit=200");
   var irf=el("inInput").value.trim()||((lastLock&&lastLock.input_root)||"");
   if(irf)qs.push("input_root="+encodeURIComponent(irf));
   var q=qs.length?("?"+qs.join("&")):"";
@@ -901,6 +1158,7 @@ function refresh(){
     if(o&&o.error)say("启动失败："+o.error,"err");
   }).catch(function(){});
   try{loadVocab();}catch(e){}
+  try{loadPresets();}catch(e){}
   Promise.all([p1,p2]).then(function(){
     refreshing=false;
     el("btnRefresh").disabled=false;
@@ -1036,6 +1294,7 @@ function updateStartReady(){
   else b.classList.remove("ready");
 }
 el("btnStart").onclick=function(){
+  stopState=null;
   var input=el("inInput").value.trim();
   if(!input){say("请先填写视频文件夹的绝对路径。","err");return;}
   say("正在启动监听…");
@@ -1058,11 +1317,21 @@ el("btnStart").onclick=function(){
   }).catch(function(e){say("启动请求失败："+e,"err");});
 };
 el("btnStop").onclick=function(){
-  say("正在停止…");
+  if(stopState&&stopState.finishing)return;
+  say("正在停止（先停接新任务，当前任务会跑完收尾）…");
+  el("btnStop").disabled=true;
   fetch("/api/stop",{method:"POST"}).then(function(r){return r.json();}).then(function(o){
-    say("已停止监听，可换路径重起。","ok");
+    o=o||{};
+    // UX2-P1-6：三段式——已停止接新任务／当前这个会跑完收尾／重起后已完成跳过、半截重转
+    stopState={finishing:!!o.finishing,
+      filename:String((o.current&&o.current.filename)||""),
+      message:String(o.message||"已停止接新任务；重起后已完成跳过、半截重转。")};
+    el("btnStop").disabled=false;
+    say(stopState.message,"ok");
+    if(stopState.finishing)toast("已停止接新任务，当前任务收尾中…","ok");
+    else toast("已停止监听","ok");
     refresh();
-  }).catch(function(e){say("停止失败："+e,"err");});
+  }).catch(function(e){el("btnStop").disabled=false;say("停止失败："+e,"err");});
 };
 el("btnNewData").onclick=function(){
   var s=(lastLock&&lastLock.suggested_data_root)||"";
@@ -1071,22 +1340,89 @@ el("btnNewData").onclick=function(){
   say("已填入新数据目录："+s+"，点开始监听即重起（源视频与笔记不动）。","ok");
   validateInput("inData");
 };
-el("btnClear").onclick=function(){
-  var ir=el("inInput").value.trim()||((lastLock&&lastLock.input_root)||"");
+// UX2-P0-2：清空前先明示代价（DB N条＋jobs M个 / 预计重转X分钟），
+// 二选一“只清失败 / 全部清空”，默认不选全清；清后给撤销指引。
+var clearPreview=null;
+function clearOpenedRoot(){
+  return el("inInput").value.trim()||((lastLock&&lastLock.input_root)||"");
+}
+function openClearDialog(){
+  var ir=clearOpenedRoot();
   if(!ir){say("请先填写要清空的视频文件夹绝对路径。","err");return;}
-  var n=(cache.runs||[]).length;
-  if(!confirm("确定清空本目录 "+n+" 个任务记录吗？\n"+ir+"\n源视频文件与笔记不动，重起后可重新转写。"))return;
-  if(!confirm("再次确认：删除不可撤销，真的清空吗？"))return;
-  say("正在清空本目录任务…");
+  clearPreview=null;
+  el("clearMsg").textContent="";
+  el("clearCost").textContent="正在核对要清的任务与代价…";
+  el("btnClearFailed").disabled=true;
+  el("btnClearAll").disabled=true;
+  el("clearModal").classList.add("open");
   fetch("/api/clear",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({data_root:dataRoot()||undefined,input_root:ir})})
+    body:JSON.stringify({data_root:dataRoot()||undefined,input_root:ir,dry_run:true})})
   .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
   .then(function(x){
-    if(x.code===200){say(x.o.message||"已清空。","ok");toast("已清空本目录任务","ok");}
-    else say("清空失败："+(x.o.error||x.code),"err");
-    selected=null;refresh();
-  }).catch(function(e){say("清空请求失败："+e,"err");});
-};
+    if(x.code!==200||!x.o||!x.o.ok){
+      el("clearCost").textContent="无法清空："+String((x.o&&x.o.error)||("HTTP "+x.code));
+      return;
+    }
+    if(x.o.no_tasks){
+      el("clearCost").textContent=String(x.o.message||"本目录下没有任务记录，无需清空。");
+      return;
+    }
+    var p=x.o.preview||{};
+    var of=p.only_failed||{};
+    clearPreview={input_root:ir,preview:p};
+    var lines=[];
+    lines.push("将删 DB "+p.db_runs+" 条 ＋ jobs "+p.jobs+" 个；vault md 与源视频不动。");
+    lines.push("重起需重转约 "+p.est_retranscribe_minutes+" 分钟（按每条约 "+p.avg_sec_per_video+" 秒估算，实际以视频长短为准）。");
+    if(p.failed>0)lines.push("失败 "+p.failed+" 条建议先在失败行逐条点「重试」，确需清空再清。");
+    lines.push("");
+    lines.push("当前共 "+p.total+" 条：成功 "+p.success+" / 失败 "+p.failed+" / 排队 "+p.pending+"。");
+    if(p.failed>0){
+      lines.push("「只清失败」→ 删 "+of.db_runs+" 条失败记录＋jobs "+of.jobs+" 个，成功 "+p.success+" 条保留（不动）。");
+    }else{
+      lines.push("（当前没有失败记录，「只清失败」无可清。）");
+    }
+    lines.push("「全部清空」→ 删全部 "+p.db_runs+" 条，重起会全部重转。");
+    el("clearCost").textContent=lines.join("\n");
+    el("btnClearFailed").disabled=!(p.failed>0);
+    el("btnClearAll").disabled=!(p.db_runs>0);
+  }).catch(function(e){
+    el("clearCost").textContent="核对失败："+e;
+  });
+}
+function doClear(onlyFailed){
+  var ir=clearOpenedRoot();
+  if(!ir)return;
+  if(!onlyFailed){
+    if(!confirm("再次确认：将删除本目录全部 "+((clearPreview&&clearPreview.preview&&clearPreview.preview.db_runs)||"")+" 条任务记录与 jobs 中间文件，不可撤销。\n（源视频与笔记 md 不动，但重起需全部重转。）\n确定要「全部清空」吗？"))return;
+  }
+  el("clearMsg").textContent="正在清空…";
+  el("btnClearFailed").disabled=true;
+  el("btnClearAll").disabled=true;
+  fetch("/api/clear",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({data_root:dataRoot()||undefined,input_root:ir,only_failed:!!onlyFailed})})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    if(x.code===200&&x.o&&x.o.ok){
+      el("clearModal").classList.remove("open");
+      say(String(x.o.message||"已清空。")+" "+String(x.o.undo||""),"ok");
+      toast(String(x.o.message||"已清空"),"ok");
+      selected=null;refresh();
+    }else{
+      el("clearMsg").textContent="清空失败："+String((x.o&&x.o.error)||("HTTP "+x.code));
+      el("btnClearFailed").disabled=false;
+      el("btnClearAll").disabled=false;
+    }
+  }).catch(function(e){
+    el("clearMsg").textContent="清空请求失败："+e;
+    el("btnClearFailed").disabled=false;
+    el("btnClearAll").disabled=false;
+  });
+}
+el("btnClear").onclick=openClearDialog;
+el("btnClearCancel").onclick=function(){el("clearModal").classList.remove("open");};
+el("btnClearFailed").onclick=function(){doClear(true);};
+el("btnClearAll").onclick=function(){doClear(false);};
+el("clearModal").onclick=function(e){if(e.target===el("clearModal"))el("clearModal").classList.remove("open");};
 refresh();setInterval(refresh,5000);
 </script>
 </body>

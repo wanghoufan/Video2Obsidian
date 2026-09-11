@@ -763,9 +763,25 @@ def _app_resolve_canonical(input_root: str, vault_root: str,
         return m
 
 
-def _attach_source_filenames(snap: dict, data_root: str) -> dict:
-    """V2.3 P0-1：recent_runs附source_filename（联sources取current_path basename）。
+def _dir_tail(path: str) -> str:
+    """目录尾段（“…”＋末段；根/空回“”）：供列表归属显示。"""
+    try:
+        p = str(path or "").rstrip("/")
+        if not p:
+            return ""
+        base = os.path.basename(p)
+        if not base:
+            return "/"
+        return "…/" + base
+    except Exception:
+        return ""
 
+
+def _attach_source_filenames(snap: dict, data_root: str) -> dict:
+    """V2.3 P0-1 / UX2-P1-5/P1-7：recent_runs附source_filename＋目录归属。
+
+    联 sources 取 current_path：basename→source_filename，
+    dirname→source_dir／source_dir_tail（“…/尾段”，列表归属与来源列用）。
     取不到（映射缺失/空路径）回“未知文件”。只读，不落盘。
     """
     try:
@@ -780,10 +796,17 @@ def _attach_source_filenames(snap: dict, data_root: str) -> dict:
                 rid = str(r.get("run_id") or "")
                 src_path = mapping.get(rid) if mapping else None
                 if isinstance(src_path, str) and src_path.strip():
-                    fn = os.path.basename(src_path.strip()) or "未知文件"
+                    sp = src_path.strip()
+                    d = os.path.dirname(sp)
+                    r["source_path"] = sp
+                    r["source_dir"] = d
+                    r["source_dir_tail"] = _dir_tail(d)
+                    r["source_filename"] = os.path.basename(sp) or "未知文件"
                 else:
-                    fn = "未知文件"
-                r["source_filename"] = fn
+                    r["source_path"] = None
+                    r["source_dir"] = None
+                    r["source_dir_tail"] = ""
+                    r["source_filename"] = "未知文件"
             except Exception:
                 try:
                     if isinstance(r, dict) and "source_filename" not in r:
@@ -1051,6 +1074,8 @@ def _listener_snapshot() -> dict:
             snap.get("ob_vault_root"))
     except Exception:
         snap["vault_registered"] = False
+    # UX2-P2-3：回显默认数据目录（前端空框常驻小字用）
+    snap["default_data_root"] = DEFAULT_DATA_ROOT
     return snap
 
 
@@ -1181,6 +1206,320 @@ def _filter_merged_by_input(merged: dict, mem_ids: set, data_root: str,
         return out
     except Exception:
         return merged
+
+
+def _count_job_dirs(data_root: str, run_ids) -> int:
+    """本 data_root 下 jobs/<run_id> 目录计数（清空代价预览用，只读）。"""
+    try:
+        base = _jobs_dir(data_root)
+        n = 0
+        for rid in run_ids:
+            try:
+                if os.path.isdir(os.path.join(base, str(rid))):
+                    n += 1
+            except Exception:
+                continue
+        return n
+    except Exception:
+        return 0
+
+
+CLEAR_AVG_SEC_PER_VIDEO = 120  # 清空代价估算：每条视频重转均耗时（秒，估算值）
+
+
+def _est_retranscribe_minutes(n_runs) -> int:
+    """按条数估重转分钟（ceil；估算值，前端明示“约”）。"""
+    try:
+        n = int(n_runs or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return 0
+    return int((n * CLEAR_AVG_SEC_PER_VIDEO + 59) // 60)
+
+
+def _clear_plan(con, data_root: str, input_root: str,
+                only_failed: bool = False) -> dict:
+    """UX2-P0-2：只读计算清空计划（不写库、不删盘），预览与实清共用。
+
+    返回 exists=False 表示本目录无任何可清记录；否则给出去重后的待删 id：
+      run_ids / srcs_to_del / cand_ids / norm_ids / rend_ids / pub_ids /
+      art_ids / null_arch_ids / entity_ids，以及
+      total/success/failed/pending/fail_run_ids/kept_success 计数。
+    only_failed=True 时只圈失败 run 及其修订链；同日录源若另有成功 run，
+    该源保留（成功记录与产物不动）。
+    """
+    out = {"exists": False, "run_ids": [], "srcs_to_del": set(),
+           "cand_ids": [], "norm_ids": [], "rend_ids": [], "pub_ids": [],
+           "art_ids": [], "null_arch_ids": [], "entity_ids": set(),
+           "total": 0, "success": 0, "failed": 0, "pending": 0,
+           "fail_run_ids": [], "kept_success": 0}
+    try:
+        path_rows = con.execute(
+            "SELECT source_id, current_path, path_identity_key FROM sources"
+        ).fetchall()
+    except Exception:
+        return out
+    scope_srcs: set = set()
+    unatt_srcs: set = set()
+    for r in path_rows:
+        try:
+            cur, pik = r[1], r[2]
+            if (cur and _is_under_root(str(cur), input_root)) or (
+                    not cur and pik and _is_under_root(str(pik), input_root)):
+                scope_srcs.add(r[0])
+            cur_s = str(cur).strip() if cur else ""
+            pik_s = str(pik).strip() if pik else ""
+            if not cur_s and not pik_s:
+                unatt_srcs.add(r[0])
+        except Exception:
+            continue
+    eff_srcs = set(scope_srcs) | set(unatt_srcs)
+    try:
+        all_src_ids = {rr[0] for rr in con.execute(
+            "SELECT source_id FROM sources").fetchall()}
+    except Exception:
+        all_src_ids = set(eff_srcs)
+    try:
+        run_rows = con.execute(
+            "SELECT run_id, source_id, status FROM processing_runs").fetchall()
+    except Exception:
+        run_rows = []
+    run_status: dict = {}
+    source_runs: dict = {}
+    orphan_run_ids: list = []
+    for rr in run_rows:
+        try:
+            rid = str(rr[0])
+            sid = rr[1] if len(rr) > 1 else None
+            status = str(rr[2] or "") if len(rr) > 2 else ""
+        except Exception:
+            continue
+        run_status[rid] = status
+        if sid is None or sid not in all_src_ids:
+            orphan_run_ids.append(rid)
+        else:
+            source_runs.setdefault(sid, []).append(rid)
+    try:
+        disk = _scan_disk_states(str(data_root))
+    except Exception:
+        disk = {}
+
+    def _run_failed(rid: str) -> bool:
+        d = disk.get(rid)
+        if isinstance(d, dict) and str(d.get("state") or "") in FAIL_STATES:
+            return True
+        s = run_status.get(rid, "")
+        return s.startswith("FAILED") or s == "NO_SPEECH_DETECTED"
+
+    def _run_done(rid: str) -> bool:
+        d = disk.get(rid)
+        return bool(isinstance(d, dict)
+                    and str(d.get("state") or "") in DONE_STATES)
+
+    scope_run_ids: list = []
+    for sid in eff_srcs:
+        scope_run_ids.extend(source_runs.get(sid, []))
+    scope_run_ids.extend(orphan_run_ids)
+    fail_set = {rid for rid in scope_run_ids if _run_failed(rid)}
+    done_set = {rid for rid in scope_run_ids if _run_done(rid)}
+    out["total"] = len(scope_run_ids)
+    out["success"] = len(done_set)
+    out["failed"] = len(fail_set)
+    _pend = len(scope_run_ids) - len(fail_set) - len(done_set)
+    out["pending"] = _pend if _pend > 0 else 0
+    out["fail_run_ids"] = [rid for rid in scope_run_ids if rid in fail_set]
+    out["kept_success"] = len(done_set)
+    if only_failed:
+        out["run_ids"] = list(out["fail_run_ids"])
+        failed_srcs = {sid for sid, rids in source_runs.items()
+                       if sid in eff_srcs and any(rid in fail_set for rid in rids)}
+        keep_srcs = {sid for sid in failed_srcs
+                     if any(rid not in fail_set for rid in source_runs.get(sid, []))}
+        out["srcs_to_del"] = failed_srcs - keep_srcs
+    else:
+        out["run_ids"] = list(scope_run_ids)
+        out["srcs_to_del"] = set(eff_srcs)
+    runs_del = set(out["run_ids"])
+    if not runs_del and not out["srcs_to_del"]:
+        return out
+    # 修订链归属：raw_artifact_id = raw_<run_id>
+    try:
+        norm_rows = con.execute(
+            "SELECT normalization_revision_id, normalized_artifact_id,"
+            " raw_artifact_id FROM normalization_revisions").fetchall()
+    except Exception:
+        norm_rows = []
+    norm_ids: list = []
+    norm_artifacts: list = []
+    for r in norm_rows:
+        try:
+            raw = r[2]
+            rid = (raw[len("raw_"):]
+                   if isinstance(raw, str) and raw.startswith("raw_") else None)
+        except Exception:
+            rid = None
+        if rid in runs_del:
+            norm_ids.append(r[0])
+            norm_artifacts.append(r[1])
+    out["norm_ids"] = norm_ids
+    try:
+        rend_rows = con.execute(
+            "SELECT render_revision_id FROM render_revisions"
+            " WHERE normalized_artifact_id IN (%s)"
+            % ",".join("?" for _ in norm_artifacts),
+            norm_artifacts).fetchall() if norm_artifacts else []
+    except Exception:
+        rend_rows = []
+    out["rend_ids"] = [r[0] for r in rend_rows]
+    try:
+        pub_rows = con.execute(
+            "SELECT publish_record_id FROM publish_records"
+            " WHERE render_revision_id IN (%s)"
+            % ",".join("?" for _ in out["rend_ids"]),
+            out["rend_ids"]).fetchall() if out["rend_ids"] else []
+    except Exception:
+        pub_rows = []
+    out["pub_ids"] = [r[0] for r in pub_rows]
+    # artifacts：全清按源或 run 归属；只清失败只按 run 归属（不误伤成功源产物）
+    try:
+        if only_failed:
+            art_rows = con.execute(
+                "SELECT artifact_id FROM artifacts WHERE run_id IN (%s)"
+                % ",".join("?" for _ in out["run_ids"]),
+                list(out["run_ids"])).fetchall() if out["run_ids"] else []
+        elif eff_srcs:
+            qmarks = ",".join("?" for _ in eff_srcs)
+            art_rows = con.execute(
+                "SELECT artifact_id FROM artifacts WHERE source_id IN (%s)%s"
+                % (qmarks,
+                   (" OR run_id IN (%s)" % ",".join("?" for _ in out["run_ids"]))
+                   if out["run_ids"] else ""),
+                list(eff_srcs) + list(out["run_ids"])).fetchall()
+        elif out["run_ids"]:
+            art_rows = con.execute(
+                "SELECT artifact_id FROM artifacts WHERE run_id IN (%s)"
+                % ",".join("?" for _ in out["run_ids"]),
+                list(out["run_ids"])).fetchall()
+        else:
+            art_rows = []
+    except Exception:
+        art_rows = []
+    out["art_ids"] = [r[0] for r in art_rows]
+    # discovery_candidates：全清按源或路径归属；只清失败只按待删源归属（保守）
+    try:
+        cand_rows = con.execute(
+            "SELECT candidate_id, path_identity_key, source_id"
+            " FROM discovery_candidates").fetchall()
+    except Exception:
+        cand_rows = []
+    cand_ids: list = []
+    for r in cand_rows:
+        try:
+            sid, pik = r[2], r[1]
+        except Exception:
+            continue
+        if only_failed:
+            if sid in out["srcs_to_del"]:
+                cand_ids.append(r[0])
+        elif sid in eff_srcs or (pik and _is_under_root(str(pik), input_root)):
+            cand_ids.append(r[0])
+    out["cand_ids"] = cand_ids
+    # NULL archive：仅全清带走（门清一致）；只清失败不动
+    null_arch_ids: list = []
+    if not only_failed:
+        try:
+            null_arch_rows = con.execute(
+                "SELECT archive_commit_id FROM archive_commits"
+                " WHERE source_id IS NULL").fetchall()
+            null_arch_ids = [rr[0] for rr in null_arch_rows]
+        except Exception:
+            null_arch_ids = []
+    out["null_arch_ids"] = null_arch_ids
+    out["entity_ids"] = (set(cand_ids) | set(out["srcs_to_del"])
+                         | set(out["run_ids"]) | set(norm_ids)
+                         | set(out["rend_ids"]) | set(out["pub_ids"])
+                         | set(out["art_ids"]) | set(null_arch_ids))
+    out["exists"] = bool(out["run_ids"] or out["srcs_to_del"]
+                         or out["cand_ids"] or null_arch_ids)
+    return out
+
+
+def _scoped_runs_summary(data_root: str, input_root: str) -> dict:
+    """UX2-P0-1：全量（不受 limit 限制）任务分桶 + 分目录，供列表头。
+
+    total=当前范围全部任务数；done/failed/pending 按磁盘终态优先、DB
+    状态兜底分桶；groups 按输入目录尾段分组（未监听展示归属用）。
+    与 _filter_status_runs 同口径：孤儿/映射缺失的 run 视为可见（不静默丢）。
+    只读 fail-open：任何异常回空壳（total=0），不拦接口。
+    """
+    out = {"total": 0, "done": 0, "failed": 0, "pending": 0,
+           "groups": [], "shown": 0, "truncated": False}
+    con = None
+    try:
+        mapping = _run_source_path_map(data_root)
+        con = _open_ro(data_root)
+        if con is None:
+            return out
+        rows = con.execute(
+            "SELECT run_id, source_id, status FROM processing_runs").fetchall()
+        try:
+            disk = _scan_disk_states(data_root)
+        except Exception:
+            disk = {}
+        allow_all = not input_root
+        groups: dict = {}
+        total = done = failed = pending = 0
+        for r in rows:
+            try:
+                rid = str(r[0])
+                status = str(r[2] or "")
+            except Exception:
+                continue
+            path = mapping.get(rid) if mapping else None
+            if (not allow_all and path is not None
+                    and not _is_under_root(str(path or ""), input_root)):
+                continue
+            total += 1
+            st = None
+            d = disk.get(rid)
+            if isinstance(d, dict):
+                st = str(d.get("state") or "")
+            if st in DONE_STATES:
+                bucket = "done"
+            elif st in FAIL_STATES:
+                bucket = "failed"
+            elif st is None and (status.startswith("FAILED")
+                                 or status == "NO_SPEECH_DETECTED"):
+                bucket = "failed"
+            else:
+                bucket = "pending"
+            if bucket == "done":
+                done += 1
+            elif bucket == "failed":
+                failed += 1
+            else:
+                pending += 1
+            dt = (_dir_tail(os.path.dirname(str(path)))
+                  if path else "（无归属目录）")
+            g = groups.get(dt)
+            if g is None:
+                g = {"dir_tail": dt, "total": 0, "done": 0,
+                     "failed": 0, "pending": 0}
+                groups[dt] = g
+            g["total"] += 1
+            g[bucket] += 1
+        out.update({"total": total, "done": done, "failed": failed,
+                    "pending": pending, "groups": list(groups.values())})
+        return out
+    except Exception:
+        return out
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
 
 
 def _finder_url(abs_path: str) -> str:
@@ -1432,7 +1771,8 @@ def _norm_profile_for_new_jobs(data_root: str) -> dict:
 
 
 def _render_profile_for_new_jobs() -> dict:
-    """新转写用 Render profile：stage9 V2.5 分段参数（target 120/封顶 200）。"""
+    """新转写用 Render profile：stage9 分段参数单源头（para-v2.6 目标80/
+    封顶120/防碎30），与生产后处理同读 PARA_PARAMS_V2。"""
     from stage9 import formatter_v2 as _fv9  # noqa: E402  (只读复用)
 
     return _fv9.new_render_profile()
@@ -1441,8 +1781,9 @@ def _render_profile_for_new_jobs() -> dict:
 def _apply_v25_postpass(job_dir: str, norm_final_path: str | None,
                         rend_final_path: str, title: str,
                         render_profile: dict) -> dict:
-    """V2.5 P0-1 生产后处理：冻结引擎已 mint revision 不断链，app 侧用
-    ``render_with_v2``（引擎+200封顶+40防碎同一纯函数）重算并覆写 md。
+    """生产后处理：冻结引擎已 mint revision 不断链，app 侧用
+    ``render_with_v2``（引擎+hard_max封顶+min防碎同一纯函数，阈值全取
+    stage9.PARA_PARAMS_V2 单源头）重算并覆写 md。para-v2.6：120/30。
 
     - 只改 app/ + 复用 stage9 纯函数与 stage3 assemble（只读复用），
       不碰 src 他 stage 文件，不自创 mechanics（选 review 三选一之②
@@ -1642,6 +1983,179 @@ def _handle_vocab_del(body: bytes) -> tuple[int, dict]:
                  "message": "已删除：%s（新转写不再应用）" % (wrong_s,)}
 
 
+# ------------------------------------------------- V2.6 预置词库（三域一键导入）
+#
+# 预置词库文件：app/presets/vocab/*.json（随仓库只读，运行时绝不改写）。
+# 每个文件 {"domain","label","version","source","entries":[{"wrong","right"}]}；
+# 目录扫描发现域 => 新增一个 json 即新增一域（可扩展），无需改 server。
+# 导入 = 合并进 <data_root>/vocab-user.json：已存在的错词跳过（保留用户自定，
+# 不覆盖），撞内置基表（stage9 full_table patterns）的整条拒收并回报，
+# 非法/超长/错词<2字同样拒收；内容变化 => _user_rules_revision 哈希变 =>
+# revision bump，新转写自动应用（Case4 语义，whisper 不重跑）。
+
+VOCAB_PRESET_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "presets", "vocab")
+VOCAB_PRESET_REPORT_MAX = 20
+
+
+def _read_vocab_preset(path: str) -> dict | None:
+    """读单个预置词库文件（只读；缺失/损坏/结构不符回 None）。"""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("entries")
+    if not isinstance(raw, list):
+        return None
+    entries = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        wrong = item.get("wrong")
+        right = item.get("right")
+        if not isinstance(wrong, str) or not isinstance(right, str):
+            continue
+        wrong, right = wrong.strip(), right.strip()
+        if len(wrong) >= 2 and right and wrong != right:
+            entries.append({"wrong": wrong, "right": right})
+    stem = os.path.splitext(os.path.basename(path))[0]
+    domain = str(data.get("domain") or stem).strip() or stem
+    label = str(data.get("label") or domain).strip() or domain
+    return {"domain": domain, "label": label,
+            "file": os.path.basename(path),
+            "version": data.get("version"),
+            "source": data.get("source"),
+            "entries": entries}
+
+
+def _load_vocab_presets() -> list:
+    """扫描预置目录（新增文件即新增域，可扩展；坏文件跳过不炸）。"""
+    try:
+        names = sorted(os.listdir(VOCAB_PRESET_DIR))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if not name.lower().endswith(".json"):
+            continue
+        preset = _read_vocab_preset(os.path.join(VOCAB_PRESET_DIR, name))
+        if preset is not None and preset["entries"]:
+            out.append(preset)
+    return out
+
+
+def _handle_vocab_presets_get() -> tuple[int, dict]:
+    """预置词库清单（只读元数据，不含全部条目）。"""
+    presets = _load_vocab_presets()
+    return 200, {"ok": True, "presets": [
+        {"domain": p["domain"], "label": p["label"], "count": len(p["entries"]),
+         "version": p["version"], "source": p["source"], "file": p["file"]}
+        for p in presets]}
+
+
+def _handle_vocab_presets_import(body: bytes) -> tuple[int, dict]:
+    """预置域一键导入：合并进用户词库并 bump revision（撞基表拒收）。"""
+    try:
+        params = json.loads(body.decode("utf-8")) if body.strip() else {}
+    except (ValueError, UnicodeDecodeError):
+        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
+    if not isinstance(params, dict):
+        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
+    data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
+    want_raw = params.get("domains")
+    if not isinstance(want_raw, list):
+        return 400, {"ok": False, "error": "请传 domains 数组（勾选的领域）"}
+    want = [str(d).strip() for d in want_raw if str(d).strip()]
+    if not want:
+        return 400, {"ok": False, "error": "先勾选至少一个领域再导入"}
+    by_domain = {p["domain"]: p for p in _load_vocab_presets()}
+    unknown = [d for d in want if d not in by_domain]
+    if len(unknown) == len(want):
+        return 400, {"ok": False,
+                     "error": "未知领域：%s（刷新后重试）" % (",".join(unknown),)}
+    try:
+        from stage9 import rules_v2 as _r9  # noqa: E402  (基表 patterns)
+
+        base_patterns = {p for p, _ in _r9.full_table()}
+    except Exception:
+        base_patterns = set()
+    entries = _load_vocab_entries(data_root)
+    entries_before = list(entries)
+    existing = {e["wrong"] for e in entries}
+    added = 0
+    skipped_dup = 0
+    rejected_base: list = []
+    rejected_invalid: list = []
+    dropped_overflow = 0
+    for domain in want:
+        preset = by_domain.get(domain)
+        if preset is None:
+            continue
+        for cand in preset["entries"]:
+            wrong, right = cand["wrong"], cand["right"]
+            if wrong in base_patterns:
+                rejected_base.append(wrong)
+                continue
+            if wrong in existing:
+                skipped_dup += 1
+                continue
+            err = _validate_vocab_pair(wrong, right, existing, base_patterns)
+            if err is not None:
+                rejected_invalid.append(wrong)
+                continue
+            if len(entries) >= VOCAB_MAX_ENTRIES:
+                dropped_overflow += 1
+                continue
+            entries.append({"wrong": wrong, "right": right})
+            existing.add(wrong)
+            added += 1
+    if added:
+        # 先落盘后注册；注册撞内存冲突则删回文件保一致（同 _handle_vocab_add）。
+        try:
+            _save_vocab_entries(data_root, entries)
+        except OSError as exc:
+            return 500, {"ok": False,
+                         "error": "词库保存失败，未生效：%s→检查磁盘空间/目录权限后重试"
+                                  % (exc,)}
+        try:
+            reg = _register_user_rules(entries)
+        except ValueError as exc:
+            try:
+                _save_vocab_entries(data_root, entries_before)
+            except Exception:
+                pass
+            return 400, {"ok": False, "error": str(exc)}
+        revision = reg["rules_revision"]
+    else:
+        revision = _user_rules_revision(entries)
+    labels = "/".join(by_domain[d]["label"] for d in want if d in by_domain)
+    parts = ["已导入 %s 共 %d 条" % (labels or "-", added)]
+    if skipped_dup:
+        parts.append("跳过已存在 %d 条" % (skipped_dup,))
+    if rejected_base:
+        parts.append("撞内置词库拒收 %d 条" % (len(rejected_base),))
+    if rejected_invalid:
+        parts.append("非法拒收 %d 条" % (len(rejected_invalid),))
+    if dropped_overflow:
+        parts.append("词库已满丢弃 %d 条" % (dropped_overflow,))
+    if unknown:
+        parts.append("未知领域忽略：%s" % (",".join(unknown),))
+    return 200, {"ok": True, "data_root": data_root, "domains": want,
+                 "added": added, "skipped_duplicate": skipped_dup,
+                 "rejected_base": rejected_base[:VOCAB_PRESET_REPORT_MAX],
+                 "rejected_base_count": len(rejected_base),
+                 "rejected_invalid": rejected_invalid[:VOCAB_PRESET_REPORT_MAX],
+                 "rejected_invalid_count": len(rejected_invalid),
+                 "dropped_overflow": dropped_overflow,
+                 "unknown_domains": unknown,
+                 "vocab": entries, "count": len(entries),
+                 "revision": revision,
+                 "message": "；".join(parts) + "。新转写自动应用。"}
+
+
 def _handle_status(query: dict) -> tuple[int, dict]:
     data_root = (query.get("data_root") or [DEFAULT_DATA_ROOT])[0] or DEFAULT_DATA_ROOT
     data_root = normalize_path(data_root) or DEFAULT_DATA_ROOT
@@ -1652,6 +2166,7 @@ def _handle_status(query: dict) -> tuple[int, dict]:
     limit = max(1, min(limit, 200))
     snap = collect(data_root, limit=limit)
     # P0-2：默认只返回当前 input_root 的 runs（传参优先，监听态兜底）
+    eff = ""
     try:
         raw_ir = (query.get("input_root") or [""])[0]
         eff = normalize_path(raw_ir)
@@ -1667,6 +2182,17 @@ def _handle_status(query: dict) -> tuple[int, dict]:
     try:
         if isinstance(snap, dict) and snap.get("ok"):
             snap = _attach_source_filenames(snap, data_root)
+    except Exception:
+        pass
+    # UX2-P0-1：全量分桶 + 截断明示（列表头 共N/成功/失败/排队，禁静默截断）
+    try:
+        if isinstance(snap, dict) and snap.get("ok"):
+            summary = _scoped_runs_summary(data_root, eff)
+            summary["shown"] = len(snap.get("recent_runs") or [])
+            summary["truncated"] = (int(summary.get("total") or 0)
+                                    > int(summary["shown"]))
+            summary["limit"] = limit
+            snap["run_summary"] = summary
     except Exception:
         pass
     return 200, snap
@@ -1960,8 +2486,8 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
         fh.write("\n")
 
     # 3. Norm / Render（stage3 公开 API）
-    # V2.5：Norm 用用户词库 profile（新转写自动应用，Case4 语义），
-    # Render 用 stage9 V2.5 分段 profile（target 120/封顶 200）。
+    # Norm 用用户词库 profile（新转写自动应用，Case4 语义），
+    # Render 用 stage9 分段 profile（para-v2.6 目标80/封顶120/防碎30，单源头）。
     from stage3 import normalize as _norm  # noqa: E402  (只读复用)
     from stage3 import render as _rend  # noqa: E402  (只读复用)
 
@@ -1999,8 +2525,9 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
             _render_profile,
             title=stem, canonical_probe_path=canonical_probe,
             source_id=source_id, run_id=run_id)
-        # V2.5 P0-1 生产后处理（新转写入口）：冻结引擎已 mint 不断链，
-        # app 侧用 render_with_v2 重算覆写，保证 200 封顶/40 防碎生效。
+        # 生产后处理（新转写入口）：冻结引擎已 mint 不断链，app 侧用
+        # render_with_v2 重算覆写，阈值取 stage9.PARA_PARAMS_V2 单源头
+        # （para-v2.6：目标80/封顶120/防碎30）。
         try:
             _fix = _apply_v25_postpass(
                 job_dir, norm.get("final_path"), rend.get("final_path"),
@@ -2389,7 +2916,13 @@ def _handle_start_post(body: bytes) -> tuple[int, dict]:
 
 
 def _handle_stop_post(body: bytes) -> tuple[int, dict]:
-    """UX-P0-2：停监听＋停 worker 轮询，锁回未监听（幂等）。"""
+    """UX-P0-2/UX2-P1-6：停监听＋停 worker 轮询；当前任务会跑完收尾。
+
+    实现真相（写死）：停在“接新任务”这一层——正在转的这一个会跑完收尾
+    （不清 current、不假报 worker 停），worker 线程收尾后自行清 current 并退出。
+    因此这里不立即清 _worker["current"]，由前端据 current 显示“正在收尾…”，
+    current 清空即为真停（重起后已完成跳过、半截重转）。
+    """
     with _state_lock:
         was = bool(_listener.get("running"))
         _listener["running"] = False
@@ -2397,7 +2930,7 @@ def _handle_stop_post(body: bytes) -> tuple[int, dict]:
         _listener["error_code"] = None
         _listener["suggested_data_root"] = None
         box = _handle.get("box")
-    # 停 watcher/workers（best-effort，不炸）
+    # 停 watcher/workers（best-effort，不炸）；app 自己的 worker 线程按 listener 标志退出
     try:
         if isinstance(box, dict):
             try:
@@ -2419,13 +2952,16 @@ def _handle_stop_post(body: bytes) -> tuple[int, dict]:
     except Exception:
         pass
     with _state_lock:
-        _worker["current"] = None
-        try:
-            _worker["running"] = False
-        except Exception:
-            pass
         _handle["box"] = None
-    return 200, {"ok": True, "running": False, "was_running": was}
+        cur = dict(_worker["current"]) if _worker.get("current") else None
+    finishing = bool(cur and cur.get("run_id"))
+    if finishing:
+        msg = ("已停止接新任务，当前这个（%s）会跑完收尾；"
+               "重起后已完成跳过、半截重转。" % (cur.get("filename") or "当前任务",))
+    else:
+        msg = "已停止接新任务；重起后已完成跳过、半截重转。"
+    return 200, {"ok": True, "running": False, "was_running": was,
+                 "finishing": finishing, "current": cur, "message": msg}
 
 
 def _handle_retry_post(body: bytes) -> tuple[int, dict]:
@@ -2484,7 +3020,7 @@ def _handle_retry_post(body: bytes) -> tuple[int, dict]:
 
 
 def _handle_clear_post(body: bytes) -> tuple[int, dict]:
-    """P0-2：清空本目录任务。
+    """UX2-P0-2/P1-3：清空本目录任务（先明示代价、可只清失败、给撤销指引）。
 
     删当前 input 的 discovery_candidates + processing_runs 记录级联
     （artifacts / Stage3+ 修订 / publish_records / archive / state_events
@@ -2492,8 +3028,11 @@ def _handle_clear_post(body: bytes) -> tuple[int, dict]:
     内存 worker 痕迹）。源视频文件不动、vault md 不动、他 input 的行不动、
     其他 data_root 不动。删完后重起监听会把文件当新任务重新发现（可重转）。
 
-    P1-3：运行中拒清（409人话，需先停止）；空归属/NULL archive 纳入清理
-    （门侧 fail-closed 计挡住，清理侧同步可清，否则清不掉却挡门不一致）。
+    - dry_run=true：只读算代价（将删 DB N 条＋jobs M 个 / 成功A失败B排队C /
+      预计重转约 X 分钟），不写库、不删盘，供“清空前明示代价”。
+    - only_failed=true：只删失败 run 及其修订链与 jobs，成功记录保留。
+    - P1-3：运行中拒清（409人话，需先停止）；空归属/NULL archive 纳入清理
+      （门侧 fail-closed 计挡住，清理侧同步可清，否则清不掉却挡门不一致）。
     """
     try:
         params = json.loads(body.decode("utf-8")) if body.strip() else {}
@@ -2501,12 +3040,10 @@ def _handle_clear_post(body: bytes) -> tuple[int, dict]:
         return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
     if not isinstance(params, dict):
         return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    with _state_lock:
-        if _listener.get("running"):
-            return 409, {"ok": False,
-                         "error": "正在监听/转写中，请先点停止再清空（运行中清空会丢任务）"}
     data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
     input_root = normalize_path(params.get("input_root"))
+    dry_run = bool(params.get("dry_run"))
+    only_failed = bool(params.get("only_failed"))
     if not os.path.isabs(data_root):
         return 400, {"ok": False, "error": "数据目录须为绝对路径，请点浏览重选"}
     if not input_root:
@@ -2518,15 +3055,68 @@ def _handle_clear_post(body: bytes) -> tuple[int, dict]:
         return 404, {"ok": False,
                      "error": "该数据目录下还没有任务库，无需清空：%s" % (db_path,)}
 
+    # ---- dry_run：只读算代价，不写库、不删盘 ----
+    if dry_run:
+        con = _open_ro(data_root)
+        if con is None:
+            return 500, {"ok": False,
+                         "error": "任务库暂时读不出，请稍后重试或检查数据目录"}
+        try:
+            plan = _clear_plan(con, data_root, input_root, only_failed=False)
+        except Exception as exc:
+            return 500, {"ok": False,
+                         "error": "核对清空代价失败：%s，稍后重试" % (exc,)}
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+        if not plan.get("exists"):
+            return 200, {"ok": True, "dry_run": True, "no_tasks": True,
+                         "data_root": data_root, "input_root": input_root,
+                         "message": "本目录下没有任务记录，无需清空"}
+        full_runs = len(plan["run_ids"])
+        full_jobs = _count_job_dirs(data_root, plan["run_ids"])
+        of_runs = len(plan["fail_run_ids"])
+        of_jobs = _count_job_dirs(data_root, plan["fail_run_ids"])
+        preview = {
+            "db_runs": full_runs, "jobs": full_jobs,
+            "total": plan["total"], "success": plan["success"],
+            "failed": plan["failed"], "pending": plan["pending"],
+            "est_retranscribe_minutes": _est_retranscribe_minutes(full_runs),
+            "avg_sec_per_video": CLEAR_AVG_SEC_PER_VIDEO,
+            "only_failed": {
+                "db_runs": of_runs, "jobs": of_jobs,
+                "est_retranscribe_minutes": _est_retranscribe_minutes(of_runs),
+                "kept_success": plan["success"],
+            },
+            "vault_note": "笔记库 md 与源视频不动",
+        }
+        msg = ("将删DB %d条＋jobs %d个；vault md 与源视频不动；"
+               "重起需重转约%d分钟（按每条约%d秒估算）。"
+               % (full_runs, full_jobs,
+                  preview["est_retranscribe_minutes"],
+                  CLEAR_AVG_SEC_PER_VIDEO))
+        if plan["failed"] > 0:
+            msg += ("失败%d条建议先在失败行逐条点「重试」，确需清空再清。"
+                    % (plan["failed"],))
+        return 200, {"ok": True, "dry_run": True, "data_root": data_root,
+                     "input_root": input_root, "preview": preview,
+                     "message": msg}
+
+    # ---- 实清：运行中拒清（P1-3），需先停止 ----
+    with _state_lock:
+        if _listener.get("running"):
+            return 409, {"ok": False,
+                         "error": "正在监听/转写中，请先点停止再清空（运行中清空会丢任务）"}
+
     # 开库：锁在手则走 store 门，否则直连读写（同进程，busy 等待），禁碰他库
     con = None
-    use_store = False
     try:
         from stage2 import store as _st  # noqa: E402
 
         if _st.is_held(data_root):
             con = _st.open_db(data_root)
-            use_store = True
     except Exception:
         con = None
     if con is None:
@@ -2543,128 +3133,31 @@ def _handle_clear_post(body: bytes) -> tuple[int, dict]:
                "normalization_revisions": 0, "render_revisions": 0,
                "publish_records": 0, "archive_commits": 0, "state_events": 0,
                "job_dirs": 0}
+    plan = None
+    run_ids = []
     try:
-        src_rows = con.execute(
-            "SELECT source_id FROM sources").fetchall()
-        # 归属判定需路径：另查 current_path/path_identity_key
-        path_rows = con.execute(
-            "SELECT source_id, current_path, path_identity_key FROM sources"
-        ).fetchall()
-        scope_srcs = set()
-        unatt_srcs = set()
-        for r in path_rows:
-            try:
-                cur, pik = r[1], r[2]
-                if (cur and _is_under_root(str(cur), input_root)) or (
-                        not cur and pik and _is_under_root(str(pik), input_root)):
-                    scope_srcs.add(r[0])
-                cur_s = str(cur).strip() if cur else ""
-                pik_s = str(pik).strip() if pik else ""
-                if not cur_s and not pik_s:
-                    unatt_srcs.add(r[0])
-            except Exception:
-                continue
-        # P1-3 门清一致：空归属源门侧计挡住，清理侧同步可清（任一目录清空即带走）
-        eff_srcs = set(scope_srcs) | set(unatt_srcs)
-        try:
-            all_src_ids = {rr[0] for rr in src_rows}
-        except Exception:
-            all_src_ids = set(eff_srcs)
-        # 孤儿 run（source_id NULL/悬空）门侧计挡住，清理侧同步可清
-        try:
-            orphan_rows = con.execute(
-                "SELECT run_id, source_id FROM processing_runs"
-            ).fetchall()
-        except Exception:
-            orphan_rows = []
-        orphan_run_ids = []
-        for rr in orphan_rows:
-            try:
-                _rid, _sid = rr[0], rr[1] if len(rr) > 1 else None
-            except Exception:
-                continue
-            if _sid is None or _sid not in all_src_ids:
-                orphan_run_ids.append(_rid)
-        try:
-            null_arch_rows = con.execute(
-                "SELECT archive_commit_id FROM archive_commits"
-                " WHERE source_id IS NULL"
-            ).fetchall()
-            null_arch_ids = [rr[0] for rr in null_arch_rows]
-        except Exception:
-            null_arch_ids = []
-        if not eff_srcs and not orphan_run_ids and not null_arch_ids:
+        plan = _clear_plan(con, data_root, input_root,
+                           only_failed=only_failed)
+        if not plan.get("exists"):
             try:
                 con.close()
             except Exception:
                 pass
             return 200, {"ok": True, "data_root": data_root,
                          "input_root": input_root, "cleared": cleared,
+                         "only_failed": only_failed,
                          "message": "本目录下没有任务记录，无需清空"}
+        eff_srcs = set(plan["srcs_to_del"])
+        run_ids = list(plan["run_ids"])
+        cand_ids = plan["cand_ids"]
+        norm_ids = plan["norm_ids"]
+        rend_ids = plan["rend_ids"]
+        pub_ids = plan["pub_ids"]
+        art_ids = plan["art_ids"]
+        entity_ids = set(plan["entity_ids"])
         qmarks = ",".join("?" for _ in eff_srcs) if eff_srcs else None
         s_list = list(eff_srcs)
-        if eff_srcs:
-            run_rows = con.execute(
-                "SELECT run_id FROM processing_runs WHERE source_id IN (%s)"
-                % qmarks, s_list).fetchall()
-            run_ids = [r[0] for r in run_rows]
-        else:
-            run_ids = []
-        # 孤儿 run 并入本次清理（去重）
-        for _oid in orphan_run_ids:
-            if _oid not in run_ids:
-                run_ids.append(_oid)
         rmarks = ",".join("?" for _ in run_ids) if run_ids else None
-        # 修订链：raw_artifact_id=raw_<run_id> 逐级归属
-        norm_rows = con.execute(
-            "SELECT normalization_revision_id, normalized_artifact_id,"
-            " raw_artifact_id FROM normalization_revisions").fetchall()
-        norm_ids, norm_artifacts = [], []
-        for r in norm_rows:
-            raw = r[2]
-            rid = (raw[len("raw_"):]
-                   if isinstance(raw, str) and raw.startswith("raw_") else None)
-            if rid in (set(run_ids) if run_ids else set()):
-                norm_ids.append(r[0])
-                norm_artifacts.append(r[1])
-        rend_rows = con.execute(
-            "SELECT render_revision_id FROM render_revisions"
-            " WHERE normalized_artifact_id IN (%s)" % ",".join("?" for _ in norm_artifacts),
-            norm_artifacts).fetchall() if norm_artifacts else []
-        rend_ids = [r[0] for r in rend_rows]
-        pub_rows = con.execute(
-            "SELECT publish_record_id FROM publish_records"
-            " WHERE render_revision_id IN (%s)" % ",".join("?" for _ in rend_ids),
-            rend_ids).fetchall() if rend_ids else []
-        pub_ids = [r[0] for r in pub_rows]
-        if eff_srcs:
-            art_rows = con.execute(
-                "SELECT artifact_id FROM artifacts WHERE source_id IN (%s)%s"
-                % (qmarks, (" OR run_id IN (%s)" % ",".join("?" for _ in run_ids))
-                   if run_ids else ""),
-                s_list + (run_ids if run_ids else [])).fetchall()
-        elif run_ids:
-            art_rows = con.execute(
-                "SELECT artifact_id FROM artifacts WHERE run_id IN (%s)"
-                % ",".join("?" for _ in run_ids),
-                run_ids).fetchall()
-        else:
-            art_rows = []
-        art_ids = [r[0] for r in art_rows]
-        cand_rows = con.execute(
-            "SELECT candidate_id, path_identity_key, source_id"
-            " FROM discovery_candidates").fetchall()
-        cand_ids = []
-        for r in cand_rows:
-            try:
-                if r[2] in eff_srcs or (
-                        r[1] and _is_under_root(str(r[1]), input_root)):
-                    cand_ids.append(r[0])
-            except Exception:
-                continue
-        entity_ids = (set(cand_ids) | set(eff_srcs) | set(run_ids)
-                      | set(norm_ids) | set(rend_ids) | set(pub_ids)
-                      | set(art_ids) | set(null_arch_ids))
         con.execute("BEGIN IMMEDIATE")
         try:
             if entity_ids:
@@ -2709,13 +3202,15 @@ def _handle_clear_post(body: bytes) -> tuple[int, dict]:
                     s_list).rowcount or 0
             else:
                 cleared["archive_commits"] = 0
-            # P1-3：NULL archive 门侧计 BLOCK，清理侧同步删掉（否则清不掉却挡门）
-            try:
-                cleared["archive_commits"] += con.execute(
-                    "DELETE FROM archive_commits WHERE source_id IS NULL"
-                ).rowcount or 0
-            except Exception:
-                pass
+            # P1-3：NULL archive 门侧计 BLOCK，全清时同步删掉（清不掉却挡门）；
+            # UX2-P0-2 只清失败路径不带走 NULL archive（避免误伤其他目录）。
+            if not only_failed:
+                try:
+                    cleared["archive_commits"] += con.execute(
+                        "DELETE FROM archive_commits WHERE source_id IS NULL"
+                    ).rowcount or 0
+                except Exception:
+                    pass
             if eff_srcs:
                 cleared["sources"] = con.execute(
                     "DELETE FROM sources WHERE source_id IN (%s)" % qmarks,
@@ -2766,10 +3261,21 @@ def _handle_clear_post(body: bytes) -> tuple[int, dict]:
                     _worker["current"] = None
             except Exception:
                 pass
+    kept_success = int((plan or {}).get("kept_success") or 0)
+    if only_failed:
+        msg = ("已清 %d 条失败记录（成功 %d 条保留），源视频与笔记未动"
+               % (cleared["runs"], kept_success))
+    else:
+        msg = ("已清空本目录 %d 个任务记录（源视频与笔记未动）"
+               % (cleared["runs"],))
+    undo = ("撤销指引：本次只删本数据目录下的任务记录与 jobs 中间文件，"
+            "vault 笔记 md 与源视频未动。清空前若用的是另一个数据目录，"
+            "把「数据目录」换回旧路径即可看到旧记录；本目录已删记录无法自动恢复，"
+            "但源视频还在，随时可重起重新生成。")
     return 200, {"ok": True, "data_root": data_root, "input_root": input_root,
-                 "cleared": cleared,
-                 "message": "已清空本目录 %d 个任务记录（源视频与笔记未动）"
-                            % (cleared["runs"],)}
+                 "cleared": cleared, "only_failed": only_failed,
+                 "kept_success": kept_success,
+                 "message": msg, "undo": undo}
 
 
 def _handle_reveal_post(body: bytes) -> tuple[int, dict]:
@@ -2811,6 +3317,33 @@ def _handle_reveal_post(body: bytes) -> tuple[int, dict]:
                      "error": "在访达中定位失败：%s→检查文件是否存在" % (exc,)}
 
 
+def _note_user_edited(data_root: str, run_id: str) -> bool:
+    """UX2-P1-4：读 jobs/<run_id>/manifest.json 判定 No-Clobber 跳过（只读）。
+
+    命中 publish_status=BLOCKED_OUTPUT_CONFLICT 或 verdict 含“库内…改过/
+    跳过”即视为“库内你改过，重跑会跳过”。任何异常回 False（fail-open）。
+    """
+    try:
+        mp = os.path.join(_jobs_dir(data_root), str(run_id), "manifest.json")
+        if not os.path.isfile(mp):
+            return False
+        with open(mp, "r", encoding="utf-8") as fh:
+            mani = json.load(fh)
+        for r in reversed(mani.get("receipts") or []):
+            if not isinstance(r, dict):
+                continue
+            if str(r.get("publish_status") or "") == "BLOCKED_OUTPUT_CONFLICT":
+                return True
+            v = str(r.get("verdict") or "")
+            if "BLOCKED_OUTPUT_CONFLICT" in v:
+                return True
+            if "改过" in v and ("跳过" in v or "未覆盖" in v):
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _handle_note(query: dict) -> tuple[int, dict]:
     """P0-3/V2.3：右侧笔记预览。点行后返回该 run 输出 md 正文（超长截断+注明）。
 
@@ -2840,6 +3373,21 @@ def _handle_note(query: dict) -> tuple[int, dict]:
             md_path = entry.get("canonical_output_path") or entry.get("rendered_path")
         elif state in ("RENDER_ONLY", "PUBLISH_BLOCKED", "FAIL"):
             md_path = entry.get("rendered_path") or entry.get("canonical_output_path")
+    # UX2-P1-4：No-Clobber 预览状态行（复用后端判定，只读不落盘）
+    user_edited = False
+    try:
+        user_edited = _note_user_edited(data_root, run_id)
+    except Exception:
+        user_edited = False
+    note_hint = None
+    try:
+        if state == "PUBLISHED":
+            note_hint = ("库内你改过，重跑会跳过不覆盖，新稿只留数据目录"
+                         if user_edited else "库内未改，重跑会更新")
+        elif state == "PUBLISH_BLOCKED" and user_edited:
+            note_hint = "库内你改过，重跑会跳过不覆盖，新稿只留数据目录"
+    except Exception:
+        note_hint = None
     if isinstance(md_path, str) and md_path and os.path.isfile(md_path):
         try:
             with open(md_path, "r", encoding="utf-8", errors="replace") as fh:
@@ -2852,6 +3400,7 @@ def _handle_note(query: dict) -> tuple[int, dict]:
                          "finder_url": _finder_url(md_path),
                          "ob_url": None,
                          "ob_reason": "笔记文件不可读",
+                         "user_edited": user_edited, "note_hint": note_hint,
                          "vault_configured": bool(vault_root),
                          "vault_registered": _vault_registered}
         total = len(full)
@@ -2869,6 +3418,7 @@ def _handle_note(query: dict) -> tuple[int, dict]:
                      "stage_text": None, "text": text, "truncated": truncated,
                      "total_chars": total, "finder_url": _finder_url(md_path),
                      "ob_url": ob_url, "ob_reason": ob_reason,
+                     "user_edited": user_edited, "note_hint": note_hint,
                      "vault_configured": bool(vault_root),
                      "vault_registered": _vault_registered}
     # 无 md：回阶段人话
@@ -2885,6 +3435,7 @@ def _handle_note(query: dict) -> tuple[int, dict]:
                  "finder_url": (_finder_url(md_path)
                                 if isinstance(md_path, str) and md_path else None),
                  "ob_url": ob_url, "ob_reason": ob_reason,
+                 "user_edited": user_edited, "note_hint": note_hint,
                  "vault_configured": bool(vault_root),
                  "vault_registered": _vault_registered}
 
@@ -3058,8 +3609,9 @@ def _reapply_one(data_root: str, run_id: str,
         if not os.path.isfile(new_rendered):
             return {"ok": False, "run_id": run_id,
                     "error": "新稿文件未生成，请稍后重试"}
-        # V2.5 P0-1 生产后处理（重跑入口）：冻结 derive 已 mint 不断链，
-        # 此处用 render_with_v2 重算覆写，保证 200 封顶/40 防碎生效。
+        # 生产后处理（重跑入口）：冻结 derive 已 mint 不断链，此处用
+        # render_with_v2 重算覆写，阈值取 stage9.PARA_PARAMS_V2 单源头
+        # （para-v2.6：目标80/封顶120/防碎30），与 append 入口同源。
         try:
             _norm_rev = str(out.get("normalization_revision_id") or "")
             _norm_path = os.path.join(
@@ -3315,6 +3867,10 @@ class Handler(BaseHTTPRequestHandler):
             code, obj = _handle_vocab_get(urllib.parse.parse_qs(parsed.query))
             _send_json(self, code, obj)
             return
+        if parsed.path == "/api/vocab/presets":
+            code, obj = _handle_vocab_presets_get()
+            _send_json(self, code, obj)
+            return
         _send_json(self, 404, {"ok": False, "error": "未知路径，请刷新后重试"})
 
     def do_POST(self):  # noqa: N802
@@ -3352,6 +3908,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/vocab/delete":
                 code, obj = _handle_vocab_del(body)
+                _send_json(self, code, obj)
+                return
+            if parsed.path == "/api/vocab/presets/import":
+                code, obj = _handle_vocab_presets_import(body)
                 _send_json(self, code, obj)
                 return
             if parsed.path == "/api/reapply":

@@ -23,7 +23,9 @@ from stage9.formatter_v2 import (
     FormatterError,
     check_rule_order,
     new_render_profile,
+    postprocess_paragraphs,
     render_with_v2,
+    split_segments_for_engine,
 )
 from stage9.derive_v2 import (
     DeriveV2Error,
@@ -50,7 +52,9 @@ __all__ = [
     "full_table",
     "new_normalization_profile",
     "new_render_profile",
+    "postprocess_paragraphs",
     "register_rules",
     "render_with_v2",
+    "split_segments_for_engine",
     "validate_rules",
 ]

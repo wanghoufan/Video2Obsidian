@@ -60,6 +60,10 @@ _listener = {
     "error_code": None,
     "suggested_data_root": None,
     "started_at": None,
+    # V2.2补修 P0-1/P0-3：全终态放行计数+人话（绿条用，BLOCK时为0/空）
+    "skipped_terminal": 0,
+    "skipped_terminal_rows": 0,
+    "startup_note": None,
 }
 # P0-3 后端记忆：内存记 last_config，前端 localStorage 为主、后端为辅
 _last_config = {
@@ -147,9 +151,134 @@ def _is_under_root(src_path: str, input_root: str) -> bool:
 # 一键换新数据目录（_humanize_startup_error），如实二选一中的后者。
 # fail-closed：过滤链上任何解不出的归属一律计为挡住，不静默放行。
 
-_STARTUP_SCOPE = {"input_root": None}
+_STARTUP_SCOPE = {"input_root": None, "skipped_terminal_rows": 0,
+                  "skipped_terminal_runs": 0}
 _ORIG_ASSERTS: dict = {}
 NOTE_MAX_CHARS = 6000
+
+# V2.2补修 P0-1：终态集合（全终态旧账放行，仅半截拦；未知状态fail-closed计拦）。
+# src零碰，此处硬编码与src枚举对齐（normalize/render/publish_commit/commit）：
+#   norm: PENDING/NORMALIZING/COMMITTING -> 半截；COMPLETED/FAILED_* -> 终态
+#   rend: PUBLISH_EVALUATION/FAILED_* -> 终态，其余（含ARTIFACT_COMPLETED）半截
+#   pub: PUBLISHED/BLOCKED_*/CANONICAL_OUTPUT_EXISTS/PENDING_PUBLISH -> 终态
+#   arch: ARCHIVE_COMMITTED/ARCHIVED/COMMITTED -> 终态
+#   art: COMMITTED -> 终态（PREPARED为半截）
+_NORM_TERMINAL = frozenset({"COMPLETED", "FAILED_RETRYABLE",
+                            "FAILED_FINAL", "FAILED"})
+_REND_TERMINAL = frozenset({"PUBLISH_EVALUATION", "FAILED_RETRYABLE",
+                            "FAILED_FINAL", "FAILED"})
+_PUB_TERMINAL = frozenset({
+    "PUBLISHED",
+    "BLOCKED_OUTPUT_EXISTS", "BLOCKED_OUTPUT_CONFLICT",
+    "BLOCKED_UNSUPPORTED_OUTPUT_FILESYSTEM",
+    "BLOCKED_UNSUPPORTED_ROOT_FOR_V1",
+    "CANONICAL_OUTPUT_EXISTS", "PENDING_PUBLISH",
+    "BLOCKED",
+})
+_ARCH_TERMINAL = frozenset({"ARCHIVE_COMMITTED", "ARCHIVED", "COMMITTED"})
+_ART_TERMINAL = frozenset({"COMMITTED"})
+
+
+def _is_norm_terminal(s) -> bool:
+    try:
+        t = str(s or "").strip()
+    except Exception:
+        return False
+    if t in _NORM_TERMINAL:
+        return True
+    return t.startswith("FAILED")
+
+
+def _is_rend_terminal(s) -> bool:
+    try:
+        t = str(s or "").strip()
+    except Exception:
+        return False
+    if t in _REND_TERMINAL:
+        return True
+    return t.startswith("FAILED")
+
+
+def _is_pub_terminal(s) -> bool:
+    try:
+        t = str(s or "").strip()
+    except Exception:
+        return False
+    if t in _PUB_TERMINAL:
+        return True
+    return t.startswith("BLOCKED")
+
+
+def _is_arch_terminal(s) -> bool:
+    try:
+        t = str(s or "").strip()
+    except Exception:
+        return False
+    return t in _ARCH_TERMINAL
+
+
+def _is_art_terminal(s) -> bool:
+    try:
+        t = str(s or "").strip()
+    except Exception:
+        return False
+    return t in _ART_TERMINAL
+
+
+def _db_success_run_ids_ro(data_root: str, input_root: str) -> set:
+    """DB成功旧账run_id（norm COMPLETED归属当前input，只读fail-open）。
+
+    P0-2缺口补齐：磁盘manifest缺失但DB已COMPLETED时仍跳过，不得重转
+    （whisper不再跑）。失败/半截不在此集，走正常转写/重试。
+    """
+    try:
+        con = _open_ro(str(data_root))
+        if con is None:
+            return set()
+        try:
+            scoped = _scoped_source_ids(con, str(input_root))
+            if not scoped:
+                return set()
+            try:
+                run2src = {r[0]: r[1] for r in con.execute(
+                    "SELECT run_id, source_id FROM processing_runs").fetchall()}
+            except Exception:
+                return set()
+            out: set = set()
+            try:
+                rows = con.execute(
+                    "SELECT raw_artifact_id, status"
+                    " FROM normalization_revisions").fetchall()
+            except Exception:
+                return set()
+            for r in rows:
+                try:
+                    raw, st = r[0], (r[1] if len(r) > 1 else None)
+                except Exception:
+                    continue
+                if str(st or "").strip() != "COMPLETED":
+                    continue
+                rid = None
+                try:
+                    if isinstance(raw, str) and raw.startswith("raw_"):
+                        rid = raw[len("raw_"):]
+                except Exception:
+                    rid = None
+                if not rid:
+                    continue
+                try:
+                    if run2src.get(rid) in scoped:
+                        out.add(rid)
+                except Exception:
+                    continue
+            return out
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+    except Exception:
+        return set()
 
 
 def _scoped_source_ids(con, input_root: str) -> set:
@@ -199,7 +328,15 @@ def _unattributable_source_ids(con) -> set:
 
 
 def _scoped_assert_stage3_tables_empty(con):
-    """按当前 input 过滤的 Stage3+ 空表断言（签名/异常文本与 src 原版一致）。"""
+    """按当前 input 过滤的 Stage3+ 半截断言（签名/异常文本与 src 原版一致）。
+
+    V2.2补修 P0-1：只拦非终态半截行，全终态旧账放行。
+      norm: 非COMPLETED/FAILED_* 才拦；rend: 非PUBLISH_EVALUATION/FAILED_* 才拦；
+      pub: 非PUBLISHED/BLOCKED_*/终态才拦；art: 非COMMITTED才拦；
+      arch: 非ARCHIVE_COMMITTED/ARCHIVED/COMMITTED才拦。
+    终态旧行计入 _STARTUP_SCOPE skipped（verdict 注明“旧X条已完成记录，本次跳过”，
+    fail-closed：归属解不出/状态未知一律计拦，不静默放行）。
+    """
     orig = _ORIG_ASSERTS.get("stage3")
     scope_root = _STARTUP_SCOPE.get("input_root")
     if not scope_root or orig is None:
@@ -233,55 +370,156 @@ def _scoped_assert_stage3_tables_empty(con):
                 return raw[len("raw_"):]
             return None
 
-        norm_map = {
-            r[0]: r[1]
-            for r in con.execute(
-                "SELECT normalized_artifact_id, raw_artifact_id"
+        try:
+            _norm_rows = con.execute(
+                "SELECT normalized_artifact_id, raw_artifact_id, status"
                 " FROM normalization_revisions"
             ).fetchall()
-        }
-        rend_map = {
-            r[0]: r[1]
-            for r in con.execute(
-                "SELECT render_revision_id, normalized_artifact_id"
+        except Exception:
+            _norm_rows = []
+        norm_map = {}
+        for _nr in _norm_rows:
+            try:
+                norm_map[_nr[0]] = _nr[1]
+            except Exception:
+                continue
+        try:
+            _rend_rows = con.execute(
+                "SELECT render_revision_id, normalized_artifact_id, status"
                 " FROM render_revisions"
             ).fetchall()
-        }
+        except Exception:
+            _rend_rows = []
+        rend_map = {}
+        for _rr in _rend_rows:
+            try:
+                rend_map[_rr[0]] = _rr[1]
+            except Exception:
+                continue
+        try:
+            _pub_rows = con.execute(
+                "SELECT render_revision_id, status FROM publish_records"
+            ).fetchall()
+        except Exception:
+            _pub_rows = []
+        try:
+            _arch_rows = con.execute(
+                "SELECT source_id, status FROM archive_commits"
+            ).fetchall()
+        except Exception:
+            _arch_rows = []
+        try:
+            _art_rows = con.execute(
+                "SELECT source_id, run_id, status FROM artifacts"
+            ).fetchall()
+        except Exception:
+            _art_rows = []
         counts = {}
-        n_norm = sum(
-            1
-            for r in con.execute(
-                "SELECT raw_artifact_id FROM normalization_revisions"
-            ).fetchall()
-            if _blocked_run(_run_of_raw(r[0]))
-        )
+        skipped_rows = 0
+        skipped_runs: set = set()
+        # norm：仅非终态计拦
+        n_norm = 0
+        for _nr in _norm_rows:
+            try:
+                _raw = _nr[1] if len(_nr) > 1 else None
+                _stt = _nr[2] if len(_nr) > 2 else None
+            except Exception:
+                continue
+            _rid = _run_of_raw(_raw)
+            if not _blocked_run(_rid):
+                continue
+            if _is_norm_terminal(_stt):
+                skipped_rows += 1
+                if _rid:
+                    skipped_runs.add(_rid)
+                continue
+            n_norm += 1
         counts["normalization_revisions"] = n_norm
-        n_rend = sum(
-            1
-            for r in con.execute(
-                "SELECT normalized_artifact_id FROM render_revisions"
-            ).fetchall()
-            if _blocked_run(_run_of_raw(norm_map.get(r[0])))
-        )
+        # rend：仅非终态计拦
+        n_rend = 0
+        for _rr in _rend_rows:
+            try:
+                _nart = _rr[1] if len(_rr) > 1 else None
+                _stt = _rr[2] if len(_rr) > 2 else None
+            except Exception:
+                continue
+            _rid = _run_of_raw(norm_map.get(_nart))
+            if not _blocked_run(_rid):
+                continue
+            if _is_rend_terminal(_stt):
+                skipped_rows += 1
+                if _rid:
+                    skipped_runs.add(_rid)
+                continue
+            n_rend += 1
         counts["render_revisions"] = n_rend
-        n_pub = sum(
-            1
-            for r in con.execute(
-                "SELECT render_revision_id FROM publish_records"
-            ).fetchall()
-            if _blocked_run(
-                _run_of_raw(norm_map.get(rend_map.get(r[0])))
-            )
-        )
+        # pub：仅非终态计拦
+        n_pub = 0
+        for _pr in _pub_rows:
+            try:
+                _rendid = _pr[0]
+                _stt = _pr[1] if len(_pr) > 1 else None
+            except Exception:
+                continue
+            _rid = _run_of_raw(norm_map.get(rend_map.get(_rendid)))
+            if not _blocked_run(_rid):
+                continue
+            if _is_pub_terminal(_stt):
+                skipped_rows += 1
+                if _rid:
+                    skipped_runs.add(_rid)
+                continue
+            n_pub += 1
         counts["publish_records"] = n_pub
-        n_arch = sum(
-            1
-            for r in con.execute(
-                "SELECT source_id FROM archive_commits"
-            ).fetchall()
-            if r[0] is None or r[0] in scoped or r[0] in unatt
-        )
+        # arch：仅非终态计拦（source 级归属）
+        n_arch = 0
+        for _ar in _arch_rows:
+            try:
+                _sid = _ar[0]
+                _stt = _ar[1] if len(_ar) > 1 else None
+            except Exception:
+                continue
+            if not (_sid is None or _sid in scoped or _sid in unatt):
+                continue
+            if _is_arch_terminal(_stt):
+                skipped_rows += 1
+                continue
+            n_arch += 1
         counts["archive_commits"] = n_arch
+        # art：仅非COMMITTED计拦（新增门：PREPARED半截拦，COMMITTED放行）
+        n_art = 0
+        for _ar2 in _art_rows:
+            try:
+                _sid2 = _ar2[0] if len(_ar2) > 0 else None
+                _rid2 = _ar2[1] if len(_ar2) > 1 else None
+                _stt2 = _ar2[2] if len(_ar2) > 2 else None
+            except Exception:
+                continue
+            _in_scope = False
+            try:
+                if _sid2 is None and _rid2 is None:
+                    _in_scope = True  # 归属解不出 fail-closed 计拦
+                elif _sid2 in scoped or _sid2 in unatt:
+                    _in_scope = True
+                elif _rid2 and _blocked_run(_rid2):
+                    _in_scope = True
+            except Exception:
+                _in_scope = True
+            if not _in_scope:
+                continue
+            if _is_art_terminal(_stt2):
+                skipped_rows += 1
+                if _rid2:
+                    skipped_runs.add(str(_rid2))
+                continue
+            n_art += 1
+        if n_art:
+            counts["artifacts"] = n_art
+        try:
+            _STARTUP_SCOPE["skipped_terminal_rows"] = int(skipped_rows)
+            _STARTUP_SCOPE["skipped_terminal_runs"] = int(len(skipped_runs))
+        except Exception:
+            pass
         nonzero = {t: c for t, c in counts.items() if c != 0}
         if nonzero:
             raise AssertionError(
@@ -345,6 +583,12 @@ def _install_scoped_gates(input_root: str) -> None:
     if "runstates" not in _ORIG_ASSERTS:
         _ORIG_ASSERTS["runstates"] = _st.assert_no_transcription_states
     _STARTUP_SCOPE["input_root"] = input_root
+    # V2.2补修：每轮清零旧账计数，避免上轮残留进绿条
+    try:
+        _STARTUP_SCOPE["skipped_terminal_rows"] = 0
+        _STARTUP_SCOPE["skipped_terminal_runs"] = 0
+    except Exception:
+        pass
     _st.assert_stage3_tables_empty = _scoped_assert_stage3_tables_empty
     _st.assert_no_transcription_states = _scoped_assert_no_transcription_states
 
@@ -1098,7 +1342,13 @@ def _save_vocab_entries(data_root: str, entries: list) -> None:
 
 def _validate_vocab_pair(wrong, right, existing_wrongs: set,
                          base_patterns: set) -> str | None:
-    """校验一对用户词；通过回 None，否则回人话错误。"""
+    """校验一对用户词；通过回 None，否则回人话错误。
+
+    V2.5 P1-2：wrong 最小长度≥2写死（CJK≥2 / 拉丁建议≥3二选一取≥2，
+    单字 a→b 会血洗全文已实证）；单字/纯标点/纯空格直接拒收。
+    2-3字短词放行但由调用方二次确认+回显预警（见 _handle_vocab_add
+    与前端 confirm）；大小写变体疑似重复由调用方提示（非阻塞）。
+    """
     if not isinstance(wrong, str) or not wrong.strip():
         return "错词不能为空（填转写里听错的样子，如iste）"
     if not isinstance(right, str) or not right.strip():
@@ -1108,6 +1358,18 @@ def _validate_vocab_pair(wrong, right, existing_wrongs: set,
         return "错词和正词一样，无需添加"
     if len(wrong) > VOCAB_MAX_SIDE_CHARS or len(right) > VOCAB_MAX_SIDE_CHARS:
         return "单条超 %d 字，请拆短再加" % (VOCAB_MAX_SIDE_CHARS,)
+    # P1-2 最小长度门：单字直接拒收（a→b 血洗 7 处已实证）。
+    if len(wrong) < 2:
+        return "错词至少2个字（单字替换会误伤全文，如a→b，请加长后再试）"
+    # 纯标点/纯空格拒收（strip 后全标点即无检索意义）。
+    try:
+        import string as _string
+        _punct = set(_string.punctuation) | set(
+            "，。、；：！？…「」『』（）【】《》〈〉·—–・、。,.!?;:\"'()[]{}<>~@#$%^&*-+=|\\/…")
+        if wrong and all((ch in _punct or ch.isspace()) for ch in wrong):
+            return "纯标点/空格不能作错词（无检索意义，请填转写里听错的词）"
+    except Exception:
+        pass
     if wrong in existing_wrongs:
         return "该错词已在词库里，重复添加会覆盖为新正词（已覆盖）"
     if wrong in base_patterns:
@@ -1176,6 +1438,71 @@ def _render_profile_for_new_jobs() -> dict:
     return _fv9.new_render_profile()
 
 
+def _apply_v25_postpass(job_dir: str, norm_final_path: str | None,
+                        rend_final_path: str, title: str,
+                        render_profile: dict) -> dict:
+    """V2.5 P0-1 生产后处理：冻结引擎已 mint revision 不断链，app 侧用
+    ``render_with_v2``（引擎+200封顶+40防碎同一纯函数）重算并覆写 md。
+
+    - 只改 app/ + 复用 stage9 纯函数与 stage3 assemble（只读复用），
+      不碰 src 他 stage 文件，不自创 mechanics（选 review 三选一之②
+      段侧思想的生产收敛：不断链，whisper0/Raw/No-Clobber 全保留）。
+    - 失败 fail-open（回 fixed False，生产继续走引擎原稿，不炸 worker；
+      QA 以 fixed True + 段长断言）。
+    """
+    try:
+        from stage3 import render as _rend  # noqa: E402  (只读复用 assemble)
+        from stage9 import formatter_v2 as _fv9  # noqa: E402
+    except Exception as exc:
+        return {"fixed": False, "error": "postpass import 失败：%s" % (exc,)}
+    try:
+        if not norm_final_path or not os.path.isfile(str(norm_final_path)):
+            return {"fixed": False, "error": "normalized 缺失，不覆写"}
+        if not rend_final_path or not os.path.isfile(str(rend_final_path)):
+            return {"fixed": False, "error": "rendered 缺失，不覆写"}
+        with open(str(norm_final_path), "r", encoding="utf-8") as fh:
+            import json as _json
+            payload = _json.load(fh)
+        segments = payload.get("segments") if isinstance(payload, dict) else None
+        if not isinstance(segments, list) or not segments:
+            return {"fixed": False, "error": "segments 为空，不覆写"}
+        try:
+            want_paras = _fv9.render_with_v2(segments)
+        except Exception as exc:
+            return {"fixed": False, "error": "render_with_v2 失败：%s" % (exc,)}
+        try:
+            want_md = _rend.assemble_markdown(
+                want_paras, title or "untitled", render_profile)
+        except Exception as exc:
+            return {"fixed": False, "error": "assemble 失败：%s" % (exc,)}
+        try:
+            with open(str(rend_final_path), "r", encoding="utf-8") as fh:
+                cur_md = fh.read()
+        except OSError as exc:
+            return {"fixed": False, "error": "读稿失败：%s" % (exc,)}
+        if cur_md == want_md:
+            return {"fixed": False, "already_ok": True,
+                    "paras": len(want_paras),
+                    "max_len": max((len(p) for p in want_paras), default=0)}
+        # 提交物为 444 只读（No-Clobber 信号）：先加写权限再覆写，
+        # 写完恢复 444，保持与 stage3 提交态一致。
+        try:
+            os.chmod(str(rend_final_path), 0o644)
+        except Exception:
+            pass
+        with open(str(rend_final_path), "w", encoding="utf-8") as fh:
+            fh.write(want_md)
+        try:
+            os.chmod(str(rend_final_path), 0o444)
+        except Exception:
+            pass
+        return {"fixed": True, "paras": len(want_paras),
+                "max_len": max((len(p) for p in want_paras), default=0),
+                "lengths": [len(p) for p in want_paras]}
+    except Exception as exc:
+        return {"fixed": False, "error": "后处理异常：%s" % (exc,)}
+
+
 def _user_prompt_terms(data_root: str) -> list:
     """用户正词作弱引导进 prompt（prompt 术语弱引导层；失败回空）。"""
     try:
@@ -1221,30 +1548,71 @@ def _handle_vocab_add(body: bytes) -> tuple[int, dict]:
     existing = {e["wrong"] for e in entries}
     err = _validate_vocab_pair(wrong_s, right_s, existing, base_patterns)
     # 重复错词视为覆盖更新（ upsert），其余非法直接拒收
+    # P1-2：单字/纯标点已在 _validate 直接 400（wrong_s not in existing
+    # 即拒收，覆盖路径不绕过长度门：单字覆盖同样拒收）。
     if err is not None and wrong_s not in existing:
         return 400, {"ok": False, "error": err}
     if not wrong_s or not right_s or wrong_s == right_s:
         return 400, {"ok": False, "error": err or "错词/正词不合法"}
     if len(wrong_s) > VOCAB_MAX_SIDE_CHARS or len(right_s) > VOCAB_MAX_SIDE_CHARS:
         return 400, {"ok": False, "error": err or "单条超长"}
+    if len(wrong_s) < 2:
+        return 400, {"ok": False,
+                     "error": err or "错词至少2个字（单字替换会误伤全文，请加长后再试）"}
     if wrong_s in base_patterns:
         return 400, {"ok": False, "error": err or "已被内置词库收录"}
+    entries_before = list(entries)
     if wrong_s in existing:
         entries = [e for e in entries if e["wrong"] != wrong_s]
     if len(entries) >= VOCAB_MAX_ENTRIES and wrong_s not in existing:
         return 400, {"ok": False,
                      "error": "词库已满（%d 条），删一些再加" % (VOCAB_MAX_ENTRIES,)}
     entries.append({"wrong": wrong_s, "right": right_s})
+    # P1-2 短词预警 + 大小写变体提示（非阻塞，随成功回显；前端 2-3 字
+    # 二次 confirm 复用 delVocab 口径；命中数>50 警告待新转写验证，
+    # 后端此处回显 needs_confirm + hint，QA 以此断言预览存在）。
+    _preview_warnings: list = []
+    if 2 <= len(wrong_s) <= 3:
+        _preview_warnings.append(
+            "短词（%d字）易命中多处：添加后新转写与重跑会自动应用全文替换，"
+            "如命中超50处请及时删除" % (len(wrong_s),))
+    try:
+        _lower_base = {str(p).lower() for p in base_patterns}
+        if wrong_s not in base_patterns and wrong_s.lower() in _lower_base:
+            _preview_warnings.append(
+                "疑似重复（仅大小写差异，内置已有同名不同大小写），仍要加吗？"
+                "确认无误再点添加")
+    except Exception:
+        pass
+    # P1-3：先落盘后注册。落盘 OSError → 500 JSON“词库保存失败，未生效”
+    # （内存未动，旧文件原子保留）；注册失败则回滚文件到 entries_before
+    # （二选一取“删回文件”以保内存文件一致，重启无需自愈），并注释。
+    try:
+        _save_vocab_entries(data_root, entries)
+    except OSError as exc:
+        return 500, {"ok": False,
+                     "error": "词库保存失败，未生效：%s→检查磁盘空间/目录权限后重试"
+                              % (exc,)}
     try:
         reg = _register_user_rules(entries)
     except ValueError as exc:
+        # 注册失败（撞基表/内存冲突）：删回文件保一致。
+        try:
+            _save_vocab_entries(data_root, entries_before)
+        except Exception:
+            pass
         return 400, {"ok": False, "error": str(exc)}
-    _save_vocab_entries(data_root, entries)
+    _msg = (("已覆盖更新：%s→%s" % (wrong_s, right_s))
+            if err is not None else
+            ("已添加：%s→%s，新转写自动应用" % (wrong_s, right_s)))
+    if _preview_warnings:
+        _msg += "（注意：" + "；".join(_preview_warnings) + "）"
     return 200, {"ok": True, "data_root": data_root, "vocab": entries,
                  "count": len(entries), "revision": reg["rules_revision"],
-                 "message": ("已覆盖更新：%s→%s" % (wrong_s, right_s))
-                            if err is not None else
-                            ("已添加：%s→%s，新转写自动应用" % (wrong_s, right_s))}
+                 "message": _msg,
+                 "preview": {"wrong_len": len(wrong_s),
+                             "needs_confirm": 2 <= len(wrong_s) <= 3,
+                             "warnings": _preview_warnings}}
 
 
 def _handle_vocab_del(body: bytes) -> tuple[int, dict]:
@@ -1263,7 +1631,12 @@ def _handle_vocab_del(body: bytes) -> tuple[int, dict]:
     kept = [e for e in entries if e["wrong"] != wrong_s]
     if len(kept) == len(entries):
         return 404, {"ok": False, "error": "词库里没有该错词：%s" % (wrong_s,)}
-    _save_vocab_entries(data_root, kept)
+    try:
+        _save_vocab_entries(data_root, kept)
+    except OSError as exc:
+        return 500, {"ok": False,
+                     "error": "词库保存失败，未生效：%s→检查磁盘空间/目录权限后重试"
+                              % (exc,)}
     return 200, {"ok": True, "data_root": data_root, "vocab": kept,
                  "count": len(kept), "revision": _user_rules_revision(kept),
                  "message": "已删除：%s（新转写不再应用）" % (wrong_s,)}
@@ -1620,11 +1993,30 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
             source_id=source_id, run_id=run_id)
         _worker_set_current(run_id, filename, STAGE_RENDERING)
         stem = os.path.splitext(os.path.basename(src_real))[0] or run_id
+        _render_profile = _render_profile_for_new_jobs()
         rend = _rend.create_render_revision(
             con, job_dir, norm["normalized_artifact_id"],
-            _render_profile_for_new_jobs(),
+            _render_profile,
             title=stem, canonical_probe_path=canonical_probe,
             source_id=source_id, run_id=run_id)
+        # V2.5 P0-1 生产后处理（新转写入口）：冻结引擎已 mint 不断链，
+        # app 侧用 render_with_v2 重算覆写，保证 200 封顶/40 防碎生效。
+        try:
+            _fix = _apply_v25_postpass(
+                job_dir, norm.get("final_path"), rend.get("final_path"),
+                stem, _render_profile)
+            try:
+                _receipt("V25_POSTPASS",
+                         "后处理 fixed=%s paras=%s max=%s" % (
+                             _fix.get("fixed"), _fix.get("paras"),
+                             _fix.get("max_len")),
+                         {"whisper_calls": engine_calls,
+                          "render_revision_id": rend.get("render_revision_id"),
+                          "v25_fixed": bool(_fix.get("fixed"))})
+            except Exception:
+                pass
+        except Exception:
+            pass
         con.execute(
             "UPDATE processing_runs SET raw_artifact_id=?,"
             " initial_normalization_revision_id=?, initial_render_revision_id=?,"
@@ -1729,6 +2121,8 @@ def _transcribe_worker(data_root: str, input_root: str, ob_vault_root: str | Non
     文件夹的直接忽略（不计数、不记 processed、不进 done、不打扰）。
     每轮只处理新增（_worker_done 去重），未见新 run 则 sleep 等待。
     P1-2：磁盘已有成功输出直接跳过（不重转），失败可重试。
+    V2.2补修 P0-2：DB已COMPLETED旧账同步跳过（磁盘缺口补齐，不得重转；
+    whisper不再跑；显式重试可经 /api/retry 重排）。
     P1-1：未知异常补 FAIL 记录再进 done，不静默丢任务。
     """
     from stage2 import store  # noqa: E402  (只读复用)
@@ -1749,6 +2143,12 @@ def _transcribe_worker(data_root: str, input_root: str, ob_vault_root: str | Non
                                  if isinstance(v, dict) and v.get("state") in DONE_STATES}
             except Exception:
                 disk_done_ids = set()
+            # V2.2补修 P0-2：DB成功旧账（norm COMPLETED）缺口补齐
+            try:
+                db_done_ids = _db_success_run_ids_ro(str(data_root), str(input_root))
+            except Exception:
+                db_done_ids = set()
+            skip_old = set(disk_done_ids) | set(db_done_ids)
             try:
                 con = store.open_db(data_root)
                 try:
@@ -1781,8 +2181,8 @@ def _transcribe_worker(data_root: str, input_root: str, ob_vault_root: str | Non
                     break
                 if run_id in _worker_done:
                     continue
-                # P1-2：磁盘已有成功输出则跳过（记 done，不重转）
-                if run_id in disk_done_ids:
+                # P1-2 + V2.2 P0-2：磁盘/DB已有成功输出则跳过（记 done，不重转）
+                if run_id in skip_old:
                     with _state_lock:
                         _worker_done.add(run_id)
                     continue
@@ -1840,7 +2240,11 @@ def _transcribe_worker(data_root: str, input_root: str, ob_vault_root: str | Non
 
 def _launch(data_root: str, input_root: str, ob_vault_root: str | None,
             profile_hash: str) -> None:
-    """后台线程目标：run_startup 成功后起转写 worker；跑完即更新状态。"""
+    """后台线程目标：run_startup 成功后起转写 worker；跑完即更新状态。
+
+    V2.2补修 P0-1/P0-3：全终态放行记 skipped（verdict/绿条用）；
+    GATE_STAGE3_BLOCKED 只在真半截时由 _humanize_startup_error 产出。
+    """
     import datetime
 
     with _state_lock:
@@ -1863,10 +2267,52 @@ def _launch(data_root: str, input_root: str, ob_vault_root: str | None,
             _listener["error"] = msg
             _listener["error_code"] = code
             _listener["suggested_data_root"] = sugg
+            # 真半截才 BLOCK：失败时清旧账计数，避免绿条残留
+            _listener["skipped_terminal"] = 0
+            _listener["skipped_terminal_rows"] = 0
+            _listener["startup_note"] = None
         return
+    # 全终态放行：门内 skipped 落 _STARTUP_SCOPE，换算成人话进 _listener
+    try:
+        _rows = int(_STARTUP_SCOPE.get("skipped_terminal_rows") or 0)
+    except Exception:
+        _rows = 0
+    try:
+        _runs = int(_STARTUP_SCOPE.get("skipped_terminal_runs") or 0)
+    except Exception:
+        _runs = 0
+    # P0-2 缺口：DB成功旧账预进 done，首轮 pending 即排除旧完成（不重转）
+    try:
+        _pre_skip = _db_success_run_ids_ro(str(data_root), str(input_root))
+    except Exception:
+        _pre_skip = set()
+    try:
+        _disk_pre = _scan_disk_states(str(data_root))
+        _pre_disk = {k for k, v in _disk_pre.items()
+                     if isinstance(v, dict) and v.get("state") in DONE_STATES}
+    except Exception:
+        _pre_disk = set()
+    try:
+        _pre_all = set(_pre_skip) | set(_pre_disk)
+    except Exception:
+        _pre_all = set()
+    # 绿条 N 取旧完成视频数（run 去重；无 run 但有终态行时回落行数）
+    _n = len(_pre_all) if _pre_all else (_runs if _runs else _rows)
+    try:
+        _note = ("旧%d条已完成记录，本次跳过" % (_n,)) if _n > 0 else None
+    except Exception:
+        _note = None
     with _state_lock:
         _listener["error"] = None
         _handle["box"] = handle
+        _listener["skipped_terminal"] = int(_n or 0)
+        _listener["skipped_terminal_rows"] = int(_rows or 0)
+        _listener["startup_note"] = _note
+        try:
+            for _rid in _pre_all:
+                _worker_done.add(_rid)
+        except Exception:
+            pass
     # run_startup 返回后 watcher/workers 常驻（daemon 线程）；running 保持 True。
     # P0-5：转写 worker 单线程串行，常驻轮询 QUEUED 的 AUTO run。
     worker = threading.Thread(
@@ -1921,7 +2367,9 @@ def _handle_start_post(body: bytes) -> tuple[int, dict]:
         _listener.update(
             {"running": True, "data_root": data_root,
              "input_root": input_root, "ob_vault_root": vault, "error": None,
-             "error_code": None, "suggested_data_root": None}
+             "error_code": None, "suggested_data_root": None,
+             "skipped_terminal": 0, "skipped_terminal_rows": 0,
+             "startup_note": None}
         )
         _last_config.update(
             {"last_input_root": input_root, "last_data_root": data_root,
@@ -2454,7 +2902,11 @@ REAPPLY_ELIGIBLE = ("RENDER_ONLY", "PUBLISHED", "PUBLISH_BLOCKED")
 
 
 def _open_rw(data_root: str):
-    """读写开中央库：锁在手走 store 门，否则直连（同进程，busy 等待）。"""
+    """读写开中央库：锁在手走 store 门，否则直连（同进程，busy 等待）。
+
+    V2.5 P1-1：缺父目录/缺库文件先抛人话 OSError/FileNotFoundError，
+    由 _reapply_one 接管转 JSON（不断连接），不直连抛裸错。
+    """
     try:
         from stage2 import store as _st  # noqa: E402
 
@@ -2462,12 +2914,25 @@ def _open_rw(data_root: str):
             return _st.open_db(data_root)
     except Exception:
         pass
-    db_path = os.path.join(os.path.abspath(str(data_root)), "data", "state.db")
-    con = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
-    con.execute("PRAGMA busy_timeout=30000")
-    con.execute("PRAGMA foreign_keys=ON")
-    con.row_factory = sqlite3.Row
-    return con
+    root = os.path.abspath(str(data_root or ""))
+    db_path = os.path.join(root, "data", "state.db")
+    parent = os.path.dirname(db_path)
+    if not os.path.isdir(parent):
+        raise FileNotFoundError(
+            "状态库不可读：数据目录不存在（%s），请检查数据目录后刷新重试"
+            % (parent,))
+    if not os.path.isfile(db_path):
+        raise FileNotFoundError(
+            "状态库不可读：尚未初始化（%s 缺失），请先开始一次监听或检查数据目录"
+            % (db_path,))
+    try:
+        con = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
+        con.execute("PRAGMA busy_timeout=30000")
+        con.execute("PRAGMA foreign_keys=ON")
+        con.row_factory = sqlite3.Row
+        return con
+    except (sqlite3.Error, OSError) as exc:
+        raise OSError("状态库不可读：%s，请检查数据目录后刷新重试" % (exc,))
 
 
 def _append_manifest_receipt(job_dir: str, entry: dict) -> None:
@@ -2499,17 +2964,31 @@ def _sha256_file(path: str) -> str | None:
 
 def _reapply_one(data_root: str, run_id: str,
                  ob_vault_root: str | None = None) -> dict:
-    """单个已完成任务应用新词库重跑（Case4：whisper 0、Raw 不变）。"""
+    """单个已完成任务应用新词库重跑（Case4：whisper 0、Raw 不变）。
+
+    V2.5 P1-1：_open_rw 与 SELECT 全接管，人话 JSON 不掉线。
+    V2.5 P0-1：derive 后经 _apply_v25_postpass 重算覆写（200/MIN 生效）。
+    """
     from stage3 import derive as _derive  # noqa: E402  (Case4 同一入口)
 
     data_root = os.path.abspath(str(data_root or ""))
     run_id = str(run_id or "").strip()
     if not run_id:
         return {"ok": False, "run_id": run_id, "error": "缺少任务编号"}
-    con = _open_rw(data_root)
     try:
-        row = con.execute(
-            "SELECT * FROM processing_runs WHERE run_id=?", (run_id,)).fetchone()
+        con = _open_rw(data_root)
+    except (sqlite3.Error, OSError) as exc:
+        return {"ok": False, "run_id": run_id, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "run_id": run_id,
+                "error": "状态库不可读：%s，请检查数据目录后刷新重试" % (exc,)}
+    try:
+        try:
+            row = con.execute(
+                "SELECT * FROM processing_runs WHERE run_id=?", (run_id,)).fetchone()
+        except (sqlite3.Error, OSError) as exc:
+            return {"ok": False, "run_id": run_id,
+                    "error": "状态库不可读：%s，请检查数据目录后刷新重试" % (exc,)}
         if row is None:
             return {"ok": False, "run_id": run_id,
                     "error": "任务不存在，请刷新后重试"}
@@ -2579,6 +3058,24 @@ def _reapply_one(data_root: str, run_id: str,
         if not os.path.isfile(new_rendered):
             return {"ok": False, "run_id": run_id,
                     "error": "新稿文件未生成，请稍后重试"}
+        # V2.5 P0-1 生产后处理（重跑入口）：冻结 derive 已 mint 不断链，
+        # 此处用 render_with_v2 重算覆写，保证 200 封顶/40 防碎生效。
+        try:
+            _norm_rev = str(out.get("normalization_revision_id") or "")
+            _norm_path = os.path.join(
+                job_dir, "normalized", "%s.json" % (_norm_rev,)) \
+                if _norm_rev else None
+            _fix = _apply_v25_postpass(
+                job_dir, _norm_path, new_rendered, stem, render_profile)
+            _postpass = {"applied": bool(_fix.get("fixed")),
+                         "already_ok": bool(_fix.get("already_ok")),
+                         "paras": _fix.get("paras"),
+                         "max_len": _fix.get("max_len")}
+            if _fix.get("error") and not _fix.get("fixed") \
+                    and not _fix.get("already_ok"):
+                _postpass["note"] = str(_fix.get("error"))
+        except Exception as exc:
+            _postpass = {"applied": False, "note": "后处理异常：%s" % (exc,)}
         result = {"ok": True, "run_id": run_id,
                   "source_filename": src_fn, "prev_state": prev_state,
                   "whisper_calls": 0, "raw_unchanged": True,
@@ -2587,7 +3084,8 @@ def _reapply_one(data_root: str, run_id: str,
                   "render_revision_id": new_rend_rev,
                   "rendered_path": os.path.abspath(new_rendered),
                   "norm_rules_revision":
-                      norm_profile.get("correction_rules_revision")}
+                      norm_profile.get("correction_rules_revision"),
+                  "v25_postpass": _postpass}
         # 入库分支（No-Clobber）：之前已入库且给了笔记库才尝试 publish；
         # present canonical 永不覆盖，BLOCK 即跳过注明。
         vault = (str(ob_vault_root).strip()
@@ -2715,6 +3213,9 @@ def _reapply_one(data_root: str, run_id: str,
         except Exception:
             pass
         return result
+    except (sqlite3.Error, OSError) as exc:
+        return {"ok": False, "run_id": run_id,
+                "error": "状态库不可读：%s，请检查数据目录后刷新重试" % (exc,)}
     finally:
         try:
             con.close()
@@ -2745,7 +3246,17 @@ def _handle_reapply_post(body: bytes) -> tuple[int, dict]:
                          "summary": {"total": 0, "ok": 0,
                                      "skipped_user_edited": 0, "failed": 0},
                          "message": "没有可重跑的已完成任务"}
-        results = [_reapply_one(data_root, rid, vault_s) for rid in targets]
+        results = []
+        for rid in targets:
+            try:
+                results.append(_reapply_one(data_root, rid, vault_s))
+            except (sqlite3.Error, OSError) as exc:
+                results.append({"ok": False, "run_id": rid,
+                                "error": "状态库不可读：%s，请检查数据目录后刷新重试"
+                                         % (exc,)})
+            except Exception as exc:
+                results.append({"ok": False, "run_id": rid,
+                                "error": "重跑失败：%s，稍后重试" % (exc,)})
         summary = {"total": len(results),
                    "ok": sum(1 for r in results if r.get("ok")),
                    "skipped_user_edited": sum(
@@ -2760,7 +3271,14 @@ def _handle_reapply_post(body: bytes) -> tuple[int, dict]:
     run_id = str(params.get("run_id") or "").strip()
     if not run_id:
         return 400, {"ok": False, "error": "缺少任务编号 run_id（或传 all=true 全跑）"}
-    res = _reapply_one(data_root, run_id, vault_s)
+    try:
+        res = _reapply_one(data_root, run_id, vault_s)
+    except (sqlite3.Error, OSError) as exc:
+        return 500, {"ok": False, "run_id": run_id,
+                     "error": "状态库不可读：%s，请检查数据目录后刷新重试" % (exc,)}
+    except Exception as exc:
+        return 500, {"ok": False, "run_id": run_id,
+                     "error": "重跑失败：%s，稍后重试" % (exc,)}
     if not res.get("ok") and not res.get("skipped") and "error" in res \
             and "任务不存在" in str(res.get("error")):
         return 404, {"ok": False, **res}
@@ -2806,39 +3324,49 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             length = 0
         body = self.rfile.read(length) if length > 0 else b""
-        if parsed.path == "/api/start":
-            code, obj = _handle_start_post(body)
-            _send_json(self, code, obj)
-            return
-        if parsed.path == "/api/stop":
-            code, obj = _handle_stop_post(body)
-            _send_json(self, code, obj)
-            return
-        if parsed.path == "/api/retry":
-            code, obj = _handle_retry_post(body)
-            _send_json(self, code, obj)
-            return
-        if parsed.path == "/api/clear":
-            code, obj = _handle_clear_post(body)
-            _send_json(self, code, obj)
-            return
-        if parsed.path == "/api/reveal":
-            code, obj = _handle_reveal_post(body)
-            _send_json(self, code, obj)
-            return
-        if parsed.path == "/api/vocab":
-            code, obj = _handle_vocab_add(body)
-            _send_json(self, code, obj)
-            return
-        if parsed.path == "/api/vocab/delete":
-            code, obj = _handle_vocab_del(body)
-            _send_json(self, code, obj)
-            return
-        if parsed.path == "/api/reapply":
-            code, obj = _handle_reapply_post(body)
-            _send_json(self, code, obj)
-            return
-        _send_json(self, 404, {"ok": False, "error": "未知路径，请刷新后重试"})
+        # V2.5 P1-1：外层接管，未预见异常回 500 JSON 不掉线。
+        try:
+            if parsed.path == "/api/start":
+                code, obj = _handle_start_post(body)
+                _send_json(self, code, obj)
+                return
+            if parsed.path == "/api/stop":
+                code, obj = _handle_stop_post(body)
+                _send_json(self, code, obj)
+                return
+            if parsed.path == "/api/retry":
+                code, obj = _handle_retry_post(body)
+                _send_json(self, code, obj)
+                return
+            if parsed.path == "/api/clear":
+                code, obj = _handle_clear_post(body)
+                _send_json(self, code, obj)
+                return
+            if parsed.path == "/api/reveal":
+                code, obj = _handle_reveal_post(body)
+                _send_json(self, code, obj)
+                return
+            if parsed.path == "/api/vocab":
+                code, obj = _handle_vocab_add(body)
+                _send_json(self, code, obj)
+                return
+            if parsed.path == "/api/vocab/delete":
+                code, obj = _handle_vocab_del(body)
+                _send_json(self, code, obj)
+                return
+            if parsed.path == "/api/reapply":
+                code, obj = _handle_reapply_post(body)
+                _send_json(self, code, obj)
+                return
+            _send_json(self, 404, {"ok": False, "error": "未知路径，请刷新后重试"})
+        except BrokenPipeError:
+            pass
+        except Exception as exc:
+            try:
+                _send_json(self, 500, {"ok": False,
+                                       "error": "服务开小差：%s，稍后重试" % (exc,)})
+            except Exception:
+                pass
 
 
 def main() -> int:

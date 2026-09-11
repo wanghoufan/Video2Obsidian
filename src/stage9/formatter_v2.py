@@ -187,6 +187,66 @@ def _merge_shorts(paragraphs: list, min_chars: int,
     return out
 
 
+def split_segments_for_engine(segments: list,
+                              hard_max: int | None = None) -> list:
+    """Pre-split over-long segment texts for the frozen engine (pure).
+
+    V2.5 P0-1 production helper (option ② segment-side): any single
+    segment text longer than ``hard_max`` (default X=200) is cut with
+    the same ``_split_overlong`` weak-punctuation rule into <=hard_max
+    pieces, preserving all other keys and fanning ids as
+    ``<id>#p<i>``. Short segments pass through untouched (same object
+    content, new list). The frozen engine only breaks *between*
+    segments, so this guarantees the single-long-segment case
+    (450 no-punct -> [200,200,50] after engine) without touching
+    stage3 files. Multi-segment accumulation overflow + crumbs still
+    need ``postprocess_paragraphs`` after render (production applies
+    both via ``render_with_v2`` recompute in app).
+    """
+    cap = int(hard_max) if hard_max is not None else int(
+        PARA_PARAMS_V2["hard_max_chars"])
+    out: list = []
+    for seg in segments:
+        try:
+            text = str(seg.get("text", "")) if isinstance(seg, dict) else ""
+        except Exception:
+            out.append(seg)
+            continue
+        if len(text.strip()) <= cap:
+            out.append(seg)
+            continue
+        pieces = _split_overlong(text, cap)
+        base_id = str(seg.get("id", "")) if isinstance(seg, dict) else ""
+        for i, piece in enumerate(pieces):
+            if isinstance(seg, dict):
+                nxt = dict(seg)
+                nxt["text"] = piece
+                if base_id:
+                    nxt["id"] = "%s#p%d" % (base_id, i)
+                out.append(nxt)
+            else:
+                out.append(piece)
+    return out
+
+
+def postprocess_paragraphs(paragraphs: list,
+                           hard_max: int | None = None,
+                           min_chars: int | None = None) -> list:
+    """Apply the two V2.5 post-passes to engine paragraphs (pure).
+
+    ``_enforce_hard_cap`` (X=200) then ``_merge_shorts`` (MIN=40).
+    Production calls this indirectly via ``render_with_v2`` recompute
+    (app overwrites the committed render md); exposed separately so
+    app/tests can post-process without re-running the engine.
+    """
+    cap = int(hard_max) if hard_max is not None else int(
+        PARA_PARAMS_V2["hard_max_chars"])
+    floor = int(min_chars) if min_chars is not None else int(
+        PARA_PARAMS_V2["min_paragraph_chars"])
+    return _merge_shorts(_enforce_hard_cap(list(paragraphs), cap),
+                         floor, cap)
+
+
 def render_with_v2(segments: list) -> list:
     """Run the frozen paragraphing engine with the new params (pure).
 

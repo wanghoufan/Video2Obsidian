@@ -27,3 +27,4 @@
 {"task":"PACKAGING-V2.2","project":"ing丨 0910 本地视频转文字工具","date":"2026-09-11","role":"builder","model":"opencode-go/muse-spark-1.3-contributor","result":"PASS","rework":1,"escalated":"NO","escalation_reason":null,"tokens":null,"cost_cny":null}
 {"task":"PACKAGING-V2.3","project":"ing丨 0910 本地视频转文字工具","date":"2026-09-11","role":"builder","model":"opencode-go/muse-spark-1.3-contributor","result":"PASS","rework":0,"escalated":"NO","escalation_reason":null,"tokens":null,"cost_cny":null}
 {"task":"PACKAGING-V2.4","project":"ing丨 0910 本地视频转文字工具","date":"2026-09-11","role":"builder","model":"opencode-go/muse-spark-1.3-contributor","result":"PASS","rework":1,"escalated":"NO","escalation_reason":null,"tokens":null,"cost_cny":null}
+{"task":"PACKAGING-V2.5","project":"ing丨 0910 本地视频转文字工具","date":"2026-09-11","role":"builder","model":"deepseek-v4.1-flash","result":"PASS","rework":1,"escalated":"NO","escalation_reason":null,"tokens":null,"cost_cny":null}

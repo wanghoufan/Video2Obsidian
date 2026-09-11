@@ -191,7 +191,7 @@ footer{max-width:1280px;margin:0 auto;padding:0 20px 20px;color:var(--dim);font-
     </table></div>
     <div class="empty" id="empty" style="display:none"></div>
     <div id="vocabBox">
-      <h3>词汇（错词→正词，新转写自动应用）</h3>
+      <h3>词汇（错词→正词，新转写自动应用；错词至少2字，2-3字短词二次确认）</h3>
       <div class="hint" id="vocRev"></div>
       <div id="vocabList"></div>
       <div class="pathrow">
@@ -654,13 +654,28 @@ function renderLock(o){
   }
   renderProgress(w);
   if(lastSnap)renderRuns(lastSnap);
-  // 常驻绿条
+  // 常驻绿条（V2.2补修 P0-3：全终态放行走“旧N条已入库，本次只转新增M个”，真半截才BLOCK）
   var bar=el("liveBar");
   if(running){
     var inp=(o&&o.input_root)||"";
     var hasVault=!!(o&&o.ob_vault_root);
     var t="监听中："+inp+"，把视频丢进去即可";
     if(!hasVault)t+="（未填笔记库，只存数据目录）";
+    try{
+      var skipN=parseInt((o&&o.skipped_terminal)||0,10)||0;
+      var note=(o&&o.startup_note)||"";
+      if(skipN>0){
+        var mTot=null;
+        try{
+          if(w&&w.queue&&w.queue.total!=null)mTot=parseInt(w.queue.total,10);
+        }catch(e){mTot=null;}
+        if(mTot==null||isNaN(mTot)){
+          try{mTot=((w&&w.queue)?((parseInt(w.queue.pending||0,10)||0)+(parseInt(w.queue.done||0,10)||0)+(parseInt(w.queue.failed||0,10)||0)):0);}catch(e){mTot=0;}
+        }
+        t+=" · 旧"+skipN+"条已入库，本次只转新增"+mTot+"个";
+        if(note)t+="（"+note+"）";
+      }
+    }catch(e){}
     bar.textContent=t;
     bar.style.display="block";
     el("btnStart").disabled=true;
@@ -843,11 +858,13 @@ function loadVocab(){
 function addVocab(){
   var w=el("vocWrong").value.trim(), r=el("vocRight").value.trim();
   if(!w||!r){el("vVoc").textContent="错词和正词都要填";el("vVoc").className="vhint err";return;}
+  if(w.length<2){el("vVoc").textContent="错词至少2个字（单字替换会误伤全文，如a→b，请加长后再试）";el("vVoc").className="vhint err";return;}
+  if(w.length<=3 && !confirm("短词（"+w.length+"字）易命中多处：添加后新转写与重跑会自动应用全文替换（命中超50处请及时删除），仍要添加 "+w+"→"+r+" 吗？"))return;
   fetch("/api/vocab",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify(reapplyPayload({wrong:w,right:r}))})
   .then(function(r2){return r2.json().then(function(o){return{code:r2.status,o:o};});})
   .then(function(x){
-    if(x.code===200){el("vVoc").textContent=String(x.o.message||"已添加");el("vVoc").className="vhint ok";el("vocWrong").value="";el("vocRight").value="";loadVocab();}
+    if(x.code===200){var msg=String(x.o.message||"已添加");if(x.o&&x.o.preview&&x.o.preview.warnings&&x.o.preview.warnings.length)msg+="【预览："+x.o.preview.warnings.join("；")+"】";el("vVoc").textContent=msg;el("vVoc").className="vhint ok";el("vocWrong").value="";el("vocRight").value="";loadVocab();}
     else{el("vVoc").textContent=String(x.o.error||("添加失败："+x.code));el("vVoc").className="vhint err";}
   }).catch(function(e){el("vVoc").textContent="添加请求失败："+e;el("vVoc").className="vhint err";});
 }

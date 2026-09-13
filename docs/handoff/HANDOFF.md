@@ -1,9 +1,9 @@
-# HANDOFF｜开发暂停（2026-09-13 17:15）：七链全 PASS 全收口，恢复开发先读我
+# HANDOFF｜开发暂停（2026-09-13 17:30）：七链全 PASS 全收口，已提交推送 main（91beaf8），恢复开发先读我
 
 > V1 字段（governance-state / Evidence / Human Gate / Promotion / Dispatch ID）已废弃，不填。
 > 本文件即恢复开发的唯一入口；下面「一、当前进展／二、下一步／三、注意事项」三节按恢复用结构编排，字段名仍按 HANDOFF 模板（AGENTS 要求），一一对应。
 
-- Captured at（YYYY-MM-DD HH:MM）：2026-09-13 17:15（本机钟点；本文件旧条目标注钟点偏高，以实际为准）
+- Captured at（YYYY-MM-DD HH:MM）：2026-09-13 17:30（本机钟点；本文件旧条目标注钟点偏高，以实际为准）
 - Stage ID（本阶段叫什么）：**暂停／收口完成**。今日八项迭代全收口：分段 para-v2.7＋批量重排＋词库 v2＋错词重跑＋三件套 UI＋词库折叠＋轮询修复＋错词重跑进度显示（异步 202＋轮询进度条＋主题浅色迁移）。
 
 ---
@@ -14,12 +14,12 @@
   - 无。无阻塞事项，无未开工开发项。
 - **当前 Task（正干到哪）（累计打回 n/2）**：supervisor 累计 **0/2** 从未打回，senior-expert 从未启用。最后一条链「错词重跑进度显示」已四角色全链收口：builder 交付并两轮返工 → code-reviewer「返工复核二」**PASS** → qa 独立复验 **PASS** → supervisor 复检 **PASS**（账本 schema exit=0）。
 - **今日八链状态**：reapply 收口／错词重跑／三件套 UI／词库折叠／轮询修复／para-v2.7 直做轮（本窗口直做）／**进度显示链**（返工二轮）／neat 收尾 —— **全 PASS**。
-- **代码现状（工作树，未提交）**：10 处改动 + 11 份新增报告未纳管。
+- **代码现状（已提交并推送）**：commit **91beaf8**（21 files，+2190/−186）已 push 到 `origin/main`；工作树干净、与远端 0/0 同步。`env.err`（0 字节）仍留仓根未处理。
   - 业务代码：`app/server.py`（候选接口 + apply + rerun_old + 进度任务态与线程保护）、`app/index.html`（进度条 + 轮询容错 + 主题一次性迁移 + 折叠 + 范围二选一 + 词库折叠过滤）、`src/stage9/formatter_v2.py`（v2.7）、`app/presets/vocab/vocab-programming.json`、`app/presets/vocab/vocab-crypto.json`、`tests/selftest_v26_presets.py`、`USER_MODEL_OVERRIDE.md`（镜像）。
   - 文档：`docs/handoff/HANDOFF.md`、`docs/model/TASK-MODEL-LOG.jsonl`、`经验一句话.md`；新增报告 `docs/review/` 5 套、`docs/qa/` 5 套（含 `RERUN-PROGRESS-REWORK-QA-REPORT.md`，末附 supervisor 复检节）。
 - **服务现状**：`stage0bench venv py3.12.13` 跑 `app/server.py`，**PID 12429**，`127.0.0.1:8765` 监听中（16:58:06 启动，晚于 `server.py` 16:31 的改动，即**线上已是最新后端**）。主页 HTTP 200。
 - **数据现状**：live 词库 **303 条**，rev `s9-corr-v2-user-977413c8`；待审候选**高 4 中 3** 在位；污染事故已回滚（见追记 18:00）。
-- **执行链/Session**：builder 走 codex（`gpt-5.6-luna`；进度显示链为 codex 新链 workspace-write，tokens 约 86177）；code-reviewer 走本窗口 subagent；qa 走 codex 新链（`gpt-5.6-luna`）；supervisor 走 codebuddy（`deepseek-v4.1-flash`，`-y` 已带）。codex 旧双终端（term_8d84 / term_5944）暂留未关（同功能续用比新开便宜）。**git 未提交、未推。**
+- **执行链/Session**：builder 走 codex（`gpt-5.6-luna`；进度显示链为 codex 新链 workspace-write，tokens 约 86177）；code-reviewer 走本窗口 subagent；qa 走 codex 新链（`gpt-5.6-luna`）；supervisor 走 codebuddy（`deepseek-v4.1-flash`，`-y` 已带）。codex 旧双终端（term_8d84 / term_5944）暂留未关（同功能续用比新开便宜）。**git 已提交（91beaf8）并 push `origin/main`。**
 - **未闭环评审意见**：无 P0/P1。继承 backlog：前序四链 **16×P3** ＋ 进度显示链 **6×P3**＝**22×P3**，全部非阻塞（在各评审原文）。污染事故已回滚；qa blindness（合成数据未覆盖真实旅程）已用真实候选端到端补过。
 - **docs 落盘清单（本轮新增/改了哪几个）**：`app/server.py`、`app/index.html`、`src/stage9/formatter_v2.py`、`app/presets/vocab/` 两域 v2、`tests/selftest_v26_presets.py`、`USER_MODEL_OVERRIDE.md`、`docs/handoff/HANDOFF.md`、`docs/model/TASK-MODEL-LOG.jsonl`（39 行）、`经验一句话.md`、`docs/review/` 5 套、`docs/qa/` 5 套。
 
@@ -29,11 +29,11 @@
 
 - **下一步（Next Single Action，按序）**：
   1. **用户手测验收**：开 http://127.0.0.1:8765/ 亲手点一遍「错词重跑」（跑的是最新后端）。候选高 4 中 3、默认勾高中；**先生成／阅历两类勿勾**。点完给验收结论。
-  2. **用户给分支名 → commit**（不许自推；用户未给名则继续留在工作树）。
+  2. ~~用户给分支名 → commit~~ **已完成**：用户指定推 `main`，commit **91beaf8** 已 push 到 `origin/main`。
   3. 验收通过即视为本阶段收工；无其它未开工开发项。
 - **人要拍什么板（列出来问，不问不许开工）**：
   1. **验收结论**：错词重跑实点结果 OK / 不 OK（不 OK 则按现象开新链）。
-  2. **分支名**：给名字才好 commit；给不给、给什么，用户定。
+  2. ~~分支名~~ **已办**：用户定 `main`，91beaf8 已推。
   3. 可选（非阻塞，用户可暂不定）：① 22×P3 backlog 是否排期修；② 账本 `rework` 口径统一（见下）；③ `env.err` 去向（见下）。
 - **待排期 backlog（非阻塞，供恢复后挑活）**：
   - 22×P3：进度显示链 6 条（details 结构不齐／status 忽略 data_root／job_id 前端不用／无候选却画绿 100%／运行中仍可改下次参数／无超时与取消）＋ 前序四链 16 条。
@@ -101,6 +101,8 @@
 - 清理（已删，全部在 `.gitignore` 内）：`__pycache__` **11 个** = `app/`×1 + `src/stage1|2|3|4|5|6|7|8|9|12/`×10；`.DS_Store` **3 个** = 仓根、`docs/`、`008林粒粒AI编程/`。
 - 复查：`find . -path ./.git -prune -o \( -name "__pycache__" -o -name ".DS_Store" \) -print` → **输出为空**（清零）。`008林粒粒AI编程/` 其余素材零改动；未删任何 `.py/.json/.md/.html/.sh/.log`、未删 `docs/` 任何报告。
 - 只列不删：`env.err`（仓根、0 字节、已被 git 跟踪，疑似 `2> env.err` 残留）——去向待定；`docs/qa/benchmark_stage0/results/*.log`（20 个）为 benchmark 证据，保留。
+
+## 追记 2026-09-13 17:30（git 提交并推送：用户指定推 main；commit 91beaf8「控制台：错词重跑进度显示+主题浅色迁移+候选三件套UI+词库折叠+para-v2.7+词库v2」21 files +2190/−186；`git push origin main` 65cfe2c..91beaf8；提交前扫描无密钥/.env/隐私；工作树干净、与 origin/main 0/0；未动 env.err）
 
 ## 恢复读盘（全体系唯一顺序，别乱）
 

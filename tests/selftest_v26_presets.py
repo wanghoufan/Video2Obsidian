@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""builder 自验：para-v2.6 分段收紧 + 三域预置词库一键导入。
+"""builder 自验：para-v2.7 长段 + 不断词 + 中文直连 + 三域预置词库一键导入。
 
 只用外置 tmp + 合成数据；不碰用户真实目录与 OB 库。stdlib-only。
 运行：python3 tests/selftest_v26_presets.py
@@ -38,20 +38,20 @@ def load_server():
 def part1_formatter():
     from stage9 import formatter_v2 as fv
 
-    check("version==para-v2.6", fv.FORMATTER_VERSION == "para-v2.6")
+    check("version==para-v2.7", fv.FORMATTER_VERSION == "para-v2.7")
     p = fv.PARA_PARAMS_V2
-    check("target=80", p["target_chars"] == 80)
-    check("hard_max=120", p["hard_max_chars"] == 120)
-    check("min_floor=30", p["min_paragraph_chars"] == 30)
+    check("target=220", p["target_chars"] == 220)
+    check("hard_max=450", p["hard_max_chars"] == 450)
+    check("min_floor=80", p["min_paragraph_chars"] == 80)
 
-    # 验收：450 字无标点合成段 -> 全部分段 <=120 且段数增加
+    # 验收：1000 字无标点合成段 -> 全部分段 <=450 且段数增加
     paras = fv.render_with_v2(
-        [{"id": "s1", "text": "甲" * 450, "start": 0.0, "end": 30.0}])
-    check("450字无标点: max<=120", max(len(x) for x in paras) <= 120)
-    check("450字无标点: 段数增加(>1)", len(paras) > 1)
-    check("450字无标点: 无空段", all(x for x in paras))
-    check("450字无标点: 字面未改写",
-          "".join(paras) == "甲" * 450)
+        [{"id": "s1", "text": "甲" * 1000, "start": 0.0, "end": 30.0}])
+    check("1000字无标点: max<=450", max(len(x) for x in paras) <= 450)
+    check("1000字无标点: 段数增加(>1)", len(paras) > 1)
+    check("1000字无标点: 无空段", all(x for x in paras))
+    check("1000字无标点: 字面未改写",
+          "".join(paras) == "甲" * 1000)
 
     # 单源头：引擎包装 _engine_params 与生产后处理均读 PARA_PARAMS_V2
     ep = fv._engine_params()
@@ -59,15 +59,15 @@ def part1_formatter():
           ep["target_chars"] == p["target_chars"]
           and ep["hard_max_chars"] == p["hard_max_chars"]
           and ep["pause_threshold_s"] == p["pause_threshold_s"])
-    pp = fv.postprocess_paragraphs(["乙" * 300])
-    check("postprocess cap<=120", max(len(x) for x in pp) <= 120)
+    pp = fv.postprocess_paragraphs(["乙" * 900])
+    check("postprocess cap<=450", max(len(x) for x in pp) <= 450)
     check("postprocess 决定论(同入同出)",
-          pp == fv.postprocess_paragraphs(["乙" * 300]))
+          pp == fv.postprocess_paragraphs(["乙" * 900]))
 
     # render profile revision bump（#30 五字段哈希随版本+参数变）
     prof = fv.new_render_profile()
     check("profile version bump",
-          prof["paragraph_formatter_version"] == "para-v2.6")
+          prof["paragraph_formatter_version"] == "para-v2.7")
     check("profile params==常量",
           prof["paragraph_parameters"] == dict(p))
 
@@ -78,7 +78,30 @@ def part1_formatter():
         [{"id": "m%d" % i, "text": "ab",
           "start": float(i * 10), "end": float(i * 10 + 1)}
          for i in range(3)])
-    check("防碎下限30: 碎段并回一段", len(short) == 1)
+    check("防碎下限80: 碎段并回一段", len(short) == 1)
+
+    # 不断词：切点落在英文词内时移到词边界
+    word = fv.render_with_v2(
+        [{"id": "w1", "text": "甲" * 440 + "Deepseek很好",
+          "start": 0.0, "end": 9.0}])
+    check("不断词: Deepseek完整", "Deepseek" in "".join(word))
+    check("不断词: 无超长段", all(len(x) <= 450 for x in word))
+
+    # 中文直连：两汉字间空格塌掉，英文旁空格保留
+    check("中文直连", fv._despace_cjk("寄到哪里 也就是") == "寄到哪里也就是")
+    check("英文旁空格保留", fv._despace_cjk("给 App 接入") == "给 App 接入")
+
+    # 子串碰撞回归：正确文本不得被误改（DeepSeek/Claude 实证）
+    prog = {e["wrong"]: e["right"] for e in
+            json.load(open(os.path.join(
+                ROOT, "app", "presets", "vocab",
+                "vocab-programming.json"), encoding="utf-8"))["entries"]}
+    check("Deepseek护栏在Deepsee之前",
+          prog.get("Deepseek") == "DeepSeek" and prog.get("Deepsee") == "DeepSeek"
+          and list(prog).index("Deepseek") < list(prog).index("Deepsee"))
+    check("Claud已删除（Claude子串误改实证）", "Claud" not in prog)
+    check("HTPS在HTP之前",
+          list(prog).index("HTPS") < list(prog).index("HTP"))
 
 
 def read_presets():

@@ -17,6 +17,8 @@ API：
   POST /api/start     -> 后台 run_startup（data_root/input_root/ob_vault_root），已在跑则 409
   GET  /api/start     -> 本进程监听状态（running/data_root/input_root/ob_vault_root/worker/error）
   GET  /api/browse?path= -> {path, parent, dirs[]}（只列目录，按名排序）
+  POST /api/vocab/candidates/apply        -> 202 {job_id}（异步导入并按需重跑）
+  GET  /api/vocab/candidates/apply/status -> 最近一次错词重跑进度（刷新可续看）
 
 P0-5：默认 data_root 指向外置测试目录（/tmp 下，不写真实库）；
 input_root 默认空，由用户在页面填写绝对路径后启动。
@@ -79,6 +81,11 @@ _worker = {
     "current": None,  # {run_id, filename, stage, stage_started_at} 或 None
 }
 _worker_done: set = set()
+
+# 错词重跑异步任务状态：后端唯一真源（刷新页面可续看），只保留最近一次。
+# 结构见 _handle_vocab_candidates_apply；None 表示本次进程还没跑过。
+_vocab_apply_job: dict | None = None
+_vocab_apply_seq = 0
 
 # P0-2 阶段文案（中文动词，人话五步，禁标准化/渲染裸词）
 STAGE_DISCOVER = "发现"
@@ -1634,10 +1641,17 @@ VOCAB_FILENAME = "vocab-user.json"
 VOCAB_MAX_ENTRIES = 500
 VOCAB_MAX_SIDE_CHARS = 128
 VOCAB_MAX_PROMPT_TERMS = 20
+VOCAB_CANDIDATES_FILENAME = "vocab-candidates.json"
+VOCAB_DOMAIN_STATE_FILENAME = "vocab-domains.json"
 
 
 def _vocab_path(data_root: str) -> str:
     return os.path.join(os.path.abspath(str(data_root or "")), VOCAB_FILENAME)
+
+
+def _vocab_domain_state_path(data_root: str) -> str:
+    return os.path.join(os.path.abspath(str(data_root or "")),
+                        VOCAB_DOMAIN_STATE_FILENAME)
 
 
 def _load_vocab_entries(data_root: str) -> list:
@@ -1659,7 +1673,10 @@ def _load_vocab_entries(data_root: str) -> list:
             if isinstance(wrong, str) and isinstance(right, str):
                 wrong, right = wrong.strip(), right.strip()
                 if wrong and right and wrong != right:
-                    out.append({"wrong": wrong, "right": right})
+                    source = item.get("source")
+                    source = source.strip() if isinstance(source, str) else "user"
+                    out.append({"wrong": wrong, "right": right,
+                                "source": source or "user"})
         return out[:VOCAB_MAX_ENTRIES]
     except Exception:
         return []
@@ -1672,7 +1689,8 @@ def _save_vocab_entries(data_root: str, entries: list) -> None:
     path = _vocab_path(root)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump([{"wrong": e["wrong"], "right": e["right"]}
+        json.dump([{"wrong": e["wrong"], "right": e["right"],
+                    "source": str(e.get("source") or "user")}
                    for e in entries],
                   fh, ensure_ascii=False, indent=2, sort_keys=True)
         fh.write("\n")
@@ -1759,11 +1777,59 @@ def _register_user_rules(entries: list) -> dict:
             "user_added": len(pairs), "idempotent_retry": False}
 
 
+def _load_vocab_domain_state(data_root: str) -> dict:
+    """读取预置域启用状态；缺失/损坏时所有域默认启用。"""
+    try:
+        with open(_vocab_domain_state_path(data_root), "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        enabled = raw.get("enabled") if isinstance(raw, dict) else None
+        if not isinstance(enabled, dict):
+            return {}
+        return {str(k): bool(v) for k, v in enabled.items()}
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+
+
+def _save_vocab_domain_state(data_root: str, enabled: dict) -> None:
+    root = os.path.abspath(str(data_root or ""))
+    os.makedirs(root, exist_ok=True)
+    path = _vocab_domain_state_path(root)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"enabled": {str(k): bool(v)
+                                    for k, v in enabled.items()}},
+                      fh, ensure_ascii=False, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _active_vocab_entries(data_root: str, entries: list | None = None) -> list:
+    """停用预置域只影响新规则；用户/候选来源始终保留。"""
+    entries = _load_vocab_entries(data_root) if entries is None else entries
+    state = _load_vocab_domain_state(data_root)
+    preset_domains = {p["domain"] for p in _load_vocab_presets()}
+    return [e for e in entries
+            if e.get("source") not in preset_domains
+            or state.get(e.get("source"), True)]
+
+
+def _effective_vocab_revision(data_root: str, entries: list | None = None) -> str:
+    """当前真正会组装进新转写规则的 active 词条 revision。"""
+    return _user_rules_revision(_active_vocab_entries(data_root, entries))
+
+
 def _norm_profile_for_new_jobs(data_root: str) -> dict:
     """新转写用 Norm profile：用户词库 revision（自动应用，Case4 语义）。"""
     from stage3 import normalize as _nm  # noqa: E402  (只读复用 DEFAULT)
 
-    entries = _load_vocab_entries(data_root)
+    entries = _active_vocab_entries(data_root)
     reg = _register_user_rules(entries)
     profile = dict(_nm.DEFAULT_PROFILE)
     profile["correction_rules_revision"] = reg["rules_revision"]
@@ -1771,8 +1837,8 @@ def _norm_profile_for_new_jobs(data_root: str) -> dict:
 
 
 def _render_profile_for_new_jobs() -> dict:
-    """新转写用 Render profile：stage9 分段参数单源头（para-v2.6 目标80/
-    封顶120/防碎30），与生产后处理同读 PARA_PARAMS_V2。"""
+    """新转写用 Render profile：stage9 分段参数单源头（para-v2.7 目标220/
+    封顶450/防碎80），与生产后处理同读 PARA_PARAMS_V2。"""
     from stage9 import formatter_v2 as _fv9  # noqa: E402  (只读复用)
 
     return _fv9.new_render_profile()
@@ -1783,7 +1849,7 @@ def _apply_v25_postpass(job_dir: str, norm_final_path: str | None,
                         render_profile: dict) -> dict:
     """生产后处理：冻结引擎已 mint revision 不断链，app 侧用
     ``render_with_v2``（引擎+hard_max封顶+min防碎同一纯函数，阈值全取
-    stage9.PARA_PARAMS_V2 单源头）重算并覆写 md。para-v2.6：120/30。
+    stage9.PARA_PARAMS_V2 单源头）重算并覆写 md。para-v2.7：450/80。
 
     - 只改 app/ + 复用 stage9 纯函数与 stage3 assemble（只读复用），
       不碰 src 他 stage 文件，不自创 mechanics（选 review 三选一之②
@@ -1847,7 +1913,7 @@ def _apply_v25_postpass(job_dir: str, norm_final_path: str | None,
 def _user_prompt_terms(data_root: str) -> list:
     """用户正词作弱引导进 prompt（prompt 术语弱引导层；失败回空）。"""
     try:
-        terms = [e["right"] for e in _load_vocab_entries(data_root)
+        terms = [e["right"] for e in _active_vocab_entries(data_root)
                  if isinstance(e.get("right"), str) and e["right"].strip()]
         seen: list = []
         for term in terms:
@@ -1864,7 +1930,418 @@ def _handle_vocab_get(query: dict) -> tuple[int, dict]:
     entries = _load_vocab_entries(data_root)
     return 200, {"ok": True, "data_root": data_root,
                  "vocab": entries, "count": len(entries),
-                 "revision": _user_rules_revision(entries)}
+                 "revision": _user_rules_revision(entries),
+                 "effective_revision": _effective_vocab_revision(data_root, entries)}
+
+
+def _vocab_base_patterns() -> set:
+    """读取冻结基表的 pattern；失败时回空，后续注册链路仍会二次兜底。"""
+    try:
+        from stage9 import rules_v2 as _r9  # noqa: E402  (只读复用基表)
+
+        return {p for p, _ in _r9.full_table()}
+    except Exception:
+        return set()
+
+
+def _vocab_candidates_path(data_root: str) -> str:
+    return os.path.join(os.path.abspath(str(data_root or "")),
+                        VOCAB_CANDIDATES_FILENAME)
+
+
+def _load_vocab_candidates(data_root: str) -> list:
+    """读 AI 审查候选；文件缺失、损坏或不是数组时返回空清单。"""
+    try:
+        with open(_vocab_candidates_path(data_root), "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return []
+    return raw if isinstance(raw, list) else []
+
+
+def _mark_vocab_candidates_imported(data_root: str, indices: set) -> None:
+    """原子标记候选；失败时不替换原候选文件。"""
+    path = _vocab_candidates_path(data_root)
+    with open(path, "r", encoding="utf-8") as fh:
+        raw = json.load(fh)
+    if not isinstance(raw, list):
+        raise ValueError("候选文件不是数组")
+    marked = []
+    for index, item in enumerate(raw):
+        if index in indices and isinstance(item, dict):
+            item = dict(item)
+            item["imported"] = True
+        marked.append(item)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(marked, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _candidate_confidence(value) -> str:
+    value = str(value or "").strip().lower()
+    return {"high": "high", "medium": "medium", "low": "low",
+            "高": "high", "中": "medium", "低": "low"}.get(value, "low")
+
+
+def _candidate_view(index: int, item) -> dict:
+    item = item if isinstance(item, dict) else {}
+    evidence = item.get("evidence")
+    if not isinstance(evidence, list):
+        evidence = []
+    return {"index": index, "wrong": item.get("wrong")
+            if isinstance(item.get("wrong"), str) else "",
+            "right": item.get("right")
+            if isinstance(item.get("right"), str) else "",
+            "confidence": _candidate_confidence(item.get("confidence")),
+            "evidence": [str(x) for x in evidence]}
+
+
+def _handle_vocab_candidates_get(query: dict) -> tuple[int, dict]:
+    data_root = (query.get("data_root") or [DEFAULT_DATA_ROOT])[0] or DEFAULT_DATA_ROOT
+    data_root = normalize_path(data_root) or DEFAULT_DATA_ROOT
+    groups = {"high": [], "medium": [], "low": []}
+    for index, item in enumerate(_load_vocab_candidates(data_root)):
+        if isinstance(item, dict) and item.get("imported"):
+            continue
+        view = _candidate_view(index, item)
+        groups[view["confidence"]].append(view)
+    return 200, {"ok": True, "data_root": data_root,
+                 "candidates": groups,
+                 "count": sum(len(items) for items in groups.values()),
+                 "has_candidates": bool(sum(len(items) for items in groups.values())),
+                 "source_exists": os.path.isfile(_vocab_candidates_path(data_root))}
+
+
+def _candidate_detail(index, item, accepted: bool, reason: str = "") -> dict:
+    view = _candidate_view(index, item)
+    view.update({"accepted": accepted, "decision": "保留" if accepted else "拒收"})
+    if reason:
+        view["reason"] = reason
+    return view
+
+
+def _run_vocab_candidates_apply(params: dict,
+                                progress_cb=None) -> tuple[int, dict]:
+    """导入选中的 AI 候选，然后复用现有 all=true 重跑（语义与旧同步版一致）。
+
+    progress_cb 仅用于页面进度回传（(ev) -> None）；为 None 时不改变任何行为。
+    本函数本身仍是同步阻塞的，异步外壳见 _handle_vocab_candidates_apply。
+    """
+    data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
+    vault = params.get("ob_vault_root")
+    vault_s = vault.strip() if isinstance(vault, str) and vault.strip() else None
+    # 新前端显式传 false 表示只入库；缺字段沿用旧 API 的全量重跑行为。
+    rerun_old = params.get("rerun_old", True) is True
+    indices = params.get("indices")
+    if not isinstance(indices, list):
+        return 400, {"ok": False, "error": "请传 indices 数组（勾选要导入的候选）"}
+    candidates = _load_vocab_candidates(data_root)
+    details = []
+    selected = []
+    seen_indices = set()
+    for raw_index in indices:
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            details.append({"index": raw_index, "accepted": False,
+                            "decision": "拒收", "reason": "候选索引无效"})
+            continue
+        if index in seen_indices:
+            details.append({"index": index, "accepted": False,
+                            "decision": "拒收", "reason": "候选索引重复"})
+            continue
+        seen_indices.add(index)
+        if index < 0 or index >= len(candidates):
+            details.append({"index": index, "accepted": False,
+                            "decision": "拒收", "reason": "候选索引不存在"})
+            continue
+        if isinstance(candidates[index], dict) and candidates[index].get("imported"):
+            details.append(_candidate_detail(
+                index, candidates[index], False, "该候选已导入，清单已标记"))
+            continue
+        selected.append((index, candidates[index]))
+    entries = _load_vocab_entries(data_root)
+    entries_before = list(entries)
+    existing = {e["wrong"] for e in entries}
+    base_patterns = _vocab_base_patterns()
+    accepted_entries = []
+    for index, item in selected:
+        item = item if isinstance(item, dict) else {}
+        wrong = item.get("wrong")
+        right = item.get("right")
+        err = _validate_vocab_pair(wrong, right, existing, base_patterns)
+        if err is not None:
+            details.append(_candidate_detail(index, item, False, err))
+            continue
+        if len(entries) + len(accepted_entries) >= VOCAB_MAX_ENTRIES:
+            details.append(_candidate_detail(
+                index, item, False, "词库已满（%d 条），请先删一些再导入" % VOCAB_MAX_ENTRIES))
+            continue
+        accepted_entries.append({"wrong": wrong.strip(), "right": right.strip(),
+                                 "source": "candidate"})
+        existing.add(wrong.strip())
+        details.append(_candidate_detail(index, item, True))
+    imported = len(accepted_entries)
+    revision = _user_rules_revision(entries)
+    if imported:
+        entries.extend(accepted_entries)
+        try:
+            _save_vocab_entries(data_root, entries)
+        except OSError as exc:
+            return 500, {"ok": False, "data_root": data_root,
+                         "error": "词库保存失败，未生效：%s→检查磁盘空间/目录权限后重试" % exc,
+                         "details": details}
+        try:
+            reg = _register_user_rules(entries)
+            revision = reg["rules_revision"]
+        except ValueError as exc:
+            try:
+                _save_vocab_entries(data_root, entries_before)
+            except Exception:
+                pass
+            return 400, {"ok": False, "data_root": data_root,
+                         "error": "词库注册失败，已回滚未生效：%s" % exc,
+                         "details": details}
+        except Exception as exc:
+            try:
+                _save_vocab_entries(data_root, entries_before)
+            except Exception:
+                pass
+            return 500, {"ok": False, "data_root": data_root,
+                         "error": "词库注册失败，已回滚未生效：%s" % exc,
+                         "details": details}
+    if not imported:
+        return 200, {"ok": True, "data_root": data_root, "imported": 0,
+                     "revision": revision, "details": details,
+                     "effective_revision": _effective_vocab_revision(data_root, entries),
+                     "codesummary": "导入0条/重跑成功0篇/跳过0篇/失败0篇",
+                     "message": "没有候选通过校验，未导入；未执行重跑"}
+    candidate_mark_error = ""
+    try:
+        _mark_vocab_candidates_imported(
+            data_root, {d["index"] for d in details if d.get("accepted")})
+    except Exception as exc:
+        candidate_mark_error = "候选清单标记失败，原文件未改动：%s" % exc
+    if not rerun_old:
+        message = "已导入%d条；未重跑老稿，老稿未动" % imported
+        if candidate_mark_error:
+            message += "。" + candidate_mark_error
+        return 200, {"ok": not candidate_mark_error, "data_root": data_root,
+                     "imported": imported, "rerun_old": False,
+                     "revision": revision, "details": details,
+                     "effective_revision": _effective_vocab_revision(data_root, entries),
+                     "reapply": None,
+                     "summary": {"success": 0, "skipped": 0, "failed": 0},
+                     "candidate_mark_error": candidate_mark_error,
+                     "codesummary": "导入%d条/重跑成功0篇/跳过0篇/失败0篇；老稿未动"
+                     % imported,
+                     "message": message}
+    try:
+        reapply_params = {"data_root": data_root, "all": True}
+        if vault_s:
+            reapply_params["ob_vault_root"] = vault_s
+        reapply_body = json.dumps(reapply_params, ensure_ascii=False).encode("utf-8")
+        reapply_code, reapply = _handle_reapply_post(reapply_body,
+                                                     progress_cb=progress_cb)
+    except Exception as exc:
+        reapply_code, reapply = 500, {"ok": False, "error": "重跑接口异常：%s" % exc}
+    summary = reapply.get("summary") if isinstance(reapply, dict) else None
+    results = reapply.get("results") if isinstance(reapply, dict) else []
+    if not isinstance(summary, dict):
+        summary = {}
+    if not isinstance(results, list):
+        results = []
+    success = sum(1 for item in results
+                  if isinstance(item, dict) and item.get("ok")
+                  and not item.get("skipped") and not item.get("skipped_user_edited"))
+    skipped = sum(1 for item in results
+                  if isinstance(item, dict)
+                  and (item.get("skipped") or item.get("skipped_user_edited")))
+    failed = sum(1 for item in results
+                 if isinstance(item, dict) and not item.get("ok")
+                 and not item.get("skipped"))
+    if not results and isinstance(summary.get("total"), int):
+        success = int(summary.get("ok") or 0)
+        skipped = int(summary.get("skipped_user_edited") or 0)
+        failed = int(summary.get("failed") or 0)
+    rerun_ok = reapply_code == 200 and bool(reapply.get("ok")) and failed == 0
+    message = "已导入%d条；重跑成功%d篇，跳过%d篇" % (imported, success, skipped)
+    if failed:
+        message += "，失败%d篇" % failed
+    if not rerun_ok:
+        message += "。词已入库，但重跑失败，请检查失败明细后重试"
+    if candidate_mark_error:
+        message += "。" + candidate_mark_error
+    if not vault_s:
+        message += "。未给笔记库，库内笔记未更新"
+    operation_ok = rerun_ok and not candidate_mark_error
+    codesummary = "导入%d条/重跑成功%d篇/跳过%d篇/失败%d篇" % (
+        imported, success, skipped, failed)
+    return 200, {"ok": operation_ok, "data_root": data_root, "imported": imported,
+                 "rerun_old": True,
+                 "revision": revision, "effective_revision":
+                 _effective_vocab_revision(data_root, entries),
+                 "details": details,
+                 "reapply": reapply, "summary": {"success": success,
+                 "skipped": skipped, "failed": failed},
+                 "candidate_mark_error": candidate_mark_error,
+                 "codesummary": codesummary,
+                 "message": message}
+
+
+def _vocab_apply_worker(job_id: str, params: dict) -> None:
+    """后台线程：跑 _run_vocab_candidates_apply，并把结果落回 _vocab_apply_job。
+
+    只更新状态；异常一律转 failed 人话，不炸进程。
+    """
+
+    def _on_progress(ev: dict) -> None:
+        try:
+            with _state_lock:
+                job = _vocab_apply_job
+                if not isinstance(job, dict) or job.get("job_id") != job_id:
+                    return
+                job["stage"] = "rerunning"
+                if isinstance(ev.get("total"), int):
+                    job["total"] = ev["total"]
+                if isinstance(ev.get("done"), int):
+                    job["done"] = ev["done"]
+                if ev.get("filename"):
+                    job["current_filename"] = ev["filename"]
+        except Exception:
+            pass
+
+    try:
+        code, obj = _run_vocab_candidates_apply(params, progress_cb=_on_progress)
+    except Exception as exc:  # noqa: BLE001  (兜底转 failed，不炸线程)
+        code, obj = 500, {"ok": False, "error": "错词重跑异常：%s" % (exc,)}
+    obj = obj if isinstance(obj, dict) else {}
+    with _state_lock:
+        job = _vocab_apply_job
+        if not isinstance(job, dict) or job.get("job_id") != job_id:
+            return
+        job["finished_at"] = _utc_now_iso()
+        job["result"] = obj
+        try:
+            job["imported"] = int(obj.get("imported") or 0)
+        except (TypeError, ValueError):
+            job["imported"] = 0
+        s = obj.get("summary")
+        if isinstance(s, dict):
+            job["summary"] = {
+                "success": int(s.get("success") or 0),
+                "skipped": int(s.get("skipped") or 0),
+                "failed": int(s.get("failed") or 0),
+            }
+        job["current_filename"] = None
+        if code == 200:
+            job["state"] = "done"
+            job["message"] = str(obj.get("message") or obj.get("codesummary")
+                                 or "处理完成")
+            if not job.get("rerun_old"):
+                job["total"] = job.get("total") or 0
+                job["done"] = job.get("total")
+        else:
+            job["state"] = "failed"
+            job["error"] = str(obj.get("error") or "处理失败，请刷新后重试")
+            job["message"] = job["error"]
+
+
+def _handle_vocab_candidates_apply(body: bytes) -> tuple[int, dict]:
+    """异步入口：请求级校验后立即返回 202 + job_id，后台线程做导入＋按需重跑。
+
+    进度由 GET /api/vocab/candidates/apply/status 读取（状态存后端，
+    刷新页面可续看）。导入/幂等/No-Clobber/词库三铁律语义全部沿用
+    _run_vocab_candidates_apply，未改动。
+    """
+    global _vocab_apply_job, _vocab_apply_seq
+    try:
+        params = json.loads(body.decode("utf-8")) if body.strip() else {}
+    except (ValueError, UnicodeDecodeError):
+        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
+    if not isinstance(params, dict):
+        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
+    if not isinstance(params.get("indices"), list):
+        return 400, {"ok": False, "error": "请传 indices 数组（勾选要导入的候选）"}
+    with _state_lock:
+        cur = _vocab_apply_job
+        if isinstance(cur, dict) and cur.get("state") == "running":
+            return 409, {"ok": False, "running": True,
+                         "job_id": cur.get("job_id"),
+                         "error": "已有一次错词重跑在进行中，请等它跑完再试"}
+        _vocab_apply_seq += 1
+        job_id = "vocab-apply-%d-%d" % (_vocab_apply_seq,
+                                        int(threading.get_ident() % 100000))
+        _vocab_apply_job = {
+            "job_id": job_id,
+            "state": "running",
+            "stage": "importing",
+            "data_root": normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT,
+            "rerun_old": params.get("rerun_old", True) is True,
+            "started_at": _utc_now_iso(),
+            "finished_at": None,
+            "total": 0,
+            "done": 0,
+            "current_filename": None,
+            "imported": 0,
+            "summary": {"success": 0, "skipped": 0, "failed": 0},
+            "error": None,
+            "message": "正在导入错词…",
+            "result": None,
+        }
+    try:
+        # M3：构造与 start 同保护，任一步失败都落 failed 终态，不悬挂单例
+        thread = threading.Thread(
+            target=_vocab_apply_worker, args=(job_id, params),
+            name="v2o-vocab-apply", daemon=True,
+        )
+        thread.start()
+    except Exception as exc:  # noqa: BLE001  起线程失败不得悬挂单例
+        reason = "后台任务启动失败：%s，请重试或重启服务" % (exc,)
+        with _state_lock:
+            cur2 = _vocab_apply_job
+            if isinstance(cur2, dict) and cur2.get("job_id") == job_id:
+                cur2.update({"state": "failed", "finished_at": _utc_now_iso(),
+                             "error": reason, "message": reason})
+        return 500, {"ok": False, "error": reason}
+    return 202, {"ok": True, "job_id": job_id, "state": "running",
+                 "message": "已开始处理，进度见页面"}
+
+
+def _handle_vocab_apply_status(query: dict) -> tuple[int, dict]:
+    """只读：返回最近一次错词重跑任务进度（results 明细不在这里，避免响应过大）。"""
+    with _state_lock:
+        job = dict(_vocab_apply_job) if isinstance(_vocab_apply_job, dict) else None
+    if job is None:
+        return 200, {"ok": True, "job": None}
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    return 200, {"ok": True, "job": {
+        "job_id": job.get("job_id"),
+        "state": job.get("state"),
+        "stage": job.get("stage"),
+        "data_root": job.get("data_root"),
+        "rerun_old": job.get("rerun_old"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "total": job.get("total"),
+        "done": job.get("done"),
+        "current_filename": job.get("current_filename"),
+        "imported": job.get("imported"),
+        "summary": job.get("summary"),
+        "error": job.get("error"),
+        "message": job.get("message"),
+        "codesummary": result.get("codesummary"),
+        "details": result.get("details"),
+    }}
 
 
 def _handle_vocab_add(body: bytes) -> tuple[int, dict]:
@@ -1908,7 +2385,7 @@ def _handle_vocab_add(body: bytes) -> tuple[int, dict]:
     if len(entries) >= VOCAB_MAX_ENTRIES and wrong_s not in existing:
         return 400, {"ok": False,
                      "error": "词库已满（%d 条），删一些再加" % (VOCAB_MAX_ENTRIES,)}
-    entries.append({"wrong": wrong_s, "right": right_s})
+    entries.append({"wrong": wrong_s, "right": right_s, "source": "user"})
     # P1-2 短词预警 + 大小写变体提示（非阻塞，随成功回显；前端 2-3 字
     # 二次 confirm 复用 delVocab 口径；命中数>50 警告待新转写验证，
     # 后端此处回显 needs_confirm + hint，QA 以此断言预览存在）。
@@ -1950,6 +2427,7 @@ def _handle_vocab_add(body: bytes) -> tuple[int, dict]:
         _msg += "（注意：" + "；".join(_preview_warnings) + "）"
     return 200, {"ok": True, "data_root": data_root, "vocab": entries,
                  "count": len(entries), "revision": reg["rules_revision"],
+                 "effective_revision": _effective_vocab_revision(data_root, entries),
                  "message": _msg,
                  "preview": {"wrong_len": len(wrong_s),
                              "needs_confirm": 2 <= len(wrong_s) <= 3,
@@ -1980,6 +2458,7 @@ def _handle_vocab_del(body: bytes) -> tuple[int, dict]:
                               % (exc,)}
     return 200, {"ok": True, "data_root": data_root, "vocab": kept,
                  "count": len(kept), "revision": _user_rules_revision(kept),
+                 "effective_revision": _effective_vocab_revision(data_root, kept),
                  "message": "已删除：%s（新转写不再应用）" % (wrong_s,)}
 
 
@@ -2047,13 +2526,43 @@ def _load_vocab_presets() -> list:
     return out
 
 
-def _handle_vocab_presets_get() -> tuple[int, dict]:
-    """预置词库清单（只读元数据，不含全部条目）。"""
+def _handle_vocab_presets_get(query: dict | None = None) -> tuple[int, dict]:
+    """预置词库清单（只读条目、启用状态，不修改预置文件）。"""
+    query = query or {}
+    data_root = (query.get("data_root") or [DEFAULT_DATA_ROOT])[0] or DEFAULT_DATA_ROOT
+    data_root = normalize_path(data_root) or DEFAULT_DATA_ROOT
+    enabled = _load_vocab_domain_state(data_root)
     presets = _load_vocab_presets()
     return 200, {"ok": True, "presets": [
         {"domain": p["domain"], "label": p["label"], "count": len(p["entries"]),
-         "version": p["version"], "source": p["source"], "file": p["file"]}
+         "version": p["version"], "source": p["source"], "file": p["file"],
+         "enabled": enabled.get(p["domain"], True),
+         "entries": p["entries"]}
         for p in presets]}
+
+
+def _handle_vocab_presets_domains_post(body: bytes) -> tuple[int, dict]:
+    """保存预置域启用开关；停用只影响新转写/重跑，不改老稿。"""
+    try:
+        params = json.loads(body.decode("utf-8")) if body.strip() else {}
+    except (ValueError, UnicodeDecodeError):
+        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
+    if not isinstance(params, dict):
+        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
+    data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
+    raw = params.get("enabled")
+    if not isinstance(raw, dict):
+        return 400, {"ok": False, "error": "请传 enabled 对象（每个预置域 true/false）"}
+    known = {p["domain"] for p in _load_vocab_presets()}
+    enabled = {domain: bool(raw.get(domain, True)) for domain in known}
+    try:
+        _save_vocab_domain_state(data_root, enabled)
+    except OSError as exc:
+        return 500, {"ok": False, "error": "启用状态保存失败：%s" % exc}
+    disabled = [domain for domain, value in enabled.items() if not value]
+    return 200, {"ok": True, "data_root": data_root, "enabled": enabled,
+                 "disabled": disabled,
+                 "message": "预置词库开关已保存；停用域只影响新转写，老稿需重跑才会更新"}
 
 
 def _handle_vocab_presets_import(body: bytes) -> tuple[int, dict]:
@@ -2109,7 +2618,7 @@ def _handle_vocab_presets_import(body: bytes) -> tuple[int, dict]:
             if len(entries) >= VOCAB_MAX_ENTRIES:
                 dropped_overflow += 1
                 continue
-            entries.append({"wrong": wrong, "right": right})
+            entries.append({"wrong": wrong, "right": right, "source": domain})
             existing.add(wrong)
             added += 1
     if added:
@@ -2153,6 +2662,7 @@ def _handle_vocab_presets_import(body: bytes) -> tuple[int, dict]:
                  "unknown_domains": unknown,
                  "vocab": entries, "count": len(entries),
                  "revision": revision,
+                 "effective_revision": _effective_vocab_revision(data_root, entries),
                  "message": "；".join(parts) + "。新转写自动应用。"}
 
 
@@ -2487,7 +2997,7 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
 
     # 3. Norm / Render（stage3 公开 API）
     # Norm 用用户词库 profile（新转写自动应用，Case4 语义），
-    # Render 用 stage9 分段 profile（para-v2.6 目标80/封顶120/防碎30，单源头）。
+    # Render 用 stage9 分段 profile（para-v2.7 目标220/封顶450/防碎80，单源头）。
     from stage3 import normalize as _norm  # noqa: E402  (只读复用)
     from stage3 import render as _rend  # noqa: E402  (只读复用)
 
@@ -2527,7 +3037,7 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
             source_id=source_id, run_id=run_id)
         # 生产后处理（新转写入口）：冻结引擎已 mint 不断链，app 侧用
         # render_with_v2 重算覆写，阈值取 stage9.PARA_PARAMS_V2 单源头
-        # （para-v2.6：目标80/封顶120/防碎30）。
+        # （para-v2.7：目标220/封顶450/防碎80）。
         try:
             _fix = _apply_v25_postpass(
                 job_dir, norm.get("final_path"), rend.get("final_path"),
@@ -3611,7 +4121,7 @@ def _reapply_one(data_root: str, run_id: str,
                     "error": "新稿文件未生成，请稍后重试"}
         # 生产后处理（重跑入口）：冻结 derive 已 mint 不断链，此处用
         # render_with_v2 重算覆写，阈值取 stage9.PARA_PARAMS_V2 单源头
-        # （para-v2.6：目标80/封顶120/防碎30），与 append 入口同源。
+        # （para-v2.7：目标220/封顶450/防碎80），与 append 入口同源。
         try:
             _norm_rev = str(out.get("normalization_revision_id") or "")
             _norm_path = os.path.join(
@@ -3775,7 +4285,77 @@ def _reapply_one(data_root: str, run_id: str,
             pass
 
 
-def _handle_reapply_post(body: bytes) -> tuple[int, dict]:
+def _reapply_all(data_root: str, vault_s, progress_cb=None) -> tuple[int, dict]:
+    """重跑全部已完成任务（all=true 路径）。
+
+    progress_cb 仅供页面进度回传（(ev) -> None），每篇开跑前/跑完后各回调一次；
+    为 None 时行为与旧版逐字一致。
+    """
+    try:
+        disk = _scan_disk_states(data_root)
+    except Exception:
+        disk = {}
+    targets = [rid for rid, v in disk.items()
+               if isinstance(v, dict) and v.get("state") in REAPPLY_ELIGIBLE]
+    if not targets:
+        return 200, {"ok": True, "data_root": data_root, "results": [],
+                     "summary": {"total": 0, "ok": 0,
+                                 "skipped_user_edited": 0, "failed": 0},
+                     "message": "没有可重跑的已完成任务"}
+    # R3：只在需要回传进度时查一次 run→文件名 映射；None 时保持旧路径零多余查询
+    fn_map = {}
+    if progress_cb is not None:
+        try:
+            fn_map = _run_source_path_map(data_root)
+        except Exception:
+            fn_map = {}
+
+    def _name(rid: str) -> str:
+        try:
+            return os.path.basename(str(fn_map.get(rid) or "").strip()) or "未知文件"
+        except Exception:
+            return "未知文件"
+
+    total = len(targets)
+    results = []
+    for pos, rid in enumerate(targets):
+        if progress_cb is not None:
+            try:
+                progress_cb({"total": total, "done": pos, "run_id": rid,
+                             "filename": _name(rid)})
+            except Exception:
+                pass
+        try:
+            results.append(_reapply_one(data_root, rid, vault_s))
+        except (sqlite3.Error, OSError) as exc:
+            results.append({"ok": False, "run_id": rid,
+                            "error": "状态库不可读：%s，请检查数据目录后刷新重试"
+                                     % (exc,)})
+        except Exception as exc:
+            results.append({"ok": False, "run_id": rid,
+                            "error": "重跑失败：%s，稍后重试" % (exc,)})
+        if progress_cb is not None:
+            try:
+                last = results[-1] if isinstance(results[-1], dict) else {}
+                progress_cb({"total": total, "done": pos + 1, "run_id": rid,
+                             "filename": str(last.get("source_filename")
+                                             or _name(rid))})
+            except Exception:
+                pass
+    summary = {"total": len(results),
+               "ok": sum(1 for r in results if r.get("ok")),
+               "skipped_user_edited": sum(
+                   1 for r in results if r.get("skipped_user_edited")),
+               "failed": sum(1 for r in results if not r.get("ok"))}
+    return 200, {"ok": True, "data_root": data_root, "results": results,
+                 "summary": summary,
+                 "message": "重跑 %d 个：成功 %d，库内你改过跳过 %d，失败 %d"
+                            % (summary["total"], summary["ok"],
+                               summary["skipped_user_edited"],
+                               summary["failed"])}
+
+
+def _handle_reapply_post(body: bytes, progress_cb=None) -> tuple[int, dict]:
     """存量一键重跑：单个 run_id 或 all=true（全部已完成）。"""
     try:
         params = json.loads(body.decode("utf-8")) if body.strip() else {}
@@ -3787,39 +4367,7 @@ def _handle_reapply_post(body: bytes) -> tuple[int, dict]:
     vault = params.get("ob_vault_root")
     vault_s = vault.strip() if isinstance(vault, str) and vault.strip() else None
     if params.get("all"):
-        try:
-            disk = _scan_disk_states(data_root)
-        except Exception:
-            disk = {}
-        targets = [rid for rid, v in disk.items()
-                   if isinstance(v, dict) and v.get("state") in REAPPLY_ELIGIBLE]
-        if not targets:
-            return 200, {"ok": True, "data_root": data_root, "results": [],
-                         "summary": {"total": 0, "ok": 0,
-                                     "skipped_user_edited": 0, "failed": 0},
-                         "message": "没有可重跑的已完成任务"}
-        results = []
-        for rid in targets:
-            try:
-                results.append(_reapply_one(data_root, rid, vault_s))
-            except (sqlite3.Error, OSError) as exc:
-                results.append({"ok": False, "run_id": rid,
-                                "error": "状态库不可读：%s，请检查数据目录后刷新重试"
-                                         % (exc,)})
-            except Exception as exc:
-                results.append({"ok": False, "run_id": rid,
-                                "error": "重跑失败：%s，稍后重试" % (exc,)})
-        summary = {"total": len(results),
-                   "ok": sum(1 for r in results if r.get("ok")),
-                   "skipped_user_edited": sum(
-                       1 for r in results if r.get("skipped_user_edited")),
-                   "failed": sum(1 for r in results if not r.get("ok"))}
-        return 200, {"ok": True, "data_root": data_root, "results": results,
-                     "summary": summary,
-                     "message": "重跑 %d 个：成功 %d，库内你改过跳过 %d，失败 %d"
-                                % (summary["total"], summary["ok"],
-                                   summary["skipped_user_edited"],
-                                   summary["failed"])}
+        return _reapply_all(data_root, vault_s, progress_cb=progress_cb)
     run_id = str(params.get("run_id") or "").strip()
     if not run_id:
         return 400, {"ok": False, "error": "缺少任务编号 run_id（或传 all=true 全跑）"}
@@ -3867,8 +4415,19 @@ class Handler(BaseHTTPRequestHandler):
             code, obj = _handle_vocab_get(urllib.parse.parse_qs(parsed.query))
             _send_json(self, code, obj)
             return
+        if parsed.path == "/api/vocab/candidates":
+            code, obj = _handle_vocab_candidates_get(
+                urllib.parse.parse_qs(parsed.query))
+            _send_json(self, code, obj)
+            return
+        if parsed.path == "/api/vocab/candidates/apply/status":
+            code, obj = _handle_vocab_apply_status(
+                urllib.parse.parse_qs(parsed.query))
+            _send_json(self, code, obj)
+            return
         if parsed.path == "/api/vocab/presets":
-            code, obj = _handle_vocab_presets_get()
+            code, obj = _handle_vocab_presets_get(
+                urllib.parse.parse_qs(parsed.query))
             _send_json(self, code, obj)
             return
         _send_json(self, 404, {"ok": False, "error": "未知路径，请刷新后重试"})
@@ -3906,12 +4465,20 @@ class Handler(BaseHTTPRequestHandler):
                 code, obj = _handle_vocab_add(body)
                 _send_json(self, code, obj)
                 return
+            if parsed.path == "/api/vocab/candidates/apply":
+                code, obj = _handle_vocab_candidates_apply(body)
+                _send_json(self, code, obj)
+                return
             if parsed.path == "/api/vocab/delete":
                 code, obj = _handle_vocab_del(body)
                 _send_json(self, code, obj)
                 return
             if parsed.path == "/api/vocab/presets/import":
                 code, obj = _handle_vocab_presets_import(body)
+                _send_json(self, code, obj)
+                return
+            if parsed.path == "/api/vocab/presets/domains":
+                code, obj = _handle_vocab_presets_domains_post(body)
                 _send_json(self, code, obj)
                 return
             if parsed.path == "/api/reapply":

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -111,6 +111,8 @@ footer{max-width:1280px;margin:0 auto;padding:0 20px 20px;color:var(--dim);font-
 #progFillFail{height:100%;width:0%;background:var(--red);transition:width .3s}
 #progFillPending{height:100%;width:0%;background:var(--dim);opacity:.45;transition:width .3s}
 #progStageFill{height:100%;width:0%;background:var(--orange);transition:width .3s}
+#candidateApplyProgress{margin:6px 0}
+#candidateApplyFill{height:100%;width:0%;background:var(--green);transition:width .3s}
 .stageNote{font-size:11px;color:var(--dim)}
 #toasts{position:fixed;right:16px;bottom:16px;z-index:99;display:flex;flex-direction:column;gap:8px}
 .toast{padding:10px 14px;border-radius:6px;font-size:13px;max-width:360px;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.3)}
@@ -139,11 +141,28 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
 #vocabBox{margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel2)}
 #vocabBox h3{margin:0 0 6px;font-size:13px}
 #vocabList{font-size:12px;font-family:var(--mono);margin-bottom:6px}
+#vocabListDetails{margin:6px 0;border:1px dashed var(--line);border-radius:5px;padding:6px 8px}
+#vocabListDetails>summary{cursor:pointer;color:var(--text);font-size:12px}
+#vocabFilter{width:100%;margin:6px 0;background:var(--input-bg);border:1px solid var(--line);color:var(--text);border-radius:4px;padding:6px 8px;font-size:12px}
+#vocabList .vocabGroup{margin:5px 0;border-top:1px dashed var(--line)}
+#vocabList .vocabGroup>summary{cursor:pointer;color:var(--dim);padding:4px 0}
 #presetBox{margin:2px 0 6px;font-size:12px}
-#presetBox label{margin-right:12px;cursor:pointer;white-space:nowrap}
+#presetBox .presetRow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:3px 0;border-bottom:1px dashed var(--line)}
+#presetBox label{cursor:pointer;white-space:nowrap}
 #presetBox .mini{margin-left:4px}
+#presetBox .presetEntries{flex:1 0 100%;margin:2px 0 4px;padding:4px 8px;border-left:2px solid var(--line);max-height:180px;overflow:auto}
+#presetBox .presetEntries .pentry{font-family:var(--mono);padding:2px 0;word-break:break-all}
 #vocabList .vrow{display:flex;gap:6px;align-items:center;padding:3px 0;border-bottom:1px dashed var(--line)}
 #vocabList .vrow span{flex:1;word-break:break-all}
+#candidateBox{margin-top:8px;padding:8px;border:1px dashed var(--line);border-radius:5px;background:var(--input-bg)}
+#candidateBox h4{margin:0 0 5px;font-size:12px;color:var(--text)}
+#candidateBox .candHead{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px}
+#candidateBox .candHead label{font-size:12px;white-space:nowrap}
+#candidateBox .candGroup{margin:5px 0}.candGroup summary{cursor:pointer;color:var(--dim);font-size:12px}
+#candidateBox .candGroupHead{color:var(--text);cursor:pointer}
+#candidateBox .candRow{display:flex;gap:5px;align-items:flex-start;padding:3px 0;border-top:1px dashed var(--line);font-size:12px;line-height:1.5}
+#candidateBox .candRow input{margin-top:4px}.candText{flex:1;word-break:break-all}.candEvidence{color:var(--dim);font-size:11px}
+#candidateBox .candEvidenceDetails{margin-top:2px;color:var(--dim);font-size:11px}
 </style>
 </head>
 <body>
@@ -209,7 +228,21 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
       <div class="hint" id="vocRev"></div>
       <div id="presetBox"></div>
       <div class="vhint" id="vPreset"></div>
-      <div id="vocabList"></div>
+      <div id="candidateBox">
+        <h4>待审清单（AI 找到的疑似错词）</h4>
+        <div class="candHead"><label><input type="checkbox" id="candidateSelectAll"> 全选</label><button class="mini" id="btnCandidateApply" disabled>错词重跑</button><label><input type="checkbox" id="candidateRerunOld" disabled> 已跑过的也重跑</label><label><input type="checkbox" id="candidateOnlyNew" checked disabled> 只对新视频生效</label></div>
+        <div id="candidateApplyProgress" style="display:none">
+          <div class="bar"><div id="candidateApplyFill"></div></div>
+          <div class="hint" id="candidateApplyText"></div>
+        </div>
+        <div id="candidateList"><div class="hint">正在读取待审清单…</div></div>
+        <div class="vhint" id="vCandidate"></div>
+      </div>
+      <details id="vocabListDetails">
+        <summary id="vocabListSummary">已导入词库（0条）</summary>
+        <input id="vocabFilter" type="search" placeholder="筛选错词或正词（空即显示全部）">
+        <div id="vocabList"></div>
+      </details>
       <div class="pathrow">
         <input id="vocWrong" placeholder="错词（转写里听错的样子）">
         <input id="vocRight" placeholder="正词（你想要的样子）">
@@ -286,17 +319,29 @@ function restorePathsFromLS(){
 try{restorePathsFromLS();}catch(e){}
 function el(id){return document.getElementById(id);}
 function applyTheme(t){
-  document.documentElement.setAttribute("data-theme", t==="light"?"light":"dark");
-  el("btnTheme").textContent = t==="light" ? "◑ 深色" : "◐ 浅色";
-  try{localStorage.setItem("v2o-theme", t);}catch(e){}
+  // 默认浅色：只有显式 dark 才深色，其余（空/脏值/读不到）一律 light
+  var use=(t==="dark")?"dark":"light";
+  document.documentElement.setAttribute("data-theme", use);
+  el("btnTheme").textContent = use==="light" ? "◑ 深色" : "◐ 浅色";
+  try{localStorage.setItem("v2o-theme", use);}catch(e){}
 }
 (function initTheme(){
-  var t="dark";
-  try{t=localStorage.getItem("v2o-theme")||"dark";}catch(e){}
+  var t="light";
+  try{
+    if(!localStorage.getItem("v2o-theme-migrated")){
+      // 一次性迁移：旧版同键曾默认 dark 并回写，先清污染再强制 light，写标记
+      localStorage.removeItem("v2o-theme");
+      localStorage.setItem("v2o-theme-migrated","1");
+      t="light";
+    }else{
+      // 迁移已完成：照旧读取，记住用户手动切换
+      t=localStorage.getItem("v2o-theme")||"light";
+    }
+  }catch(e){t="light";}
   applyTheme(t);
 })();
 el("btnTheme").onclick=function(){
-  var cur=document.documentElement.getAttribute("data-theme")||"dark";
+  var cur=document.documentElement.getAttribute("data-theme")||"light";
   applyTheme(cur==="light"?"dark":"light");
 };
 function dataRoot(){return el("inData").value.trim();}
@@ -1058,21 +1103,209 @@ function reapplyAll(){
     refresh();
   }).catch(function(e){say("全部重跑请求失败："+e,"err");});
 }
+var loadedVocabEntries=[];
+var vocabGroupLabels={programming:"预置-编程",crypto:"预置-币圈",finance:"预置-金融",user:"我自己加的"};
+function vocabGroupFor(entry){
+  var source=String((entry&&entry.source)||"").toLowerCase();
+  if(source==="programming"||source==="preset:programming")return "programming";
+  if(source==="crypto"||source==="preset:crypto")return "crypto";
+  if(source==="finance"||source==="preset:finance")return "finance";
+  return "user";
+}
+function renderVocabList(){
+  var filter=String(el("vocabFilter").value||"").trim().toLowerCase();
+  var groups={programming:[],crypto:[],finance:[],user:[]};
+  loadedVocabEntries.forEach(function(entry){
+    var hay=String(entry.wrong||"")+" "+String(entry.right||"");
+    if(filter&&hay.toLowerCase().indexOf(filter)<0)return;
+    groups[vocabGroupFor(entry)].push(entry);
+  });
+  el("vocabListSummary").textContent="已导入词库（"+loadedVocabEntries.length+"条）";
+  var h="";
+  ["programming","crypto","finance","user"].forEach(function(group){
+    var items=groups[group];
+    h+='<details class="vocabGroup"><summary>'+vocabGroupLabels[group]+'（'+items.length+'条）</summary>';
+    if(!items.length){h+='<div class="hint">暂无匹配词条</div>';}else{
+      items.forEach(function(e){
+        h+='<div class="vrow"><span>'+esc(e.wrong)+' → '+esc(e.right)+' <span class="hint">（来源：'+esc(e.source||"user")+'）</span></span><button class="mini" data-vocdel="'+esc(e.wrong)+'">删除</button></div>';
+      });
+    }
+    h+='</details>';
+  });
+  el("vocabList").innerHTML=h;
+  Array.prototype.forEach.call(el("vocabList").querySelectorAll("[data-vocdel]"),function(b){
+    b.onclick=function(){delVocab(b.getAttribute("data-vocdel"));};
+  });
+}
 function loadVocab(){
   var q="/api/vocab";
   if(dataRoot())q+="?data_root="+encodeURIComponent(dataRoot());
   fetch(q).then(function(r){return r.json();}).then(function(o){
     if(!o||!o.ok)return;
-    el("vocRev").textContent="词库 "+(o.count||0)+" 条 · "+(o.revision||"")+"（新转写自动应用）";
-    var h=(o.vocab||[]).map(function(e){
-      return '<div class="vrow"><span>'+esc(e.wrong)+' → '+esc(e.right)+'</span><button class="mini" data-vocdel="'+esc(e.wrong)+'">删除</button></div>';
-    }).join("")||'<div class="hint">暂无自定义词：ASR 听错的词（如 .env.local）在上方加错→正对子。</div>';
-    el("vocabList").innerHTML=h;
-    Array.prototype.forEach.call(el("vocabList").querySelectorAll("[data-vocdel]"),function(b){
-      b.onclick=function(){delVocab(b.getAttribute("data-vocdel"));};
-    });
+    el("vocRev").textContent="词库 "+(o.count||0)+" 条 · 生效 "+(o.effective_revision||o.revision||"")+"（新转写自动应用）";
+    loadedVocabEntries=o.vocab||[];
+    renderVocabList();
   }).catch(function(){});
 }
+function candidateCheckboxes(){return Array.prototype.slice.call(el("candidateList").querySelectorAll("[data-candidate-index]"));}
+function candidateGroupCheckboxes(){return Array.prototype.slice.call(el("candidateList").querySelectorAll("[data-candidate-group]"));}
+var vocabApplyTimer=null,vocabApplyRunning=false;
+// R2：轮询容错——单次/短暂失败不停表；连续失败或超时上限才停，且必须给人话提示。
+var vocabApplyFailStreak=0,vocabApplyStartedAt=0;
+var VOCAB_APPLY_MAX_FAIL=8,VOCAB_APPLY_MAX_MS=10*60*1000;
+function setCandidateControls(on){
+  el("btnCandidateApply").disabled=!on||vocabApplyRunning;
+  el("candidateSelectAll").disabled=!on;
+  el("candidateRerunOld").disabled=!on;
+  el("candidateOnlyNew").disabled=!on;
+}
+function loadVocabCandidates(){
+  var q="/api/vocab/candidates";
+  if(dataRoot())q+="?data_root="+encodeURIComponent(dataRoot());
+  fetch(q).then(function(r){return r.json();}).then(function(o){
+    var box=el("candidateList"), btn=el("btnCandidateApply"), all=el("candidateSelectAll");
+    if(!o||!o.ok){box.innerHTML='<div class="hint err">待审清单读取失败，请刷新后重试。</div>';setCandidateControls(false);return;}
+    if(!o.has_candidates){box.innerHTML='<div class="hint">暂无待审候选，去跑一次AI审查生成清单（找编排者要提示词）</div>';setCandidateControls(false);all.checked=false;return;}
+    var labels={high:"高置信度",medium:"中置信度",low:"低置信度"}, h="";
+    ["high","medium","low"].forEach(function(level){
+      var items=(o.candidates&&o.candidates[level])||[];
+      h+='<details class="candGroup" '+(level!=="low"?'open':'')+'><summary><label class="candGroupHead"><input type="checkbox" data-candidate-group="'+level+'" '+(level!=="low"?'checked':'')+'> '+labels[level]+'（'+items.length+'）</label></summary>';
+      items.forEach(function(c){
+        var evidence=c.evidence||[], evidenceHtml=evidence.length?'<details class="candEvidenceDetails"><summary>证据（'+evidence.length+'）</summary><div>'+esc(evidence.join("；"))+'</div></details>':'';
+        h+='<label class="candRow"><input type="checkbox" data-candidate-index="'+esc(String(c.index))+'" data-candidate-level="'+level+'" '+(level!=="low"?'checked':'')+'>'
+          +'<span class="candText">'+esc(c.wrong||"（空错词）")+' → '+esc(c.right||"（空正词）")+evidenceHtml+'</span></label>';
+      });
+      h+='</details>';
+    });
+    box.innerHTML=h;setCandidateControls(true);all.checked=false;
+    candidateCheckboxes().forEach(function(c){c.onchange=syncCandidateSelectAll;});
+    candidateGroupCheckboxes().forEach(function(c){c.onchange=function(){
+      candidateCheckboxes().forEach(function(item){if(item.getAttribute("data-candidate-level")===c.getAttribute("data-candidate-group"))item.checked=c.checked;});
+      syncCandidateSelectAll();
+    };});
+  }).catch(function(){el("candidateList").innerHTML='<div class="hint err">待审清单读取失败，请刷新后重试。</div>';setCandidateControls(false);});
+}
+function syncCandidateSelectAll(){
+  var cs=candidateCheckboxes();el("candidateSelectAll").checked=cs.length>0&&cs.every(function(c){return c.checked;});
+  candidateGroupCheckboxes().forEach(function(g){var level=g.getAttribute("data-candidate-group"), items=candidateCheckboxes().filter(function(c){return c.getAttribute("data-candidate-level")===level;});g.checked=items.length>0&&items.every(function(c){return c.checked;});});
+}
+function vocabApplyStopPoll(){
+  if(vocabApplyTimer){clearInterval(vocabApplyTimer);vocabApplyTimer=null;}
+}
+function vocabApplySetText(text,cls){
+  el("candidateApplyText").textContent=String(text||"");
+  el("candidateApplyText").className="hint "+(cls||"");
+}
+function renderVocabApplyProgress(s){
+  el("candidateApplyProgress").style.display="";
+  var total=Number(s.total||0),done=Number(s.done||0);
+  var pct=total>0?Math.min(100,Math.floor(done*100/total)):0;
+  el("candidateApplyFill").style.background="var(--green)";
+  el("candidateApplyFill").style.width=pct+"%";
+  if(s.stage==="rerunning"&&total>0){
+    vocabApplySetText("已处理 "+done+"/"+total+(s.current_filename?"（当前："+s.current_filename+"）":""));
+  }else{
+    vocabApplySetText(s.rerun_old===false?"正在导入词库（老稿不动）…":"正在导入错词并准备重跑…");
+  }
+}
+function renderVocabApplyFinal(s){
+  el("candidateApplyProgress").style.display="";
+  var sum=s.summary||{};
+  if(s.state==="failed"){
+    el("candidateApplyFill").style.background="var(--red)";
+    el("candidateApplyFill").style.width="100%";
+    vocabApplySetText(String(s.error||s.message||"处理失败，请重试"),"err");
+    return;
+  }
+  el("candidateApplyFill").style.background="var(--green)";
+  el("candidateApplyFill").style.width="100%";
+  var msg=String(s.message||("完成：导入"+(s.imported||0)+"条；重跑成功"+(sum.success||0)+"篇/跳过"+(sum.skipped||0)+"篇/失败"+(sum.failed||0)+"篇"));
+  vocabApplySetText(msg,(sum.failed||0)>0?"warn":"ok");
+  var det=s.details||[];
+  if(det.length){
+    var lines=[];det.forEach(function(d){lines.push((d.accepted?'保留':'拒收')+'：'+(d.wrong||('索引'+d.index))+(d.right?' → '+d.right:'')+(d.reason?'（'+d.reason+'）':''));});
+    el("vCandidate").textContent=lines.join("；");el("vCandidate").className="vhint";
+  }
+}
+function vocabApplyStartTimer(){
+  if(!vocabApplyStartedAt)vocabApplyStartedAt=Date.now();
+  if(!vocabApplyTimer)vocabApplyTimer=setInterval(pollVocabApplyStatus,1500);
+}
+function vocabApplyNotePollFailure(err){
+  vocabApplyFailStreak++;
+  el("candidateApplyProgress").style.display="";  // 提示必须可见，不许静默
+  var tooLong=(vocabApplyStartedAt>0)&&((Date.now()-vocabApplyStartedAt)>VOCAB_APPLY_MAX_MS);
+  if(vocabApplyFailStreak<VOCAB_APPLY_MAX_FAIL&&!tooLong){
+    vocabApplySetText("进度读取失败，正在重试…（第"+vocabApplyFailStreak+"次："
+      +String(err||"网络错误")+"）","warn");
+    return;  // 单次/短暂失败不停表，继续轮询
+  }
+  vocabApplyStopPoll();vocabApplyRunning=false;el("btnCandidateApply").disabled=false;
+  // M4：停表原因文案必须准确（连续失败 vs 累计超时）
+  var why=(vocabApplyFailStreak>=VOCAB_APPLY_MAX_FAIL)
+    ? ("进度读取连续失败"+vocabApplyFailStreak+"次")
+    : ("进度刷新累计超过"+Math.round(VOCAB_APPLY_MAX_MS/60000)+"分钟仍未完成");
+  vocabApplySetText(why+"，已停止自动刷新；后台任务可能仍在跑，"
+    +"请点「刷新」或稍后重开页面查看","err");
+}
+function pollVocabApplyStatus(){
+  fetch("/api/vocab/candidates/apply/status").then(function(r){return r.json();}).then(function(o){
+    var s=o&&o.job;
+    if(!s){vocabApplyFailStreak=0;vocabApplyStopPoll();vocabApplyRunning=false;el("btnCandidateApply").disabled=false;return;}
+    vocabApplyFailStreak=0;
+    if(s.state==="running"){
+      vocabApplyRunning=true;el("btnCandidateApply").disabled=true;
+      renderVocabApplyProgress(s);
+      vocabApplyStartTimer();
+      return;
+    }
+    vocabApplyStopPoll();vocabApplyRunning=false;el("btnCandidateApply").disabled=false;
+    renderVocabApplyFinal(s);
+    loadVocab();loadVocabCandidates();refresh();
+  }).catch(function(e){vocabApplyNotePollFailure(e);});
+}
+function resumeVocabApplyPoll(){
+  // 页面重载续看：只有后端还有进行中的任务才接管进度显示，终态不打扰。
+  fetch("/api/vocab/candidates/apply/status").then(function(r){return r.json();}).then(function(o){
+    var s=o&&o.job;
+    if(s&&s.state==="running"){
+      vocabApplyRunning=true;el("btnCandidateApply").disabled=true;
+      vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
+      renderVocabApplyProgress(s);
+      vocabApplyStartTimer();
+    }
+  }).catch(function(){
+    // 载入时读不到：仍开表限期重试；连续失败由 poll 的容错给明确提示，不静默冻结
+    vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
+    vocabApplyStartTimer();
+  });
+}
+function applyVocabCandidates(){
+  var ids=candidateCheckboxes().filter(function(c){return c.checked;}).map(function(c){return Number(c.getAttribute("data-candidate-index"));});
+  if(!ids.length){el("vCandidate").textContent="先勾选至少一条待审候选";el("vCandidate").className="vhint err";return;}
+  var rerunOld=el("candidateRerunOld").checked;
+  if(!confirm(rerunOld?"导入所选错词并重跑全部已完成任务吗？\n转写0次，改过的笔记会按 No-Clobber 跳过。":"只导入所选错词，不重跑老稿吗？\n老稿保持不动，新视频会自动应用。"))return;
+  el("btnCandidateApply").disabled=true;vocabApplyRunning=true;
+  vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
+  el("vCandidate").textContent="";el("vCandidate").className="vhint";
+  renderVocabApplyProgress({state:"running",stage:"importing",rerun_old:rerunOld,total:0,done:0});
+  fetch("/api/vocab/candidates/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(reapplyPayload({indices:ids,rerun_old:rerunOld}))})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    var o=x.o||{};
+    if(x.code===202){vocabApplyStartTimer();pollVocabApplyStatus();return;}
+    if(x.code===409){vocabApplySetText(String(o.error||"已有任务在进行中"),"warn");resumeVocabApplyPoll();return;}
+    vocabApplyRunning=false;el("btnCandidateApply").disabled=false;
+    vocabApplySetText(String(o.error||o.message||("处理失败："+x.code)),"err");
+  }).catch(function(e){
+    vocabApplyRunning=false;el("btnCandidateApply").disabled=false;
+    vocabApplySetText("错词重跑请求失败："+e,"err");
+  });
+}
+el("candidateSelectAll").onchange=function(){candidateCheckboxes().forEach(function(c){c.checked=el("candidateSelectAll").checked;});candidateGroupCheckboxes().forEach(function(c){c.checked=el("candidateSelectAll").checked;});};
+el("candidateRerunOld").onchange=function(){if(el("candidateRerunOld").checked)el("candidateOnlyNew").checked=false;};
+el("candidateOnlyNew").onchange=function(){if(el("candidateOnlyNew").checked)el("candidateRerunOld").checked=false;};
+el("btnCandidateApply").onclick=applyVocabCandidates;
 function addVocab(){
   var w=el("vocWrong").value.trim(), r=el("vocRight").value.trim();
   if(!w||!r){el("vVoc").textContent="错词和正词都要填";el("vVoc").className="vhint err";return;}
@@ -1097,24 +1330,39 @@ function delVocab(w){
   }).catch(function(e){say("删除请求失败："+e,"err");});
 }
 function loadPresets(){
-  fetch("/api/vocab/presets").then(function(r){return r.json();}).then(function(o){
+  var q="/api/vocab/presets";
+  if(dataRoot())q+="?data_root="+encodeURIComponent(dataRoot());
+  fetch(q).then(function(r){return r.json();}).then(function(o){
     if(!o||!o.ok)return;
     var ps=o.presets||[];
     if(!ps.length){el("presetBox").innerHTML="";return;}
-    var h='<span class="hint">预置词库：</span>';
+    var h='<span class="hint">预置词库（停用域只影响新转写，老稿需重跑）：</span>';
     ps.forEach(function(p){
-      h+='<label><input type="checkbox" data-preset="'+esc(p.domain)+'"> '
-        +esc(p.label)+'（'+(p.count||0)+'）</label>';
+      var entries=(p.entries||[]).map(function(e){return '<div class="pentry">'+esc(e.wrong)+' → '+esc(e.right)+'</div>';}).join("");
+      h+='<div class="presetRow"><label><input type="checkbox" data-preset-import="'+esc(p.domain)+'"> 导入</label>'
+        +'<label><input type="checkbox" data-preset-enabled="'+esc(p.domain)+'" '+(p.enabled!==false?'checked':'')+'> 启用</label>'
+        +'<span>'+esc(p.label)+'（'+(p.count||0)+'）</span><button type="button" class="mini" data-preset-view="'+esc(p.domain)+'">查看</button>'
+        +'<details class="presetEntries" data-preset-entries="'+esc(p.domain)+'"><summary>只读查看全词条</summary>'+entries+'</details></div>';
     });
     h+='<button class="mini" id="btnPresetImport">一键导入所选</button>';
     el("presetBox").innerHTML=h;
     el("btnPresetImport").onclick=importPresets;
+    Array.prototype.forEach.call(el("presetBox").querySelectorAll("[data-preset-view]"),function(b){b.onclick=function(){var d=el("presetBox").querySelector('[data-preset-entries="'+b.getAttribute("data-preset-view")+'"]');if(d)d.open=!d.open;};});
+    Array.prototype.forEach.call(el("presetBox").querySelectorAll("[data-preset-enabled]"),function(c){c.onchange=savePresetDomains;});
   }).catch(function(){});
+}
+function savePresetDomains(){
+  var enabled={};
+  Array.prototype.forEach.call(el("presetBox").querySelectorAll("[data-preset-enabled]"),function(c){enabled[c.getAttribute("data-preset-enabled")]=c.checked;});
+  fetch("/api/vocab/presets/domains",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(reapplyPayload({enabled:enabled}))})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){el("vPreset").textContent=String((x.o&&x.o.message)||((x.o&&x.o.error)||"预置词库开关保存失败"));el("vPreset").className=x.code===200?"vhint ok":"vhint err";loadVocab();})
+  .catch(function(e){el("vPreset").textContent="预置词库开关保存失败："+e;el("vPreset").className="vhint err";});
 }
 function importPresets(){
   var ds=[];
-  Array.prototype.forEach.call(el("presetBox").querySelectorAll("[data-preset]"),function(c){
-    if(c.checked)ds.push(c.getAttribute("data-preset"));
+  Array.prototype.forEach.call(el("presetBox").querySelectorAll("[data-preset-import]"),function(c){
+    if(c.checked)ds.push(c.getAttribute("data-preset-import"));
   });
   if(!ds.length){el("vPreset").textContent="先勾选至少一个领域再导入";el("vPreset").className="vhint err";return;}
   if(!confirm("把所选预置词库（"+ds.join("、")+"）导入你的词库吗？\n新转写自动应用；已存在的错词跳过，撞内置词库的拒收。"))return;
@@ -1134,9 +1382,11 @@ function importPresets(){
   }).catch(function(e){el("vPreset").textContent="导入请求失败："+e;el("vPreset").className="vhint err";});
 }
 el("btnVocAdd").onclick=addVocab;
+el("vocabFilter").oninput=renderVocabList;
 el("btnReapplyAll").onclick=reapplyAll;
 var refreshing=false;
-function refresh(){
+function refresh(autoPoll){
+  autoPoll=autoPoll===true;
   if(refreshing)return;
   refreshing=true;
   el("btnRefresh").disabled=true;
@@ -1157,8 +1407,12 @@ function refresh(){
     renderLock(o);
     if(o&&o.error)say("启动失败："+o.error,"err");
   }).catch(function(){});
-  try{loadVocab();}catch(e){}
-  try{loadPresets();}catch(e){}
+  if(!autoPoll){
+    try{loadVocab();}catch(e){}
+    try{loadPresets();}catch(e){}
+    try{loadVocabCandidates();}catch(e){}
+    try{resumeVocabApplyPoll();}catch(e){}
+  }
   Promise.all([p1,p2]).then(function(){
     refreshing=false;
     el("btnRefresh").disabled=false;
@@ -1217,7 +1471,7 @@ el("btnClose").onclick=closeBrowser;
 el("modal").onclick=function(e){if(e.target===el("modal"))closeBrowser();};
 document.addEventListener("keydown",function(e){if(e.key==="Escape")closeBrowser();});
 el("btnPick").onclick=function(){if(browseTarget){el(browseTarget).value=browsePath;}closeBrowser();if(browseTarget)validateInput(browseTarget);};
-el("btnRefresh").onclick=function(){refresh();};
+el("btnRefresh").onclick=function(){refresh(false);};
 function validateInput(which, cb){
   var map={inInput:["inInput","vInput",true],inVault:["inVault","vVault",false],inData:["inData","vData",false]};
   var cfg=map[which];
@@ -1423,7 +1677,7 @@ el("btnClearCancel").onclick=function(){el("clearModal").classList.remove("open"
 el("btnClearFailed").onclick=function(){doClear(true);};
 el("btnClearAll").onclick=function(){doClear(false);};
 el("clearModal").onclick=function(e){if(e.target===el("clearModal"))el("clearModal").classList.remove("open");};
-refresh();setInterval(refresh,5000);
+refresh(false);setInterval(function(){refresh(true);},5000);
 </script>
 </body>
 </html>

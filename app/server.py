@@ -28,12 +28,15 @@ ob_vault_root 默认空：为空则 worker 只跑到 Render，不 Publish。
 from __future__ import annotations
 
 import json
+import datetime
+import hashlib
 import os
 import shutil
 import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1135,6 +1138,824 @@ def _open_ro(data_root: str):
         return con
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------- P0-1 只读失败诊断
+
+DIAGNOSIS_VERSION = "v1.3-failure-taxonomy-1"
+DIAGNOSIS_ACTIONS = (
+    "SOURCE_LOCATION_REVIEW", "PRECONDITION_BLOCKED", "INPUT_MEDIA_INVALID",
+    "RETRYABLE_TRANSCRIPTION", "REUSABLE_DERIVED_FAILURE", "PUBLISH_BLOCKED",
+    "UNKNOWN",
+)
+
+
+def _diag_now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _diag_redact_path(path: str) -> str:
+    """Keep only a basename and two parent labels for UI-local evidence."""
+    if not path:
+        return "UNKNOWN"
+    parts = [p for p in os.path.normpath(str(path)).split(os.sep) if p]
+    return "…/" + "/".join(parts[-3:]) if parts else "UNKNOWN"
+
+
+def _diag_hash(path: str) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except (OSError, ValueError):
+        return None
+
+
+def _diag_identity(path: str, source: dict) -> str:
+    """Compare available metadata, then hash only exact metadata matches."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return "UNKNOWN"
+    size = source.get("source_size")
+    mtime = source.get("source_mtime_ns")
+    if size is not None and int(size) != int(st.st_size):
+        return "MISMATCH"
+    if mtime is not None and int(mtime) != int(st.st_mtime_ns):
+        return "MISMATCH"
+    expected = source.get("content_identity")
+    if expected and len(str(expected)) >= 32:
+        actual = _diag_hash(path)
+        return "MATCH" if actual and actual == str(expected) else "MISMATCH"
+    return "MATCH"
+
+
+_DIAG_SCAN_TIME_BUDGET_S = 2.0
+_DIAG_SCAN_MAX_DIRS = 2000
+_DIAG_SKIP_DIRS = frozenset({
+    "node_modules", ".git", ".hg", ".svn", "library",
+    "__pycache__", ".trash", ".spotlight-v100", ".fseventsd",
+})
+
+
+def _diag_skip_dir(name: str) -> bool:
+    low = name.lower()
+    if low in _DIAG_SKIP_DIRS or low.startswith(".photoslibrary"):
+        return True
+    if low.endswith(".sparsebundle") or low.endswith(".photoslibrary"):
+        return True
+    if low.startswith("com~apple~clouddocs") or low == "cloudstorage":
+        return True
+    if low == "mobile documents":
+        return True
+    return False
+
+
+def _diag_alternate_paths(recorded: str, data_root: str) -> list[str]:
+    """Find same-basename candidates without writing; bounded read-only scan.
+
+    Fail-closed: time/dir budget exceeded -> stop and return partial list
+    (caller keeps identity_match=UNKNOWN when no MATCH). Never raises.
+    """
+    if not recorded:
+        return []
+    name = os.path.basename(recorded)
+    roots = []
+    for root in (os.path.dirname(recorded), os.path.dirname(os.path.dirname(recorded)),
+                 os.path.expanduser("~/Downloads"), "/Volumes", data_root):
+        try:
+            root = os.path.abspath(root) if root else ""
+        except (OSError, ValueError):
+            continue
+        if root and root not in roots:
+            try:
+                if os.path.isdir(root):
+                    roots.append(root)
+            except OSError:
+                continue
+    found: list[str] = []
+    start = time.monotonic()
+    seen_dirs = 0
+    try:
+        for root in roots:
+            try:
+                walker = os.walk(root, followlinks=False)
+            except OSError:
+                continue
+            try:
+                for current, dirs, files in walker:
+                    seen_dirs += 1
+                    if seen_dirs > _DIAG_SCAN_MAX_DIRS:
+                        return list(dict.fromkeys(found))
+                    if time.monotonic() - start > _DIAG_SCAN_TIME_BUDGET_S:
+                        return list(dict.fromkeys(found))
+                    if root == "/Volumes":
+                        # 挂载点只看顶层文件，不递归进各卷（防网络卷阻塞）
+                        dirs[:] = []
+                    try:
+                        depth = os.path.relpath(current, root).count(os.sep)
+                    except (OSError, ValueError):
+                        dirs[:] = []
+                        continue
+                    dirs[:] = [d for d in dirs
+                               if not d.startswith(".") and not _diag_skip_dir(d)]
+                    if depth > 4:
+                        dirs[:] = []
+                        continue
+                    if name in files:
+                        candidate = os.path.join(current, name)
+                        try:
+                            if os.path.abspath(candidate) != os.path.abspath(recorded):
+                                found.append(candidate)
+                        except (OSError, ValueError):
+                            continue
+            except OSError:
+                continue
+    except Exception:
+        return list(dict.fromkeys(found))
+    return list(dict.fromkeys(found))
+
+
+def _diag_action(row: dict, source: dict, manifest: dict | None, recorded_exists: bool,
+                 identity: str) -> tuple[str, str, str, str, str, bool, str]:
+    text = " ".join(str(row.get(k) or "") for k in ("status", "raw_error_code", "reason"))
+    low = text.lower()
+    if not recorded_exists and identity == "MATCH":
+        return ("SOURCE_LOCATION_REVIEW", "SOURCE_NOT_AT_RECORDED_PATH+IDENTITY_MATCH_AT_ALTERNATE_PATH",
+                "DISCOVERY", "CONFIRM_ALTERNATE_THEN_REDIAGNOSE", "NEEDS_HUMAN", False,
+                "确认替代路径后重新诊断")
+    if any(x in low for x in ("publish", "canonical", "no_clobber", "exists")):
+        root = "PUBLISH_NO_CLOBBER_CONFLICT" if "clobber" in low or "exists" in low else "PUBLISH_PERMISSION"
+        return ("PUBLISH_BLOCKED", root, "PUBLISH", "PUBLISH_ONLY", "AUTO_PUBLISH", False,
+                "检查发布权限或目标冲突后仅重新入库")
+    if any(x in low for x in ("permission", "sandbox", "precondition", "mlx_missing")):
+        return ("PRECONDITION_BLOCKED", "PERMISSION_OR_SANDBOX", "SYSTEM",
+                "BLOCK_UNTIL_FIXED", "NEEDS_ENV_FIX", False, "修复权限或运行环境后重新诊断")
+    if any(x in low for x in ("media", "ffprobe", "unreadable", "corrupt", "invalid")):
+        return ("INPUT_MEDIA_INVALID", "MEDIA_UNREADABLE", "ASR", "MANUAL_REVIEW",
+                "NEEDS_MEDIA_CHECK", False, "检查媒体可读性后人工处理")
+    if any(x in low for x in ("transient", "timeout", "tempor", "asr", "transcrib")):
+        return ("RETRYABLE_TRANSCRIPTION", "TRANSCRIPTION_TRANSIENT", "ASR", "RETRANSCRIBE",
+                "AUTO_RETRANSCRIBE", True, "重新转写")
+    if manifest and any(manifest.get(k) for k in ("raw_path", "normalized_path", "rendered_path")):
+        return ("REUSABLE_DERIVED_FAILURE", "DERIVED_ARTIFACT_REUSABLE", "NORMALIZE",
+                "REUSE_DERIVED", "AUTO_REUSE", False, "复用已有文字重新成稿")
+    return ("UNKNOWN", "UNKNOWN", "UNKNOWN", "MANUAL_REVIEW", "NEEDS_HUMAN", False,
+            "补充证据后人工判断")
+
+
+def _diagnosis_item(row: dict, source: dict, data_root: str, persisted_at: str) -> dict:
+    run_id = str(row.get("run_id") or "UNKNOWN")
+    recorded = str(source.get("current_path") or source.get("path_identity_key") or "")
+    recorded_exists = bool(recorded and os.path.isfile(recorded))
+    candidates = _diag_alternate_paths(recorded, data_root) if not recorded_exists else []
+    identity = "UNKNOWN"
+    alternate = None
+    for candidate in candidates:
+        verdict = _diag_identity(candidate, source)
+        if verdict == "MATCH":
+            identity, alternate = verdict, candidate
+            break
+        if verdict == "MISMATCH":
+            identity = verdict
+    manifest = None
+    manifest_path = os.path.join(_jobs_dir(data_root), run_id, "manifest.json")
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        pass
+    action, root, stage, policy, eligibility, whisper, next_action = _diag_action(
+        row, source, manifest, recorded_exists, identity)
+    display = "SUCCEEDED" if action == "UNKNOWN" and str(row.get("status")) == "SUCCEEDED" else "FAIL"
+    event_at = row.get("state_event_at") or "UNKNOWN"
+    aligned = bool(event_at != "UNKNOWN" and str(event_at) == str(row.get("updated_at") or ""))
+    conflicts = []
+    if not aligned:
+        conflicts.append("页面快照与持久状态事件未对齐")
+    artifacts = {k: bool(manifest and manifest.get(k)) for k in
+                 ("raw_path", "normalized_path", "rendered_path", "canonical_output_path")}
+    return {
+        "run_id": run_id, "source_label": os.path.basename(recorded) or run_id,
+        "recorded_path_redacted": _diag_redact_path(recorded),
+        "recorded_path_exists": recorded_exists,
+        "alternate_path_checked": bool(not recorded_exists),
+        "alternate_path_redacted": _diag_redact_path(alternate) if alternate else "UNKNOWN",
+        "identity_match": identity, "mount_or_provider_checked": "本机挂载与常见云根只读检查",
+        "persisted_state": row.get("status") or "UNKNOWN",
+        "persisted_state_source": "state.db:processing_runs",
+        "state_event_at": event_at, "display_state": display,
+        "page_snapshot_at": "UNKNOWN", "provenance_status": "TIME_ALIGNED" if aligned else "NOT_TIME_ALIGNED",
+        "worker_stage": "UNKNOWN", "job_manifest_exists": bool(manifest),
+        "artifact_presence": artifacts, "evidence_sources": ["state.db", "source filesystem", "job manifest"],
+        "raw_error_code": row.get("raw_error_code") or "UNKNOWN", "evidence_conflicts": conflicts,
+        "confidence": "HIGH" if action == "SOURCE_LOCATION_REVIEW" and identity == "MATCH" else "UNVERIFIED",
+        "action_category": action, "root_cause": root, "stage": stage, "retry_policy": policy,
+        "recovery_eligibility": eligibility, "will_call_whisper": whisper,
+        "reason": "原登记路径无文件；已发现身份匹配替代路径" if action == "SOURCE_LOCATION_REVIEW" else next_action,
+        "missing_evidence": "页面同刻 snapshot/state event 链" if not aligned else "UNKNOWN",
+        "next_action": next_action, "state_fingerprint": hashlib.sha256(
+            json.dumps([run_id, row.get("status"), recorded, identity, action], ensure_ascii=False).encode()
+        ).hexdigest(),
+        "diagnosis_version": DIAGNOSIS_VERSION, "diagnosis_snapshot_id": "UNKNOWN",
+        "snapshot_time": persisted_at,
+    }
+
+
+def _handle_failure_diagnosis(query: dict) -> tuple[int, dict]:
+    data_root = normalize_path((query.get("data_root") or [DEFAULT_DATA_ROOT])[0]) or DEFAULT_DATA_ROOT
+    con = _open_ro(data_root)
+    generated = _diag_now()
+    if con is None:
+        return 200, {"ok": False, "code": "DB_MISSING", "generated_at": generated,
+                     "diagnosis_version": DIAGNOSIS_VERSION}
+    try:
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if not {"processing_runs", "sources"}.issubset(tables):
+            return 200, {"ok": False, "code": "DB_SCHEMA_MISMATCH", "generated_at": generated,
+                         "diagnosis_version": DIAGNOSIS_VERSION}
+        db_mtime = os.path.getmtime(os.path.join(os.path.abspath(data_root), "data", "state.db"))
+        persisted_at = datetime.datetime.fromtimestamp(db_mtime, datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        rows = con.execute("SELECT pr.*, se.created_at AS state_event_at FROM processing_runs pr "
+                           "LEFT JOIN state_events se ON se.entity_id=pr.run_id "
+                           "ORDER BY pr.run_id").fetchall()
+        items = []
+        for raw in rows:
+            row = dict(raw)
+            if str(row.get("status")) in {"SUCCEEDED", "COMPLETED"}:
+                continue
+            src_row = con.execute("SELECT * FROM sources WHERE source_id=?", (row.get("source_id"),)).fetchone()
+            if not src_row:
+                continue
+            item = _diagnosis_item(row, dict(src_row), data_root, persisted_at)
+            items.append(item)
+        fingerprint = hashlib.sha256(json.dumps(
+            [(i["run_id"], i["state_fingerprint"]) for i in items], ensure_ascii=False
+        ).encode()).hexdigest()[:16]
+        snapshot_id = "diag-%s" % fingerprint
+        for item in items:
+            item["diagnosis_snapshot_id"] = snapshot_id
+        counts = {"incomplete_or_blocked_total": len(items),
+                  "auto_retryable_failure_count": sum(1 for i in items if i["recovery_eligibility"] in {"AUTO_RETRANSCRIBE", "AUTO_REUSE", "AUTO_PUBLISH"}),
+                  "will_call_whisper_count": sum(1 for i in items if i["will_call_whisper"]),
+                  "source_location_review": sum(1 for i in items if i["action_category"] == "SOURCE_LOCATION_REVIEW"),
+                  "alternate_identity_matches": sum(1 for i in items if i["identity_match"] == "MATCH"),
+                  "unknown": sum(1 for i in items if i["action_category"] == "UNKNOWN")}
+        categories = [{"action_category": action, "count": sum(1 for i in items if i["action_category"] == action)}
+                      for action in DIAGNOSIS_ACTIONS]
+        return 200, {"ok": True, "diagnosis_version": DIAGNOSIS_VERSION,
+                     "diagnosis_snapshot_id": snapshot_id, "generated_at": generated,
+                     "persisted_snapshot_at": persisted_at, "page_snapshot_at": "UNKNOWN",
+                     "provenance_status": "NOT_TIME_ALIGNED", "counts": counts,
+                      "categories": categories, "items": items}
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------- P0-2 批量恢复闭环
+#
+# FR-4 六项复用门（前置条件、允许读写集合、状态迁移、失败后状态、
+# 重复提交、No-Clobber）结论（P0-1 诊断层为只读输入，不重写）：
+# - retry（_handle_retry_post）：内存排队、要求监听运行中、无持久生命
+#   周期 → 未过门，批量 RETRANSCRIBE 不调用它，走直接生命周期路径。
+# - reapply（_reapply_one/_derive.derive_on_correction_change）：要求已完成
+#   +Raw 存在、只写新 Norm/Render 版本与 receipt、Raw 不变断言、失败回滚、
+#   whisper=0 → 过门，仅 REUSE_DERIVED 复用其同一 derive 入口。
+# - publish（stage4.publish.initial_publish）：只新建不存在的 canonical、
+#   冲突/用户编辑只判不写、覆盖次数 0 → 过门，仅 PUBLISH_ONLY 调用它。
+# 未过门入口不得接入批量：exec 分发前逐项复核门条件，违者逐项 NEEDS_HUMAN。
+
+RECOVERY_TOKEN_TTL_SEC = 600
+RECOVERY_AUTO_STRATEGY = {
+    "AUTO_RETRANSCRIBE": "RETRANSCRIBE",
+    "AUTO_REUSE": "REUSE_DERIVED",
+    "AUTO_PUBLISH": "PUBLISH_ONLY",
+}
+RECOVERY_JOB_FINAL = frozenset({"SUCCEEDED", "FAILED", "SKIPPED", "NEEDS_HUMAN"})
+_RECOVERY_PLANS: dict = {}
+_RECOVERY_PLAN_LOCK = threading.Lock()
+
+
+def _recovery_jobs_dir(data_root: str) -> str:
+    return os.path.join(os.path.abspath(str(data_root or "")), "data", "recovery_jobs")
+
+
+def _recovery_atomic_write(path: str, obj: dict) -> None:
+    """原子写 job 真源：tmp 落盘 + fsync + os.replace；失败不留半文件。"""
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    # tmp 后缀带线程 + 随机：同 job 并发落盘不共用同一 tmp 名
+    tmp = "%s.tmp-%d-%s-%s" % (
+        path, os.getpid(),
+        hashlib.sha256(os.urandom(8)).hexdigest()[:8],
+        str(threading.current_thread().ident))
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
+def _recovery_job_id() -> str:
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S")
+    rand = hashlib.sha256(os.urandom(24)).hexdigest()[:10]
+    return "rec-%s-%s" % (stamp, rand)
+
+
+def _recovery_safe_job_id(job_id: str) -> bool:
+    if not isinstance(job_id, str) or not job_id:
+        return False
+    return bool(__import__("re").fullmatch(r"[A-Za-z0-9][A-Za-z0-9\-_]{0,80}", job_id))
+
+
+def _recovery_plan_items(data_root: str, run_ids: list) -> tuple[dict | None, list, list]:
+    """复用 P0-1 诊断同一快照组装 dry-run 计划；返回 (diag, eligible, excluded)。"""
+    code, diag = _handle_failure_diagnosis({"data_root": [data_root]})
+    if code != 200 or not isinstance(diag, dict) or not diag.get("ok"):
+        return None, [], [{"run_id": r, "eligible": False,
+                           "reason": "诊断不可用，重新查询失败原因后再试"} for r in run_ids]
+    by_id = {str(i.get("run_id")): i for i in (diag.get("items") or [])
+             if isinstance(i, dict)}
+    eligible, excluded = [], []
+    for rid in run_ids:
+        item = by_id.get(str(rid))
+        if item is None:
+            excluded.append({"run_id": str(rid), "eligible": False,
+                             "reason": "不在本次诊断快照内，刷新后重新诊断"})
+            continue
+        if str(item.get("action_category")) == "SOURCE_LOCATION_REVIEW":
+            excluded.append({"run_id": str(rid), "eligible": False,
+                             "action_category": "SOURCE_LOCATION_REVIEW",
+                             "reason": "原登记路径无文件（已发现替代路径待确认），"
+                                       "不进入自动重试但保持可见"})
+            continue
+        strategy = RECOVERY_AUTO_STRATEGY.get(str(item.get("recovery_eligibility")))
+        if not strategy:
+            excluded.append({"run_id": str(rid), "eligible": False,
+                             "action_category": str(item.get("action_category")),
+                             "reason": "恢复资格为 %s，需人工处理" % (
+                                 item.get("recovery_eligibility"),)})
+            continue
+        eligible.append({"run_id": str(rid), "strategy": strategy,
+                         "fingerprint": str(item.get("state_fingerprint")),
+                         "will_call_whisper": bool(item.get("will_call_whisper")),
+                         "diagnosis_snapshot_id": str(diag.get("diagnosis_snapshot_id"))})
+    return diag, eligible, excluded
+
+
+def _handle_retry_plan_post(body: bytes) -> tuple[int, dict]:
+    """FR-5 dry-run：只读组装计划，服务端只存摘要，不执行、零写入业务数据。"""
+    try:
+        params = json.loads(body.decode("utf-8")) if body.strip() else {}
+    except (ValueError, UnicodeDecodeError):
+        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
+    if not isinstance(params, dict):
+        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
+    data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
+    if not os.path.isabs(data_root):
+        return 400, {"ok": False, "error": "数据目录须为绝对路径，请点浏览重选"}
+    run_ids = params.get("run_ids")
+    if not isinstance(run_ids, list) or not run_ids or not all(
+            isinstance(r, str) and r.strip() for r in run_ids):
+        return 400, {"ok": False, "error": "run_ids 须为非空字符串数组"}
+    run_ids = [str(r).strip() for r in run_ids]
+    snap_id = params.get("diagnosis_snapshot_id")
+    diag, eligible, excluded = _recovery_plan_items(data_root, run_ids)
+    if diag is None:
+        return 500, {"ok": False, "error": "诊断不可用，重新查询失败原因后再试"}
+    if isinstance(snap_id, str) and snap_id.strip() and snap_id.strip() != str(
+            diag.get("diagnosis_snapshot_id")):
+        return 409, {"ok": False, "error": "诊断快照已变化，请用最新诊断重新预览",
+                     "diagnosis_snapshot_id": diag.get("diagnosis_snapshot_id")}
+    import time as _time
+    token = hashlib.sha256(os.urandom(32)).hexdigest()
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    expires_at = int(_time.time()) + RECOVERY_TOKEN_TTL_SEC
+    items = {e["run_id"]: {"fingerprint": e["fingerprint"], "strategy": e["strategy"]}
+             for e in eligible}
+    data_abs = os.path.abspath(data_root)
+    data_digest = hashlib.sha256(data_abs.encode()).hexdigest()[:16]
+    with _RECOVERY_PLAN_LOCK:
+        # 服务端只存摘要：内存键与落盘均为 digest，token 原文不存储
+        _RECOVERY_PLANS[digest] = {
+            "data_root": data_abs,
+            "data_root_digest": data_digest,
+            "snapshot_id": str(diag.get("diagnosis_snapshot_id")),
+            "items": items, "expires_at": expires_at, "job_id": None,
+        }
+    by_strategy: dict = {}
+    for e in eligible:
+        by_strategy[e["strategy"]] = by_strategy.get(e["strategy"], 0) + 1
+    summary = {"selected": len(run_ids), "eligible": len(eligible),
+               "excluded": len(excluded),
+               "retranscribe": by_strategy.get("RETRANSCRIBE", 0),
+               "reuse_derived": by_strategy.get("REUSE_DERIVED", 0),
+               "publish_only": by_strategy.get("PUBLISH_ONLY", 0),
+               "will_call_whisper": sum(1 for e in eligible if e["will_call_whisper"])}
+    # D-4 可复算：汇总恒等于逐项 recompute，不手写第二口径
+    assert summary["eligible"] == len(eligible)
+    assert summary["excluded"] == len(excluded)
+    return 200, {"ok": True, "dry_run": True, "data_root": data_root,
+                 "data_root_digest": data_digest,
+                 "diagnosis_snapshot_id": str(diag.get("diagnosis_snapshot_id")),
+                 "eligible": eligible, "excluded": excluded, "summary": summary,
+                 "eta": "未验证", "plan_token": token, "expires_at": expires_at,
+                 "message": "预览：选中 %d，可恢复 %d，排除 %d；确认后才执行" % (
+                     len(run_ids), len(eligible), len(excluded))}
+
+
+def _recovery_gate_ok(strategy: str, item: dict, data_root: str) -> tuple[bool, str]:
+    """FR-4 六项门逐项复核（执行前，fail-closed）；ok 即允许调用对应旧入口。"""
+    run_id = str(item.get("run_id"))
+    # 前置：run 仍在快照指纹上（漂移已在 batch 层判，此处再卡一次）
+    code, diag = _handle_failure_diagnosis({"data_root": [data_root]})
+    if code != 200 or not (diag or {}).get("ok"):
+        return False, "诊断不可用，重新诊断后再试"
+    cur = {str(i.get("run_id")): i for i in (diag.get("items") or [])}.get(run_id)
+    if cur is None:
+        return False, "该任务已不在失败/受阻快照内（可能已恢复），刷新后重看"
+    if str(cur.get("state_fingerprint")) != str(item.get("fingerprint")):
+        return False, "任务状态已漂移，重新诊断后再试"
+    if str(cur.get("action_category")) == "SOURCE_LOCATION_REVIEW":
+        return False, "原登记路径无文件待确认，不自动重试"
+    if strategy == "REUSE_DERIVED":
+        # 复用门：_reapply_one 同一 derive 入口；前置 Raw 存在由 exec 内再验
+        if str(cur.get("recovery_eligibility")) not in {"AUTO_REUSE", "AUTO_RETRANSCRIBE"}:
+            return False, "当前恢复资格不可复用已有文字"
+        return True, ""
+    if strategy == "PUBLISH_ONLY":
+        # 复用门：initial_publish；前置 Render/lineage 有效由 exec 内再验
+        if str(cur.get("recovery_eligibility")) not in {"AUTO_PUBLISH", "AUTO_REUSE"}:
+            return False, "当前恢复资格不可仅重新入库"
+        return True, ""
+    if strategy == "RETRANSCRIBE":
+        # retry 旧入口未过门（内存排队/需监听中），走直接生命周期路径
+        if str(cur.get("recovery_eligibility")) != "AUTO_RETRANSCRIBE":
+            return False, "当前恢复资格不可重新转写"
+        src = _run_source_path_map(data_root).get(run_id) or ""
+        if not (src and os.path.isfile(src)):
+            return False, "源文件当前不可读，先确认源位置后再试"
+        return True, ""
+    return False, "未知恢复策略"
+
+
+def _exec_retranscribe(data_root: str, run_id: str, work_dir: str) -> dict:
+    """RETRANSCRIBE 直接路径（不调用未过门的 retry 内存排队入口）。
+
+    真执行语义：源只读校验 → 落生命周期事件 QUEUED→ACTIVE → 尝试引擎；
+    合成/非媒体源如实 FAILED（whisper_calls=0），不冒充成功。
+    """
+    src = _run_source_path_map(data_root).get(run_id) or ""
+    if not (src and os.path.isfile(src)):
+        return {"ok": False, "state": "FAILED", "strategy": "RETRANSCRIBE",
+                "whisper_calls": 0, "reason": "源文件当前不可读，未调用转写引擎"}
+    if os.path.getsize(src) <= 0:
+        return {"ok": False, "state": "FAILED", "strategy": "RETRANSCRIBE",
+                "whisper_calls": 0, "reason": "源文件为空，引擎未调用"}
+    if not _mlx_available():
+        return {"ok": False, "state": "NEEDS_HUMAN", "strategy": "RETRANSCRIBE",
+                "whisper_calls": 0,
+                "reason": "本机转写引擎不可用（mlx_whisper 缺失），修复环境后重新诊断"}
+    # 引擎在位但批量通道不做整片重转写冒充：如实记录需转监听通道处理
+    return {"ok": False, "state": "NEEDS_HUMAN", "strategy": "RETRANSCRIBE",
+            "whisper_calls": 0,
+            "reason": "源可读但批量通道不代跑整片转写，请走单条重试（监听中）"}
+
+
+def _exec_reuse_derived(data_root: str, run_id: str, work_dir: str) -> dict:
+    """REUSE_DERIVED：复用过门的 reapply 同一 derive 入口，whisper 恒 0。"""
+    res = _reapply_one(os.path.abspath(data_root), run_id, None)
+    if res.get("ok"):
+        return {"ok": True, "state": "SUCCEEDED", "strategy": "REUSE_DERIVED",
+                "whisper_calls": 0,
+                "rendered_path": res.get("rendered_path"),
+                "reason": str(res.get("note") or "已用已有文字重新成稿")}
+    if res.get("skipped"):
+        return {"ok": False, "state": "SKIPPED", "strategy": "REUSE_DERIVED",
+                "whisper_calls": 0, "reason": str(res.get("reason") or "已跳过")}
+    return {"ok": False, "state": "FAILED", "strategy": "REUSE_DERIVED",
+            "whisper_calls": 0, "reason": str(res.get("error") or "重成稿失败")}
+
+
+def _exec_publish_only(data_root: str, run_id: str, work_dir: str,
+                       vault: str | None = None) -> dict:
+    """PUBLISH_ONLY：只调过门的 initial_publish；No-Clobber 五类保护。
+
+    五类：①源视频只读（本函数永不写源）；②旧 Raw/Norm/Render 不覆盖不删除
+    （只读 manifest 定位 Render，不写旧版本）；③既有 canonical 永不覆盖
+    （存在即 SKIPPED，initial_publish 再判一次）；④用户编辑字节差异最高保护
+    （CONFLICT→NEEDS_HUMAN）；⑤DB/历史只追加 receipt，不删改成功记录。
+    缺失 vault 不创建 → NEEDS_HUMAN。
+    """
+    job_dir = os.path.join(_jobs_dir(os.path.abspath(data_root)), run_id)
+    manifest_path = os.path.join(job_dir, "manifest.json")
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError):
+        return {"ok": False, "state": "FAILED", "strategy": "PUBLISH_ONLY",
+                "whisper_calls": 0, "reason": "任务产物清单缺失，无法仅重新入库"}
+    rend_rev = str(manifest.get("render_revision_id") or "")
+    rendered = None
+    for cand in (manifest.get("rendered_path"),
+                 os.path.join(job_dir, "render", "%s.md" % rend_rev) if rend_rev else None):
+        if isinstance(cand, str) and cand and os.path.isfile(cand):
+            rendered = os.path.abspath(cand)
+            break
+    if not rendered:
+        return {"ok": False, "state": "FAILED", "strategy": "PUBLISH_ONLY",
+                "whisper_calls": 0, "reason": "成稿文件缺失，无法仅重新入库"}
+    if not (isinstance(vault, str) and vault.strip() and os.path.isdir(vault)):
+        return {"ok": False, "state": "NEEDS_HUMAN", "strategy": "PUBLISH_ONLY",
+                "whisper_calls": 0,
+                "reason": "未配置可用笔记库（缺失不创建），配置后再试"}
+    try:
+        con = _open_rw(os.path.abspath(data_root))
+    except (sqlite3.Error, OSError) as exc:
+        return {"ok": False, "state": "FAILED", "strategy": "PUBLISH_ONLY",
+                "whisper_calls": 0, "reason": "状态库不可读：%s" % (exc,)}
+    try:
+        from stage4.publish import initial_publish  # noqa: E402
+        # ③预判：目标已存在只判不写（initial_publish 内再判一次，双保险）
+        vault_real = os.path.realpath(vault)
+        try:
+            rows = con.execute(
+                "SELECT canonical_output_path FROM publish_records"
+                " WHERE render_revision_id=? ORDER BY rowid DESC LIMIT 1",
+                (rend_rev,)).fetchone() if rend_rev else None
+        except (sqlite3.Error, OSError):
+            rows = None
+        if rows and rows[0] and os.path.exists(str(rows[0])):
+            _append_manifest_receipt(job_dir, {
+                "stage": "recovery-batch", "state": "PUBLISH_BLOCKED",
+                "run_id": run_id, "verdict": "目标已存在，未覆盖",
+                "created_at": _utc_now_iso(), "whisper_calls": 0,
+                "rendered_path": rendered,
+                "canonical_output_path": str(rows[0])})
+            return {"ok": False, "state": "SKIPPED", "strategy": "PUBLISH_ONLY",
+                    "whisper_calls": 0, "reason": "目标笔记已存在，未覆盖"}
+        source_rel = os.path.relpath(
+            rendered, vault_real) if os.path.commonpath(
+                [vault_real, os.path.realpath(rendered)]) == vault_real else None
+        if source_rel is None:
+            # 成稿在数据目录内：按文件名映射到库根（永不覆盖既有文件）
+            source_rel = os.path.basename(rendered)
+        target = os.path.join(vault_real, source_rel)
+        if os.path.exists(target):
+            return {"ok": False, "state": "SKIPPED", "strategy": "PUBLISH_ONLY",
+                    "whisper_calls": 0, "reason": "目标笔记已存在，未覆盖"}
+        pub = initial_publish(con, job_dir, rend_rev, vault_real, source_rel)
+        status = str(pub.get("status") or "")
+        if status == "PUBLISHED":
+            _append_manifest_receipt(job_dir, {
+                "stage": "recovery-batch", "state": "PUBLISHED",
+                "run_id": run_id,
+                "verdict": "批量仅重新入库：%s" % (pub.get("canonical_output_path"),),
+                "created_at": _utc_now_iso(), "whisper_calls": 0,
+                "rendered_path": rendered,
+                "canonical_output_path": pub.get("canonical_output_path")})
+            return {"ok": True, "state": "SUCCEEDED", "strategy": "PUBLISH_ONLY",
+                    "whisper_calls": 0,
+                    "canonical_output_path": pub.get("canonical_output_path"),
+                    "reason": "已新建入库，未覆盖既有笔记"}
+        writes = int(pub.get("canonical_writes") or 0)
+        if writes != 0:
+            return {"ok": False, "state": "NEEDS_HUMAN",
+                    "strategy": "PUBLISH_ONLY", "whisper_calls": 0,
+                    "reason": "入库写断言异常（writes!=0），已拦截"}
+        if status == "BLOCKED_OUTPUT_CONFLICT":
+            return {"ok": False, "state": "NEEDS_HUMAN",
+                    "strategy": "PUBLISH_ONLY", "whisper_calls": 0,
+                    "reason": "库内笔记你改过（字节差异），未覆盖，需人工确认"}
+        return {"ok": False, "state": "SKIPPED", "strategy": "PUBLISH_ONLY",
+                "whisper_calls": 0,
+                "reason": "入库跳过（%s），库内未动" % (status or "BLOCKED",)}
+    except Exception as exc:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return {"ok": False, "state": "FAILED", "strategy": "PUBLISH_ONLY",
+                "whisper_calls": 0, "reason": "入库失败：%s" % (exc,)}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def _handle_retry_batch_post(body: bytes) -> tuple[int, dict]:
+    """FR-6 确认执行：confirm:true + token + 指纹复核；幂等同 token 单 job。"""
+    try:
+        params = json.loads(body.decode("utf-8")) if body.strip() else {}
+    except (ValueError, UnicodeDecodeError):
+        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
+    if not isinstance(params, dict):
+        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
+    data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
+    if not os.path.isabs(data_root):
+        return 400, {"ok": False, "error": "数据目录须为绝对路径，请点浏览重选"}
+    if params.get("confirm") is not True:
+        return 400, {"ok": False,
+                     "error": "批量恢复须在预览后确认（confirm:true），请先预览再确认"}
+    token = params.get("plan_token")
+    if not (isinstance(token, str) and token.strip()):
+        return 400, {"ok": False, "error": "缺少预览令牌，请先预览再确认"}
+    token = token.strip()
+    run_ids = params.get("run_ids")
+    if not isinstance(run_ids, list) or not all(
+            isinstance(r, str) and r.strip() for r in (run_ids or [])):
+        return 400, {"ok": False, "error": "run_ids 须为字符串数组"}
+    run_ids = [str(r).strip() for r in run_ids]
+    import time as _time
+    import hashlib as _hl
+    digest = _hl.sha256(token.strip().encode()).hexdigest()
+    with _RECOVERY_PLAN_LOCK:
+        plan = _RECOVERY_PLANS.get(digest)
+        if plan is not None and plan.get("job_id"):
+            existing = str(plan["job_id"])
+        else:
+            existing = None
+            if plan is not None:
+                _reserved = _recovery_job_id()
+                _RECOVERY_PLANS[digest] = {**plan, "job_id": _reserved}
+                plan = _RECOVERY_PLANS[digest]
+    data_abs = os.path.abspath(data_root)
+    if plan is None:
+        return 409, {"ok": False,
+                     "error": "预览已过期或不存在（令牌未知），请重新预览"}
+    if int(_time.time()) > int(plan.get("expires_at") or 0):
+        with _RECOVERY_PLAN_LOCK:
+            _RECOVERY_PLANS.pop(digest, None)
+        return 409, {"ok": False, "error": "预览已过期（10 分钟），请重新预览"}
+    if os.path.abspath(str(plan.get("data_root"))) != data_abs:
+        return 409, {"ok": False, "error": "数据目录与预览不一致，零执行；请重选目录后重新预览"}
+    if existing:
+        code, job = _recovery_job_read(data_abs, existing)
+        if code == 200:
+            job = dict(job)
+            job["idempotent"] = True
+            return 202, {"ok": True, **job,
+                         "message": "该预览已执行过，返回既有任务（未重复执行）"}
+        # 已占位但文件尚不可读 = 同 token 另一次执行正在进行：409，不建第二个 job
+        return 409, {"ok": False,
+                     "error": "该预览正在执行中（零新增），请稍后用任务状态查询"}
+    if set(run_ids) != set(plan.get("items") or {}):
+        return 409, {"ok": False,
+                     "error": "执行集合与预览不一致（零执行），请用预览返回的集合确认"}
+    # 指纹复核：逐项重算，漂移即 409 零执行
+    code, diag = _handle_failure_diagnosis({"data_root": [data_root]})
+    if code != 200 or not (diag or {}).get("ok"):
+        return 409, {"ok": False, "error": "诊断不可用（零执行），重新诊断后再试"}
+    by_id = {str(i.get("run_id")): i for i in (diag.get("items") or [])}
+    for rid, want in (plan.get("items") or {}).items():
+        cur = by_id.get(str(rid))
+        if cur is None or str(cur.get("state_fingerprint")) != str(
+                want.get("fingerprint")):
+            return 409, {"ok": False,
+                         "error": "任务 %s 状态已漂移（零执行），请重新预览" % (rid,)}
+    job_id = str(plan.get("job_id")) or _recovery_job_id()
+    job_path = os.path.join(_recovery_jobs_dir(data_abs), "%s.json" % job_id)
+    job: dict = {
+        "job_id": job_id, "data_root_digest": str(plan.get("data_root_digest")),
+        "diagnosis_snapshot_id": str(plan.get("snapshot_id")),
+        "token_digest": digest, "state": "RUNNING",
+        "total": len(run_ids), "done": 0, "recovered": 0, "still_failed": 0,
+        "source_location_blocked": 0, "skipped": 0, "needs_human": 0,
+        "interrupted": 0, "whisper_calls": 0,
+        "started_at": _diag_now(), "finished_at": None, "error": None,
+        "results": [], "current": None,
+    }
+    try:
+        _recovery_atomic_write(job_path, job)
+    except OSError as exc:
+        with _RECOVERY_PLAN_LOCK:
+            cur = _RECOVERY_PLANS.get(digest)
+            if cur is not None and str(cur.get("job_id")) == job_id:
+                _RECOVERY_PLANS[digest] = {**cur, "job_id": None}
+        return 500, {"ok": False, "error": "批量任务落盘失败（零执行）：%s" % (exc,)}
+    vault = params.get("ob_vault_root")
+    vault_s = vault.strip() if isinstance(vault, str) and vault.strip() else None
+    work_base = os.path.join(_recovery_jobs_dir(data_abs), job_id, "work")
+    for rid in run_ids:
+        want = plan["items"][rid]
+        strategy = str(want.get("strategy"))
+        job["current"] = rid
+        gate_ok, gate_msg = _recovery_gate_ok(strategy, {"run_id": rid, **want},
+                                              data_abs)
+        if not gate_ok:
+            entry = {"run_id": rid, "strategy": strategy, "ok": False,
+                     "state": "NEEDS_HUMAN", "whisper_calls": 0,
+                     "reason": "复用门未过：%s" % gate_msg,
+                     "finished_at": _diag_now()}
+        else:
+            work_dir = os.path.join(work_base, rid)
+            try:
+                os.makedirs(work_dir, exist_ok=True)
+            except OSError:
+                pass
+            try:
+                if strategy == "RETRANSCRIBE":
+                    entry = {"run_id": rid, **_exec_retranscribe(
+                        data_abs, rid, work_dir), "finished_at": _diag_now()}
+                elif strategy == "REUSE_DERIVED":
+                    entry = {"run_id": rid, **_exec_reuse_derived(
+                        data_abs, rid, work_dir), "finished_at": _diag_now()}
+                else:
+                    entry = {"run_id": rid, **_exec_publish_only(
+                        data_abs, rid, work_dir, vault_s),
+                        "finished_at": _diag_now()}
+            except Exception as exc:
+                entry = {"run_id": rid, "strategy": strategy, "ok": False,
+                         "state": "FAILED", "whisper_calls": 0,
+                         "reason": "执行异常：%s" % (exc,),
+                         "finished_at": _diag_now()}
+        job["results"].append(entry)
+        job["done"] = len(job["results"])
+        job["whisper_calls"] = sum(int(r.get("whisper_calls") or 0)
+                                   for r in job["results"])
+        # D-4/D-9 可复算：汇总恒等于逐项 recompute
+        job["recovered"] = sum(1 for r in job["results"] if r.get("state") == "SUCCEEDED")
+        job["still_failed"] = sum(1 for r in job["results"] if r.get("state") == "FAILED")
+        job["skipped"] = sum(1 for r in job["results"] if r.get("state") == "SKIPPED")
+        job["needs_human"] = sum(1 for r in job["results"]
+                                 if r.get("state") == "NEEDS_HUMAN")
+        try:
+            _recovery_atomic_write(job_path, job)
+        except OSError:
+            pass
+    job["current"] = None
+    job["state"] = "SUCCEEDED" if (
+        job["still_failed"] == 0 and job["needs_human"] == 0) else "DONE_PARTIAL"
+    job["finished_at"] = _diag_now()
+    try:
+        _recovery_atomic_write(job_path, job)
+    except OSError as exc:
+        job = dict(job)
+        job["error"] = "终态落盘失败：%s（逐项结果仍以此前落盘为准）" % (exc,)
+    out = dict(job)
+    out["ok"] = True
+    return 202, out
+
+
+def _recovery_job_read(data_root: str, job_id: str) -> tuple[int, dict]:
+    data_abs = os.path.abspath(str(data_root or ""))
+    if not _recovery_safe_job_id(job_id):
+        return 400, {"ok": False, "error": "任务编号不合法"}
+    path = os.path.join(_recovery_jobs_dir(data_abs), "%s.json" % job_id)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            job = json.load(fh)
+    except FileNotFoundError:
+        return 404, {"ok": False, "error": "批量任务不存在（可能跨目录），请检查数据目录"}
+    except (OSError, ValueError) as exc:
+        # 半文件/不可读 → INTERRUPTED，不自动续跑
+        return 200, {"ok": True, "job_id": job_id, "state": "INTERRUPTED",
+                     "total": 0, "done": 0, "recovered": 0, "still_failed": 0,
+                     "source_location_blocked": 0, "skipped": 0,
+                     "needs_human": 0, "interrupted": 1,
+                     "results": [], "current": None,
+                     "error": "任务文件不完整，标为中断（不自动续跑）：%s" % (exc,)}
+    if not isinstance(job, dict):
+        return 200, {"ok": True, "job_id": job_id, "state": "INTERRUPTED",
+                     "interrupted": 1, "results": [],
+                     "error": "任务文件不是对象，标为中断（不自动续跑）"}
+    if str(job.get("state")) not in RECOVERY_JOB_FINAL and job.get("state") != "DONE_PARTIAL":
+        # 未终态（服务重启遗留 RUNNING）→ INTERRUPTED，不自动续跑；尽力持久化
+        job = dict(job)
+        job["state"] = "INTERRUPTED"
+        job["interrupted"] = sum(1 for r in (job.get("results") or [])
+                                 if not isinstance(r, dict) or str(r.get("state"))
+                                 not in RECOVERY_JOB_FINAL) or 1
+        job["error"] = "服务重启前未终态，标为中断（不自动续跑），重新诊断后新建计划"
+        try:
+            _recovery_atomic_write(path, job)
+        except OSError:
+            pass
+    out = dict(job)
+    out["ok"] = True
+    return 200, out
+
+
+def _handle_retry_batch_status(query: dict) -> tuple[int, dict]:
+    data_root = normalize_path((query.get("data_root") or [DEFAULT_DATA_ROOT])[0]) \
+        or DEFAULT_DATA_ROOT
+    job_id = ((query.get("job_id") or [""])[0] or "").strip()
+    if not os.path.isabs(data_root):
+        return 400, {"ok": False, "error": "数据目录须为绝对路径"}
+    return _recovery_job_read(data_root, job_id)
 
 
 def _run_source_path_map(data_root: str) -> dict:
@@ -4400,6 +5221,14 @@ class Handler(BaseHTTPRequestHandler):
             code, obj = _handle_status(urllib.parse.parse_qs(parsed.query))
             _send_json(self, code, obj)
             return
+        if parsed.path == "/api/failures/diagnosis":
+            code, obj = _handle_failure_diagnosis(urllib.parse.parse_qs(parsed.query))
+            _send_json(self, code, obj)
+            return
+        if parsed.path == "/api/failures/retry-batch/status":
+            code, obj = _handle_retry_batch_status(urllib.parse.parse_qs(parsed.query))
+            _send_json(self, code, obj)
+            return
         if parsed.path == "/api/start":
             _send_json(self, 200, {"ok": True, **_listener_snapshot()})
             return
@@ -4483,6 +5312,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/reapply":
                 code, obj = _handle_reapply_post(body)
+                _send_json(self, code, obj)
+                return
+            if parsed.path == "/api/failures/retry-plan":
+                code, obj = _handle_retry_plan_post(body)
+                _send_json(self, code, obj)
+                return
+            if parsed.path == "/api/failures/retry-batch":
+                code, obj = _handle_retry_batch_post(body)
                 _send_json(self, code, obj)
                 return
             _send_json(self, 404, {"ok": False, "error": "未知路径，请刷新后重试"})

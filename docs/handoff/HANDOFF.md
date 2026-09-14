@@ -10,7 +10,7 @@
 - PLAN_GATE：**APPROVED**（用户明确进 DEVELOP，锁定基线开工；不是 Readiness 达标通过）
 - DEV_BASELINE：`PRODUCT_PLAN_V1.3`（Phase2 锁定基线，禁随意改 Plan；变更只走 Change C）
 - CHANGE_REQUEST：**NONE**
-- Stage ID（本阶段叫什么）：**DEVELOP-P0 全链收口**（P0-1／P0-2／P0-3 全链 PASS，无未收口 P0）。P0-3 本链 supervisor 累计打回定格 **1/2**（未触发升级）；P0-1 停 1/2、P0-2 本链 0/2。QA 挂与 reviewer 返工不计数。工作树未提交未推送（基于 b94845e）。
+- Stage ID（本阶段叫什么）：**DEVELOP-P0 全链收口**（P0-1／P0-2／P0-3 全链 PASS，无未收口 P0）。P0-3 本链 supervisor 累计打回定格 **1/2**（未触发升级）；P0-1 停 1/2、P0-2 本链 0/2。QA 挂与 reviewer 返工不计数。**已提交并推送 `main`（c753b15）**。
 ---
 
 ## 一、当前的工作进展
@@ -25,7 +25,8 @@
 - **P0-3 语义修复（2026-09-14，仍 1/2）**：builder 只改 `app/server.py` 约 `:1339` 起 mismatch 判定一块——语义归一化（`display==FAIL` 时持久态属 FAIL 家族 `FAIL/PUBLISH_BLOCKED/TRANSCRIBE_FAILED/RAW_FAILED/MIRROR_FAILED/NORM_RENDER_FAILED` 即不算 mismatch，口径与 `_scan_disk_states` 一致；其余字面比较；真 mismatch 仍 fail-closed；零 DB/manifest/产物写）→ code-reviewer **PASS**（`docs/review/P0-3-SEMANTICS-FIX-REVIEW.md`；1×P2 provenance 加性注记；server 计数 `28/3` vs 报告 `+19/−3` 口径差已由 neat 加注待 supervisor 裁定）→ qa **PASS**（`docs/qa/P0-3-SEMANTICS-FIX-QA-2026-09-14.md`：`QA-P03-RR2-001` CLOSED——正常 `PUBLISH_BLOCKED→AUTO_PUBLISH/PUBLISH_ONLY/eligible=1/whisper=0`，真 mismatch 仍 `NEEDS_HUMAN/MANUAL_REVIEW`，`state.db` SHA-256 前后不变，静态回归全过；真实 whisper/batch 发布/HTTP 服务/真机 UI 未跑）。**→ supervisor 复检 2026-09-14 23:31 PASS（收口）**（复检节在 `docs/qa/P0-3-SEMANTICS-FIX-QA-2026-09-14.md` 尾：计数口径裁定 `28/3` ＝返工前 `19/3` ＋语义修复净增 9 行（`_FAIL_SEMANTICS`＋归一化分支＋8 个只读 provenance 字段），逐行归因无未申报内容→**属修复前快照口径、非失实、不打断口**；两账本 exit 0；三处对账一致；Phase Integrity 五查过；红线抽查过；无 blocking。遗留 2×P2 与「真实 whisper／batch 发布／HTTP 服务／真机 UI 未跑」作已知缺口不拦收口）。
 - **暂停前收尾（2026-09-14 23:27，neat-freak PASS）**：四份报告加注对齐（历史快照正文未动）、删 2 个 `.DS_Store`（仓根＋`docs/`）、`__pycache__` 本就为空、`git diff --check` 通过；未动业务/文档文件，未碰 `008林粒粒AI编程/`；`env.err`、`results/*.log` 保留。详见文末「收尾记一笔（neat-freak，2026-09-14本轮）」。
 - **账本（TM，23:31 收口版）**：`DISPATCH-LOG` 34→**35** 行（新增一行 supervisor「DEVELOP-P0-3 语义修复复检」，`used=主`／`runtime=本窗口`／模型 `opencode-go/muse-spark-1.3-contributor` 逐字对根表）；`TASK-MODEL-LOG` **48** 行（语义修复链任务级行 `DEVELOP-P0-3-FIX-PUBLISH-SEMANTICS` 已由 builder 初版落盘 `rework=0`，TM 判 PASS）。两道校验 23:31 回跑 **exit 0**（TASK 48 行／DISPATCH 35 行）；supervisor 复检已独立校验并三处对账一致。
-- **工作树现状（暂停时，未提交未推送，基于 b94845e）**：`M app/index.html 181/31`＋`M app/server.py 28/3`＋`M docs/handoff/HANDOFF.md`＋`M docs/model/DISPATCH-LOG.jsonl`＋`M docs/model/TASK-MODEL-LOG.jsonl`；新文件 7 个（`docs/review/` 4：REWORK/REWORK2/SEMANTICS-FIX＋旧 CODE-REVIEW；`docs/qa/` 3：旧 QA＋RETEST2＋SEMANTICS-FIX-QA）。`compileall exit 0`，`git diff --check` 通过。**服务：8765 无监听。**
+- **工作树现状（23:35 已提交并推送）**：commit **c753b15**（12 files，+762/−48）已 push 到 `origin/main`（`b94845e..c753b15`）；工作树**干净、与 `origin/main` 0/0 同步**。本次交付＝`app/index.html 181/31`＋`app/server.py 28/3`＋`docs/handoff/HANDOFF.md`＋两账本＋7 份新报告（`docs/review/` 4＋`docs/qa/` 3）。`git diff --check` 通过。**服务：8765 无监听。**
+- **提交推送（TM，23:35）**：用户给分支名 `main` 后动 git——`git add` 只加申报的 12 个文件（`app/index.html`、`app/server.py`、HANDOFF、两账本、7 份新报告），提交前扫敏感（无命中），commit **c753b15**「DEVELOP P0-3收口…全P0清」，`git push origin main` → `b94845e..c753b15`；提交后工作树干净、`HEAD==origin/main` 逐字一致。
 - **模型通道现状**：luna 2026-09-14 多次 capacity（首版那次 patch 落盘但尾部报错、返工三次零落盘）；sol 探针也无回包，属 codex 侧不稳、非本地登录问题。supervisor 已由用户切为 `opencode-go/muse-spark-1.3-contributor`（走本窗口），builder 切为 `opencode-go/deepseek-v4.1-flash`（走本窗口），以 `USER_MODEL_OVERRIDE.md` 为准。
 - **本窗口已做准备（暂停前，历史）**：P1-7 改名只读盘点（`index.html` 可见 4 处待改＋`server.py` 兼容 7 处不动）；`data/state.db` 仓根不存在已记账，待核 data_root 真源。工作树未提交未推送（以本节“工作树现状”行为准）。**服务现状：8765 当前无监听**（旧记 PID 12429 已不在，勿再引用该 PID）。
 - **Phase1 基线（继承）**：`docs/pm/PRODUCT_PLAN.md`=V1.3；16 条红字真相=用户自移视频、DB 全 QUEUED；HD-1~9 全=A；Readiness 89/83 未达 90 用户已知开工。Phase1 详情见本文后段各节与文末附录。
@@ -34,13 +35,13 @@
 
 - **下一步（Next Single Action，按序）**：
   1. ~~派 supervisor 复检 P0-3~~ **已办（23:31 PASS，P0-3 收口，全 P0 清）**。
-  2. **TM 汇总找人一次（本行即该次）**：等用户拍板——① 是否 commit/push＋分支名；② 继续做 P1-1~P1-7 还是先真机目检一遍 P0 交付；③ 是否换主用模型。
-  3. 用户拍板后才动 git；未给分支名则保持工作树未提交未推送（基于 b94845e）。
+  2. ~~TM 汇总找人一次~~ **已办**：用户 2026-09-14 给分支名 `main`，P0 交付已 commit **c753b15** 并 push `origin/main`。
+  3. **待用户拍**：① 继续做 P1-1~P1-7，还是先起服务真机目检 P0 交付；② 是否换主用模型（另：真源与根镜像模型表的「执行通道」列不一致，已上报待裁定，见注意事项）。
   4. 若继续开发：P1-1~P1-7（P1-6 视觉布局/历史管理独立验收；解不了的挂账记报告，不拦主线）。P1-7 改名盘点已备好（`index.html` 可见 4 处待改＋`server.py` 兼容 7 处不动）。
   5. 真机目检要做先起服务（8765 现无监听，PORT 硬编码；改 `app/` 或 `src/` 后必须重启再验）；**自动化禁点真机主题开关**。
   6. 经验／neat-freak 收尾只派一次，等用户说收工再派。
 - **人要拍什么板（只问大事，小事不问直接推）**：
-  1. **commit/push 与分支名**：本轮 P0 交付全在工作树未提交（`M app/index.html 181/31`＋`M app/server.py 28/3`＋`M HANDOFF`＋两账本＋7 份新报告，基于 b94845e）；给分支名才动，前序 91beaf8 推的是 `main`。
+  1. ~~commit/push 与分支名~~ **已办**：用户定 `main`，commit **c753b15**（12 files，+762/−48）已 push `origin/main`。
   2. **下一步做哪块**：继续 P1-1~P1-7，还是先起服务真机目检 P0 交付（真实 whisper／batch 发布／HTTP 服务／真机 UI 本链未跑，属已知缺口不拦收口）。
   3. 是否换 builder/qa/supervisor 主用模型（给精确 ID 才改表，不自切）。
 - **待排期 backlog（非阻塞）**：P0-3 遗留 2×P2（provenance 加性字段、术语残留 `obhint:741`）；22 条 P3 按 V1.3 处置表分流；`data/state.db` 真源待核；P1-7 改名盘点已备好等 builder；benchmark `results/*.log` 19 个保留不删；真实 whisper／真机 UI 未跑。
@@ -51,6 +52,7 @@
 - **两阶段治理**：`PLAN / WAITING_HUMAN_APPROVAL / DEVELOP / PLAN_REOPEN_REQUIRED`。Phase1 **只许** task-manager／supervisor／planner(Sol)／product-reviewer(FREE)，**禁** builder／code-reviewer／qa／业务代码改动／Release；只有用户明确说"第二阶段，开发"才进 Phase2。
 - **派工显式**：每派必先贴「正在调用 XX｜主用精确ID＋Runtime／备用精确ID＋Runtime」，收工必贴「XX 回来了 PASS/FAIL＋实际走主还是备」；HANDOFF 执行链与账本记同一行。
 - **固定通道（4 列表，无备用列，以根表为准）**：builder=`opencode-go/deepseek-v4.1-flash`（本窗口）；qa=`codex/gpt-5.6-luna`（codex）；supervisor=**`opencode-go/muse-spark-1.3-contributor`（本窗口）**；planner/senior=`codex/gpt-5.6-sol`；code-reviewer／experience-recorder／neat-freak＝本窗口。**主用不可用即停派找人，禁自动切备用/降级；换模型用户定。**
+- **模型表口径差（已上报，待用户裁定，2026-09-14 23:35）**：真源 `~/.agents/model-routing/USER_MODEL_OVERRIDE.md` 与项目根镜像**角色→模型 ID 列完全一致**，但 `supervisor`／`builder` 两行的**「执行通道」列不一致**——真源＝`opencode`（走 `opencode run -m …` 直调），根镜像＝`本窗口`（subagent 直派）。本轮 supervisor 复检按**根镜像**走本窗口 subagent 执行。以哪份为准待用户拍；未拍前本仓沿用根镜像。
 - **推进纪律（用户 2026-09-14 明确）**：小问题不问直接推；P0/P1 尽量解、解不了挂账记报告；除 API 密钥问题外一律往前推。luna capacity 时小步重试＋挂账，不在错基线上盖楼。
 - **额度纪律（本轮新增，用户明确要求）**：外部模型单轮动辄数十万 token，**先小步试、及时收**；能本窗口做的别外派；用户说"停"立即停；烧了多少要如实报。
 - **升级**：同一 Task 被 supervisor 累计打回 2 次自动升 senior-expert（QA 挂不算），只升当次；换模型/换 Runtime 即开新链。

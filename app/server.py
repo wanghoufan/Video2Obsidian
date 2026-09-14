@@ -1331,10 +1331,27 @@ def _diagnosis_item(row: dict, source: dict, data_root: str, persisted_at: str) 
         row, source, manifest, recorded_exists, identity)
     display = "SUCCEEDED" if action == "UNKNOWN" and str(row.get("status")) == "SUCCEEDED" else "FAIL"
     event_at = row.get("state_event_at") or "UNKNOWN"
+    persisted_state = str(row.get("status") or "UNKNOWN")
     aligned = bool(event_at != "UNKNOWN" and str(event_at) == str(row.get("updated_at") or ""))
     conflicts = []
     if not aligned:
         conflicts.append("页面快照与持久状态事件未对齐")
+    # FR-13 四层状态 fail-closed：展示与记录不一致时恢复资格降级，不回写 DB
+    # 状态语义归一化：展示态"FAIL"为失败/受阻语义，对应持久态 FAIL 家族
+    # （PUBLISH_BLOCKED 正常入库受阻属 FAIL 语义，不算 mismatch）；真不一致仍 mismatch 降级
+    _FAIL_SEMANTICS = frozenset({"FAIL", "PUBLISH_BLOCKED", "TRANSCRIBE_FAILED",
+                                 "RAW_FAILED", "MIRROR_FAILED", "NORM_RENDER_FAILED"})
+    if display == "FAIL":
+        mismatch = bool(persisted_state not in _FAIL_SEMANTICS)
+    elif display == "SUCCEEDED":
+        mismatch = bool(persisted_state != "SUCCEEDED")
+    else:
+        mismatch = bool(display != persisted_state)
+    if mismatch:
+        conflicts.append("展示与记录不一致，原因待验证")
+        if eligibility in {"AUTO_RETRANSCRIBE", "AUTO_REUSE", "AUTO_PUBLISH"}:
+            eligibility, policy, whisper = "NEEDS_HUMAN", "MANUAL_REVIEW", False
+            next_action = "展示与记录不一致，原因待验证；补充证据后人工判断"
     artifacts = {k: bool(manifest and manifest.get(k)) for k in
                  ("raw_path", "normalized_path", "rendered_path", "canonical_output_path")}
     return {
@@ -1344,16 +1361,24 @@ def _diagnosis_item(row: dict, source: dict, data_root: str, persisted_at: str) 
         "alternate_path_checked": bool(not recorded_exists),
         "alternate_path_redacted": _diag_redact_path(alternate) if alternate else "UNKNOWN",
         "identity_match": identity, "mount_or_provider_checked": "本机挂载与常见云根只读检查",
-        "persisted_state": row.get("status") or "UNKNOWN",
+        "persisted_state": persisted_state,
         "persisted_state_source": "state.db:processing_runs",
+        "persisted_state_at": event_at,
         "state_event_at": event_at, "display_state": display,
+        "display_state_source": "page snapshot:failure-diagnosis",
+        "display_state_at": persisted_at,
         "page_snapshot_at": "UNKNOWN", "provenance_status": "TIME_ALIGNED" if aligned else "NOT_TIME_ALIGNED",
-        "worker_stage": "UNKNOWN", "job_manifest_exists": bool(manifest),
+        "worker_stage": "UNKNOWN", "worker_stage_source": "worker event(only meaningful when ACTIVE)",
+        "worker_stage_at": "UNKNOWN", "job_manifest_exists": bool(manifest),
+        "display_persisted_mismatch": mismatch,
         "artifact_presence": artifacts, "evidence_sources": ["state.db", "source filesystem", "job manifest"],
         "raw_error_code": row.get("raw_error_code") or "UNKNOWN", "evidence_conflicts": conflicts,
         "confidence": "HIGH" if action == "SOURCE_LOCATION_REVIEW" and identity == "MATCH" else "UNVERIFIED",
         "action_category": action, "root_cause": root, "stage": stage, "retry_policy": policy,
-        "recovery_eligibility": eligibility, "will_call_whisper": whisper,
+        "recovery_eligibility": eligibility,
+        "recovery_eligibility_source": "diagnosis rule " + DIAGNOSIS_VERSION,
+        "recovery_eligibility_at": persisted_at,
+        "will_call_whisper": whisper,
         "reason": "原登记路径无文件；已发现身份匹配替代路径" if action == "SOURCE_LOCATION_REVIEW" else next_action,
         "missing_evidence": "页面同刻 snapshot/state event 链" if not aligned else "UNKNOWN",
         "next_action": next_action, "state_fingerprint": hashlib.sha256(

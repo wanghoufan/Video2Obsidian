@@ -163,6 +163,12 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
 #candidateBox .candRow{display:flex;gap:5px;align-items:flex-start;padding:3px 0;border-top:1px dashed var(--line);font-size:12px;line-height:1.5}
 #candidateBox .candRow input{margin-top:4px}.candText{flex:1;word-break:break-all}.candEvidence{color:var(--dim);font-size:11px}
 #candidateBox .candEvidenceDetails{margin-top:2px;color:var(--dim);font-size:11px}
+#recoverBox{margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel2)}
+#recoverBox h3{margin:0 0 6px;font-size:13px}
+#longPanel{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:60;display:none}
+#longPanel.open{display:block}
+#longPanel .box{max-width:640px}
+#longPanelText{max-height:min(70vh,560px);overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:12px;font-family:var(--mono);border:1px solid var(--line);border-radius:4px;padding:8px;background:var(--input-bg)}
 </style>
 </head>
 <body>
@@ -213,10 +219,22 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
     </div>
     <p class="hint" id="msg">每 5 秒自动轮询状态。</p>
     <p class="hint" id="editHint" style="display:none"></p>
+    <p class="hint"><button class="mini" id="btnViewLong" style="display:none">查看已复制内容</button></p>
     <p class="hint" id="preview"></p>
     <p class="hint warn" id="longHint" style="display:none"></p>
     <p class="hint" id="worker"></p>
     <div id="progress"><div id="progText">空闲：暂无排队视频</div><div class="bar"><div id="progFillOk"></div><div id="progFillFail"></div><div id="progFillPending"></div></div><div id="queueLine"></div><div id="progStageText" style="display:none"></div><div class="bar" id="stageBarWrap" style="display:none"><div id="progStageFill"></div></div><div class="stageNote" id="stageNote" style="display:none">步骤进度非精确百分比，仅表示当前在哪一步</div></div>
+    <div id="recoverBox">
+      <h3>恢复与重试（首屏统一入口）</h3>
+      <div class="hint">批量恢复动作只在本框内；详情区只留「当前任务」的上下文快捷操作。每个动作都标明作用范围与 whisper 成本。</div>
+      <div class="btnrow">
+        <button class="mini go" id="btnRecTranscribe" title="范围：全部失败任务；会重新转写，whisper 会跑，有时间成本">重新转写全部失败（范围：全部失败任务；whisper 会跑，有成本）</button>
+        <button class="mini" id="btnRecReuse" title="范围见下方「重新成稿范围」；只重排整理与成稿，whisper 0次，库内改过的笔记跳过、已发布的不覆盖">从已有文字重新成稿（范围：当前所选任务；whisper 0次）</button>
+        <button class="mini" id="btnRecPublish" title="范围：当前所选任务；只重新入库，whisper 0次，只写不存在的新笔记，不覆盖">仅重新入库（范围：当前所选任务；whisper 0次）</button>
+      </div>
+      <div class="hint" id="recScopeRow">重新成稿范围：<label><input type="radio" name="recScope" value="sel" checked> 当前所选任务</label> <label><input type="radio" name="recScope" value="all"> 全部已完成任务</label></div>
+      <div class="hint" id="recoverHint"></div>
+    </div>
     <div id="runsHead" class="hint" style="display:none"></div>
     <div id="runsWrap"><table>
       <thead><tr><th>任务</th><th>来源</th><th>状态</th><th>输出</th><th>更新时间</th><th>操作</th></tr></thead>
@@ -230,7 +248,7 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
       <div class="vhint" id="vPreset"></div>
       <div id="candidateBox">
         <h4>待审清单（AI 找到的疑似错词）</h4>
-        <div class="candHead"><label><input type="checkbox" id="candidateSelectAll"> 全选</label><button class="mini" id="btnCandidateApply" disabled>错词重跑</button><label><input type="checkbox" id="candidateRerunOld" disabled> 已跑过的也重跑</label><label><input type="checkbox" id="candidateOnlyNew" checked disabled> 只对新视频生效</label></div>
+        <div class="candHead"><label><input type="checkbox" id="candidateSelectAll"> 全选</label><button class="mini" id="btnCandidateApply" disabled title="范围：勾选的候选；先改词库，再对全部已完成稿件重新成稿（whisper 0次）">错词重跑（范围：勾选的候选；whisper 0次）</button><label><input type="checkbox" id="candidateRerunOld" disabled> 已跑过的也重跑</label><label><input type="checkbox" id="candidateOnlyNew" checked disabled> 只对新视频生效</label></div>
         <div id="candidateApplyProgress" style="display:none">
           <div class="bar"><div id="candidateApplyFill"></div></div>
           <div class="hint" id="candidateApplyText"></div>
@@ -249,9 +267,6 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
         <button id="btnVocAdd" title="添加错→正对子">添加</button>
       </div>
       <div class="vhint" id="vVoc"></div>
-      <div class="controls">
-        <button class="ghost" id="btnReapplyAll" title="全部已完成任务应用新词库重跑（转写0次，改过的笔记跳过）">全部应用新词库重跑</button>
-      </div>
     </div>
   </section>
   <section>
@@ -280,6 +295,13 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
   </div>
 </div></div>
 <div id="toasts"></div>
+<div id="longPanel" role="dialog" aria-modal="true" aria-labelledby="longPanelTitle"><div class="box">
+  <h3 id="longPanelTitle">已复制内容</h3>
+  <pre id="longPanelText"></pre>
+  <div class="row">
+    <button id="btnLongClose">关闭</button>
+  </div>
+</div></div>
 <footer id="foot">采集 · —</footer>
 <script>
 "use strict";
@@ -353,9 +375,12 @@ function stripQuotes(raw){
   return t;
 }
 function statusCN(r, cur){
-  var wid=r.run_id, d=detailsByRun[wid];
+  // FR-13 监听脱钩：同快照下监听开关不改任务文字/颜色/计数；
+  // 只有 run 自身处于 ACTIVE 且有 worker 当前阶段时，才显示阶段文案。
+  var wid=r&&r.run_id, d=wid?detailsByRun[wid]:null;
   var ws=d?d.state:null;
-  if(cur && cur.run_id===wid && cur.stage){
+  var isActive=String((r&&r.status)||"")==="ACTIVE"||String((r&&r.status)||"")==="RUNNING";
+  if(isActive&&cur&&cur.run_id===wid&&cur.stage){
     var st=cur.stage;
     if(st==="发现")return "发现中";
     if(st==="听写中"||st==="整理中"||st==="成稿中"||st==="入库中")return st;
@@ -531,7 +556,7 @@ function outCellFor(run_id){
   return h;
 }
 // UX2-P0-1：列表头一行“共N个（成功A/失败B/排队C），当前显示M个”，截断必须明示，禁静默丢
-// UX2-P1-2：失败>1给“重试全部失败（N个）”；失败>0给“复制全部失败原因”
+// UX2-P1-2/FR-14：批量重试入口已收敛到首屏 #recoverBox「重新转写全部失败」；表头只留只读诊断「复制全部失败原因」（不属恢复动作、无 whisper 成本）
 // UX2-P1-5：未监听（或跨多目录）时按输入目录分组列成功/失败/排队
 function renderRunsHead(snap){
   var box=el("runsHead");
@@ -575,11 +600,9 @@ function renderRunsHead(snap){
   var flist=failedRuns();
   var nRetry=flist.length;
   var btnHtml="";
-  if(nRetry>1)btnHtml+='<button class="go" id="btnRetryAllFailed">重试全部失败（'+nRetry+'个）</button>';
-  if(nRetry>0)btnHtml+='<button id="btnCopyFailedReasons">复制全部失败原因</button>';
+  if(nRetry>0)btnHtml+='<button id="btnCopyFailedReasons" title="只读：列出失败原因与下一步；不重新转写、whisper 0次">复制全部失败原因</button>';
   box.style.display="block";
   box.innerHTML=esc(t)+(btnHtml?('<div class="runsheadbtns">'+btnHtml+'</div>'):"");
-  var rb=el("btnRetryAllFailed");if(rb)rb.onclick=retryAllFailed;
   var cb=el("btnCopyFailedReasons");if(cb)cb.onclick=copyAllFailedReasons;
 }
 function renderRuns(snap){
@@ -597,12 +620,13 @@ function renderRuns(snap){
     // 详情缺失时以库状态兜底判失败（67合成只有库行时也能逐行重试）
     var hasDetail=!!(d&&d.state);
     var failed=hasDetail?(d.state==="FAIL"||d.state==="PUBLISH_BLOCKED"):dbFail;
-    // UX2-P1-3：行内只留一个主按钮（入库受阻→重试入库；其余失败→重试）；
-    // 重跑收进详情“应用新词库重跑”，行内禁两相似动词并排。
+    // UX2-P1-3/FR-14：行内只留一个主按钮（入库受阻→重试入库；其余失败→重试），范围＝本任务并注明 whisper 成本；
+    // 批量重跑一律走首屏「恢复与重试」区，详情只留当前任务的「应用新词库重跑」。
     var ops=[];
     if(failed){
-      var mainLabel=(hasDetail&&d.state==="PUBLISH_BLOCKED")?"重试入库":"重试";
-      ops.push('<button class="mini go" data-retry="'+esc(r.run_id)+'" data-retryfn="'+esc(filenameForRun(r))+'">'+mainLabel+'</button>');
+      var pubBlocked=!!(hasDetail&&d.state==="PUBLISH_BLOCKED");
+      var mainLabel=pubBlocked?"重试入库（范围：本任务；whisper 0次）":"重试（范围：本任务；whisper 会跑）";
+      ops.push('<button class="mini go" '+(pubBlocked?('data-retry-publish="'+esc(r.run_id)+'"'):('data-retry="'+esc(r.run_id)+'"'))+' data-retryfn="'+esc(filenameForRun(r))+'" title="范围：本任务；'+(pubBlocked?"只重新入库，whisper 0次":"会重新转写，whisper 会跑")+'">'+mainLabel+'</button>');
     }
     var op=ops.length?ops.join(" "):"—";
     var fn=filenameForRun(r);
@@ -623,12 +647,15 @@ function renderRuns(snap){
   }
   Array.prototype.forEach.call(tb.querySelectorAll("tr"),function(tr){
     tr.onclick=function(e){
-      if(e.target&&(e.target.getAttribute("data-retry")||e.target.getAttribute("data-reapply")||e.target.getAttribute("data-reveal")||e.target.getAttribute("data-copy")||e.target.getAttribute("data-obrun")))return;
+      if(e.target&&(e.target.getAttribute("data-retry")||e.target.getAttribute("data-retry-publish")||e.target.getAttribute("data-reapply")||e.target.getAttribute("data-reveal")||e.target.getAttribute("data-copy")||e.target.getAttribute("data-obrun")))return;
       selected=parseInt(tr.getAttribute("data-i"),10);renderRuns(snap);renderLineage();
     };
   });
   Array.prototype.forEach.call(tb.querySelectorAll("[data-retry]"),function(b){
     b.onclick=function(e){e.stopPropagation();retryRun(b.getAttribute("data-retry"));};
+  });
+  Array.prototype.forEach.call(tb.querySelectorAll("[data-retry-publish]"),function(b){
+    b.onclick=function(e){e.stopPropagation();publishOnlyRetry(b.getAttribute("data-retry-publish"));};
   });
   Array.prototype.forEach.call(tb.querySelectorAll("[data-reapply]"),function(b){
     b.onclick=function(e){e.stopPropagation();reapplyOne(b.getAttribute("data-reapply"));};
@@ -663,6 +690,13 @@ function renderLineage(){
   var h='<div><span class="k">任务：</span><span class="v">'+esc(r.run_id)+'</span></div>';
   h+='<div><span class="k">来源：</span><span class="v" title="'+esc(r.source_id||"")+'">'+esc(sourceLabelForRun(r))+'</span></div>';
   h+='<div><span class="k">状态：</span><span class="v">'+esc(cn)+'</span></div>';
+  // FR-13 不一致并列+告警（fail-closed，不回写）
+  try{
+    var ps=String((r&&r.status)||"");
+    if((ps==="QUEUED"||ps==="ACTIVE")&&/失败|受阻/.test(String(cn||""))){
+      h+='<div class="notestatus warn">展示与记录不一致，原因待验证（记录：'+esc(ps)+'／展示：'+esc(cn)+'）。恢复资格 fail-closed，需补充证据后人工判断。</div>';
+    }
+  }catch(e){}
   h+='<div><span class="k">耗时：</span><span class="v">'+esc(fmtDur(r.created_at,r.updated_at))+'</span></div>';
   if(d&&(d.state==="PUBLISHED"||d.state==="RENDER_ONLY")){
     var p=outPathFor(r.run_id);
@@ -689,8 +723,8 @@ function renderLineage(){
     var parts=String(d.verdict||(pb?"初稿已保留，入库未完成→检查笔记库权限后点重试":"转写没成功")).split("→");
     var reason=(parts[0]||"转写没成功").trim()||"转写没成功";
     var next=(parts[1]||"点重试再试一次").trim()||"点重试再试一次";
-    // UX2-P1-3：入库受阻→“重试入库”；其余失败→“重试这个视频”。行内只此一个主按钮。
-    h+='<div class="failbox"><div class="r">原因：'+esc(reason)+'</div><div class="n">下一步：'+esc(next)+'</div><div style="margin-top:6px"><button class="go" data-retry="'+esc(r.run_id)+'">'+(pb?"重试入库":"重试这个视频")+'</button></div></div>';
+    // UX2-P1-3/FR-14：入库受阻→“重试入库”；其余失败→“重试这个视频”。行内只此一个主按钮，范围＝本任务并注明 whisper 成本。
+    h+='<div class="failbox"><div class="r">原因：'+esc(reason)+'</div><div class="n">下一步：'+esc(next)+'</div><div style="margin-top:6px"><button class="go" '+(pb?('data-retry-publish="'+esc(r.run_id)+'"'):('data-retry="'+esc(r.run_id)+'"'))+' title="范围：当前选中任务；'+(pb?"只重新入库，whisper 0次":"会重新转写，whisper 会跑")+'">'+(pb?"重试入库（范围：当前任务；whisper 0次）":"重试这个视频（范围：当前任务；whisper 会跑）")+'</button></div></div>';
   }else{
     if(cur&&cur.run_id===r.run_id){
       h+='<div><span class="k">结论：</span><span class="v">正在处理：'+esc(cur.stage)+'</span></div>';
@@ -699,13 +733,13 @@ function renderLineage(){
     }
     h+='<div><span class="k">输出：</span><span class="v">—</span></div>';
   }
-  // UX2-P1-3：重跑（应用新词库）收进详情“高级”，行内不再并排两个相似动词
+  // UX2-P1-3/FR-14：单条重跑收进详情“高级”（范围＝当前任务，与首屏批量区隔），行内不再并排两个相似动词
   var canReapply=!!(d&&(d.state==="RENDER_ONLY"||d.state==="PUBLISHED"||d.state==="PUBLISH_BLOCKED"));
   h+='<div class="btnrow" id="openRow"></div>';
   if(canReapply){
-    h+='<details class="adv" id="advDetail"><summary>高级：应用新词库重跑</summary>'
-      +'<div class="obhint">只重排整理与成稿，转写0次（whisper 不跑）；你在库内改过的笔记会被跳过不覆盖，新稿只留数据目录。</div>'
-      +'<div class="btnrow"><button class="mini" data-reapply="'+esc(r.run_id)+'">应用新词库重跑（转写0次）</button></div></details>';
+    h+='<details class="adv" id="advDetail"><summary>高级：应用新词库重跑（仅当前任务；whisper 0次）</summary>'
+      +'<div class="obhint">范围：当前任务；只重排整理与成稿，转写0次（whisper 不跑）；你在库内改过的笔记会被跳过不覆盖，新稿只留数据目录。</div>'
+      +'<div class="btnrow"><button class="mini" data-reapply="'+esc(r.run_id)+'" title="范围：当前任务（单条，非批量）；whisper 0次，改过的笔记跳过、不覆盖">应用新词库重跑（范围：当前任务；whisper 0次）</button></div></details>';
   }
   h+='<div class="notebox" id="notePrev">笔记加载中…</div>';
   el("lineage").innerHTML=h;
@@ -713,6 +747,9 @@ function renderLineage(){
   loadNote(r.run_id);
   Array.prototype.forEach.call(el("lineage").querySelectorAll("[data-retry]"),function(b){
     b.onclick=function(){retryRun(b.getAttribute("data-retry"));};
+  });
+  Array.prototype.forEach.call(el("lineage").querySelectorAll("[data-retry-publish]"),function(b){
+    b.onclick=function(){publishOnlyRetry(b.getAttribute("data-retry-publish"));};
   });
   Array.prototype.forEach.call(el("lineage").querySelectorAll("[data-reapply]"),function(b){
     b.onclick=function(){reapplyOne(b.getAttribute("data-reapply"));};
@@ -984,7 +1021,18 @@ function cnOfState(s){
   if(s==="PUBLISH_BLOCKED")return "入库受阻";
   return String(s||"");
 }
-function say(t,cls){var m=el("msg");m.textContent=t;m.className="hint "+(cls||"");}
+var sayTimer=null, lastLongText="", lastLongTitle="", lastFocus=null;
+function say(t,cls){var m=el("msg");m.textContent=String(t==null?"":t).slice(0,120);m.className="hint "+(cls||"");if(sayTimer)clearTimeout(sayTimer);sayTimer=setTimeout(function(){try{m.textContent="";}catch(e){}},3000);}
+function openLongPanel(title,text,focusBack){
+  lastLongText=String(text||"");lastLongTitle=String(title||"已复制内容");lastFocus=focusBack||document.activeElement;
+  el("longPanelTitle").textContent=lastLongTitle;el("longPanelText").textContent=lastLongText;
+  el("longPanel").className="open";el("longPanel").style.display="block";
+  try{el("btnLongClose").focus();}catch(e){}
+}
+function closeLongPanel(){
+  el("longPanel").className="";el("longPanel").style.display="none";
+  try{if(lastFocus&&lastFocus.focus)lastFocus.focus();}catch(e){}
+}
 function toast(t, kind){
   var box=el("toasts");
   var d=document.createElement("div");
@@ -1006,17 +1054,31 @@ function toast(t, kind){
     }
   }catch(e){}
 }
-function copyText(t){
+function copyText(t, opts){
+  // FR-17：只出短提示，长文不进 #msg；长文只进可关闭面板（需用户主动打开）。
+  opts=opts||{};
+  var shortOk=opts.shortOk||("已复制 "+String(t==null?"":t).length+" 字");
+  var shortErr=opts.shortErr||"复制失败";
+  function done(){
+    say(shortOk,"ok");toast(shortOk,"ok");
+    if(opts.longText){
+      lastLongText=String(opts.longText);lastLongTitle=String(opts.longTitle||"已复制内容");
+      var vb=el("btnViewLong");if(vb)vb.style.display="inline-block";
+    }
+  }
+  function fail(){
+    say(shortErr,"warn");toast(shortErr,"err");
+  }
   function fallback(){
     try{
       var ta=document.createElement("textarea");
       ta.value=t;document.body.appendChild(ta);ta.select();
       document.execCommand("copy");document.body.removeChild(ta);
-      say("已复制："+t,"ok");
-    }catch(e){say("复制失败，请手动拷贝："+t,"warn");}
+      done();
+    }catch(e){fail();}
   }
   if(navigator.clipboard&&navigator.clipboard.writeText){
-    navigator.clipboard.writeText(t).then(function(){say("已复制："+t,"ok");},fallback);
+    navigator.clipboard.writeText(t).then(done,fallback);
   }else fallback();
 }
 function retryRun(run_id){
@@ -1031,7 +1093,52 @@ function retryRun(run_id){
     refresh();
   }).catch(function(e){say("重试请求失败："+e,"err");});
 }
-// UX2-P1-2：一键重试全部失败（逐个调已有 /api/retry，幂等；前端给“N/total 已排队”进度）
+// P0-3返工2（首选）：仅重新入库走 P0-2 已有 PUBLISH_ONLY 通路（retry-plan 取 plan/token → retry-batch confirm:true，whisper 0次）；零后端改动。
+// fail-closed：plan 不可达/该 run 不在 eligible 内/策略不是 PUBLISH_ONLY，一律不调 batch，只报 warn。
+function publishOnlyRetry(run_id){
+  var fn=filenameForRunId(run_id);
+  say("正在仅重新入库 "+fn+"（whisper 0次）…");
+  var base={run_ids:[run_id]};
+  if(dataRoot())base.data_root=dataRoot();
+  var v=el("inVault").value.trim();
+  if(v)base.ob_vault_root=v;
+  fetch("/api/failures/retry-plan",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(base)})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    var o=x.o||{};
+    if(x.code!==200||!o.ok){say("仅入库预览失败："+(o.error||x.code)+"（零执行，未改任何数据）","err");return;}
+    var elig=o.eligible||[];
+    var hit=null;
+    for(var i=0;i<elig.length;i++){if(String(elig[i].run_id)===String(run_id)){hit=elig[i];break;}}
+    if(!hit){
+      var ex=o.excluded||[];
+      var why="";
+      for(var j=0;j<ex.length;j++){if(String(ex[j].run_id)===String(run_id)){why=String(ex[j].reason||ex[j].error||"不在可恢复集合内");break;}}
+      say("该任务当前不可仅入库："+(why||"不在可恢复集合内")+"（零执行）","warn");
+      return;
+    }
+    if(String(hit.strategy)!=="PUBLISH_ONLY"){
+      say("该任务当前策略为 "+String(hit.strategy)+"，不适用仅入库（零执行，未改任何数据）","warn");
+      return;
+    }
+    var b2={confirm:true,plan_token:o.plan_token,run_ids:[run_id]};
+    if(dataRoot())b2.data_root=dataRoot();
+    var v2=el("inVault").value.trim();
+    if(v2)b2.ob_vault_root=v2;
+    fetch("/api/failures/retry-batch",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(b2)})
+    .then(function(r){return r.json().then(function(oo){return{code:r.status,o:oo};});})
+    .then(function(y){
+      var oo=y.o||{};
+      if(y.code===202||y.code===200){say("仅入库已提交："+fn+"（whisper 0次，任务 "+(oo.job_id||"")+"）","ok");toast("仅入库已提交："+fn,"ok");}
+      else say("仅入库提交失败："+(oo.error||y.code)+"（零执行或见返回说明）","err");
+      refresh();
+    }).catch(function(e){say("仅入库请求失败："+e,"err");});
+  }).catch(function(e){say("仅入库预览请求失败："+e,"err");});
+}
+// UX2-P1-2/FR-14：一键重试全部失败（逐个调已有 /api/retry，幂等；前端给“N/total 已排队”进度）
+// 唯一入口＝首屏 #recoverBox「重新转写全部失败」（范围＝全部失败任务）；后端 /api/retry 未改
 function retryAllFailed(){
   var list=failedRuns();
   if(!list.length){say("当前没有失败任务可重试。","warn");return;}
@@ -1068,8 +1175,9 @@ function copyAllFailedReasons(){
     lines.push("   下一步："+p.next);
     lines.push("");
   });
-  lines.push("说明：可用列表头「重试全部失败」一键重新排队，或点单行按钮逐个重试。");
-  copyText(lines.join("\n"));
+  lines.push("说明：可在首屏「恢复与重试」区点「重新转写全部失败」（范围＝全部失败任务，whisper 会跑）一键重新排队，或点单行按钮逐个重试（范围＝本任务）。");
+  var body=lines.join("\n");
+  copyText(body,{shortOk:"已复制 "+list.length+" 条失败原因",shortErr:"复制失败",longText:body,longTitle:"失败原因清单（共 "+list.length+" 条）"});
 }
 function reapplyPayload(extra){
   var p={};
@@ -1091,8 +1199,9 @@ function reapplyOne(run_id){
     refresh();
   }).catch(function(e){say("重跑请求失败："+e,"err");});
 }
+// FR-14/D-19：批量「从已有文字重新成稿」（范围＝全部已完成任务）的唯一入口是首屏 #recoverBox 的范围选择
 function reapplyAll(){
-  if(!confirm("全部已完成任务应用新词库重跑吗？\n转写0次，原文不动；你在库内改过的笔记会被跳过（注明）。"))return;
+  if(!confirm("从已有文字重新成稿：范围＝全部已完成任务。\nwhisper 0次（只重排整理与成稿，原文不动）；你在库内改过的笔记会被跳过，已发布的笔记不覆盖。"))return;
   say("正在全部重跑…");
   fetch("/api/reapply",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify(reapplyPayload({all:true}))})
@@ -1383,7 +1492,6 @@ function importPresets(){
 }
 el("btnVocAdd").onclick=addVocab;
 el("vocabFilter").oninput=renderVocabList;
-el("btnReapplyAll").onclick=reapplyAll;
 var refreshing=false;
 function refresh(autoPoll){
   autoPoll=autoPoll===true;
@@ -1677,6 +1785,48 @@ el("btnClearCancel").onclick=function(){el("clearModal").classList.remove("open"
 el("btnClearFailed").onclick=function(){doClear(true);};
 el("btnClearAll").onclick=function(){doClear(false);};
 el("clearModal").onclick=function(e){if(e.target===el("clearModal"))el("clearModal").classList.remove("open");};
+// FR-14 统一恢复入口（首屏可见；三种后果＋作用范围＋whisper成本；详情仅留当前任务上下文快捷）
+function recoverHint(t,cls){el("recoverHint").textContent=t;el("recoverHint").className="hint "+(cls||"");}
+// FR-14/D-19：批量入口唯一——「重新转写全部失败」与「重新成稿（范围＝全部已完成）」都只在本框内选择范围
+function recScopeVal(){
+  var n=document.querySelector('input[name="recScope"]:checked');
+  return n?n.value:"sel";
+}
+function recScopeLabel(){return recScopeVal()==="all"?"全部已完成任务":"当前所选任务";}
+function syncRecScope(){
+  el("btnRecReuse").textContent="从已有文字重新成稿（范围："+recScopeLabel()+"；whisper 0次）";
+}
+Array.prototype.forEach.call(document.querySelectorAll('input[name="recScope"]'),function(n){n.onchange=syncRecScope;});
+syncRecScope();
+el("btnRecTranscribe").onclick=function(){
+  var f=failedRuns();
+  recoverHint("重新转写：范围＝全部失败任务（当前 "+f.length+" 个）；whisper 会跑，有时间成本。");
+  if(!f.length){say("当前没有失败任务可重试。","warn");return;}
+  retryAllFailed();
+};
+el("btnRecReuse").onclick=function(){
+  if(recScopeVal()==="all"){
+    recoverHint("从已有文字重新成稿：范围＝全部已完成任务；whisper 0次，库内改过的笔记跳过、已发布的不覆盖。","ok");
+    reapplyAll();
+    return;
+  }
+  var r=cache.runs[selected];
+  if(!r){say("先在列表点选一个任务，或把「重新成稿范围」切到「全部已完成任务」。","warn");return;}
+  recoverHint("从已有文字重新成稿：范围＝当前所选任务（"+filenameForRunId(r.run_id)+"）；whisper 0次。","ok");
+  reapplyOne(r.run_id);
+};
+el("btnRecPublish").onclick=function(){
+  recoverHint("正在检查该任务是否可仅入库（whisper 0次，只写不存在的新笔记，不覆盖）…","ok");
+  var r2=cache.runs[selected];
+  if(r2){publishOnlyRetry(r2.run_id);}else{say("先在列表点选一个任务，再点此按钮。","warn");}
+};
+// FR-17 长文面板退出：关闭按钮+Esc+遮罩+焦点返回
+el("btnLongClose").onclick=closeLongPanel;
+el("longPanel").onclick=function(e){if(e.target===el("longPanel"))closeLongPanel();};
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"&&el("longPanel").style.display==="block")closeLongPanel();
+});
+el("btnViewLong").onclick=function(){openLongPanel(lastLongTitle||"已复制内容",lastLongText,el("btnViewLong"));};
 refresh(false);setInterval(function(){refresh(true);},5000);
 </script>
 </body>

@@ -1,38 +1,49 @@
-# HANDOFF｜开发中（2026-09-14）：DEVELOP P0-1/P0-2 全链收口，P0-3 待派，恢复开发先读我
+# HANDOFF｜P0 全链收口（2026-09-14 23:31）：DEVELOP P0-1/P0-2/P0-3 全链 PASS，无未收口 P0，恢复先读我
 
 > 旧版字段（governance-state / Evidence / Human Gate / Promotion / Dispatch ID）已废弃，不填。
 > 本文件即恢复入口。下面「一、当前进展／二、下一步／三、注意事项」按恢复用结构编排，字段名仍按 HANDOFF 模板。**Phase1 全过程记录**（用户四条反馈原文、九项 HD 决策、16 条真相、迁移决策、额度事件）见本文件后段各节；**迁移前项目交接原文**见文末附录。
 
-- Captured at（YYYY-MM-DD HH:MM）：2026-09-14 13:00
-- PROJECT_PHASE：**DEVELOP**（用户 2026-09-14 明确说「第二阶段，开发」进 Phase2）
+- Captured at（YYYY-MM-DD HH:MM）：2026-09-14 23:31（用户 23:27 叫停暂停后本轮恢复，第一件事派 supervisor 复检 P0-3 语义修复链 → **PASS 收口**，全 P0 清；无外派在跑）
+- PROJECT_PHASE：**DEVELOP**（用户 2026-09-14 明确说「第二阶段，开发」进 Phase2；23:27 叫停暂停，本轮恢复并收口全 P0，仍在 Phase2 未关闭）
 - PLAN_VERSION：`PRODUCT_PLAN_V1.3`（正文最新；文末「Readiness Score / 本轮真实验证记录」两段仍为 V1.2 旧文本——第 5 轮修订被用户中止，未收尾，见 `docs/pm/PRODUCT_PLAN.md` 顶部收尾注记）
 - PLAN_READINESS_SCORE：**未达 90**（planner 自评 **89**；Research Reviewer 独立打分 **83**，两轮结论均 FAIL；用户已知并决定开工）
 - PLAN_GATE：**APPROVED**（用户明确进 DEVELOP，锁定基线开工；不是 Readiness 达标通过）
 - DEV_BASELINE：`PRODUCT_PLAN_V1.3`（Phase2 锁定基线，禁随意改 Plan；变更只走 Change C）
 - CHANGE_REQUEST：**NONE**
-- Stage ID（本阶段叫什么）：**DEVELOP-P0-2 收口／P0-3 待派**（P0-1、P0-2 builder→reviewer→qa→supervisor 全 PASS；P0-1 打回停 1/2，P0-2 本链 0/2）
+- Stage ID（本阶段叫什么）：**DEVELOP-P0 全链收口**（P0-1／P0-2／P0-3 全链 PASS，无未收口 P0）。P0-3 本链 supervisor 累计打回定格 **1/2**（未触发升级）；P0-1 停 1/2、P0-2 本链 0/2。QA 挂与 reviewer 返工不计数。工作树未提交未推送（基于 b94845e）。
 ---
 
 ## 一、当前的工作进展
 
 - **DEVELOP-P0-1 全链收口（2026-09-14）**：builder 首版（luna旧通道，server.py +220行）→reviewer 首轮FAIL三项→builder 返工三项（go/deepseek本窗口）→reviewer 复核PASS→qa 初验FAIL两BUG→builder 返工2→qa RETEST2双PASS→supervisor 首检FAIL（打回1/2：账本缺行＋派工缺行＋HANDOFF模型过期）→TM补账本＋派工行＋HANDOFF对齐根表→supervisor 复检PASS。报告：`docs/review/P0-1-DIAGNOSIS-CODE-REVIEW.md`、`P0-1-DIAGNOSIS-REWORK-REVIEW.md`、`docs/qa/P0-1-DIAGNOSIS-INDEPENDENT-RETEST-2026-09-14.md`、`P0-1-DIAGNOSIS-RETEST2-2026-09-14.md`。
 - **DEVELOP-P0-2 全链收口（2026-09-14，本链0/2）**：builder 实现批量恢复闭环（server.py 累计约+837行：retry-plan dry-run/token摘要/TTL10分钟、retry-batch confirm+409零执行+幂等单job、job真源原子写、INTERRUPTED不续跑、三策略、16条双层排除、No-Clobber）→reviewer PASS（P0-2-RECOVERY-CODE-REVIEW.md，1×P1交qa）→qa 首轮撞真实 `_diag_alternate_paths` 扫 ~/Downloads 卡死（单条10秒＋不返回，工具超时无报告）→builder SCAN-FIX 有界重写（2s/2000目录预算、跳过云同步根大目录、Volumes只扫顶层、fail-closed）→reviewer SCAN-FIX复核PASS→qa 复验PASS无新增BUG（P0-2-RECOVERY-QA-2026-09-14.md，11项全过：77=61+16可复算、幂等单job、三409、INTERRUPTED、No-Clobber、两路fail-closed、真函数tmp计时54.2ms）→supervisor PASS。已知缺口（不拦收口）：D-20/D-21执行级注入与真并发、P1-1真机转写端到端；RETRANSCRIBE恒whisper=0如实fail-closed。报告见上。账本45行、派工21行，schema均exit 0。`app/server.py` 未提交未推送。
-- **code-reviewer FAIL（返工三项未落盘）**：报告 `docs/review/P0-1-DIAGNOSIS-CODE-REVIEW.md`——P0-1 成功项隔离（SUCCEEDED+manifest 会被误标 FAIL 计入，违反 D-8）；P1-1 counts 口径（auto_retryable 只数 whisper，漏 AUTO_REUSE/AUTO_PUBLISH）；P1-2 七类互盖（manifest 分支抢在 transient 之前）。builder 返工 4 次均撞 `Selected model is at capacity` 未落盘，仍是首版 220 行。
+- **DEVELOP-P0-3 中链（2026-09-14，本链 0/2）**：builder 实现 FR-13 四层状态与监听脱钩、FR-14 首屏统一恢复入口（`#recoverBox` 三按钮＋whisper 成本文案）、FR-17/D-23 可退出反馈（`say` 截断 120 字＋3 秒清；长文只进可关闭面板，含关闭按钮/Esc/遮罩/焦点返回；浅色默认未动）。工作树 `M app/index.html`＋`M app/server.py`（+112/−11，基于 b94845e，未提交）→ code-reviewer **PASS**（`docs/review/P0-3-STATE-ENTRY-CODE-REVIEW.md`；1×P1「旧三入口未删」交 qa/supervisor 裁决＋2×P2）→ qa **PASS**（`docs/qa/P0-3-STATE-ENTRY-QA-2026-09-14.md`：tmp 合成 4/4 mismatch 全降级 `NEEDS_HUMAN`、`state.db` SHA-256 未变；三态监听/复制短句/面板四退出/窄屏全过；留 P1「表头『重试全部失败』＋词库区『全部应用新词库重跑』＋详情高级『应用新词库重跑』仍残留」＋P2「`#msg` 无点击关闭」）。**差 supervisor 复检，尚未收口。**
+- **账本补记（TM，2026-09-14 本轮）**：P0-3 三行派工（builder/code-reviewer/qa）＋`TASK-MODEL-LOG` 一行由 TM 依根表补记——上窗口收工时未落盘（`DISPATCH-LOG` 21→25 行、`TASK-MODEL-LOG` 45→46 行）；supervisor 复检时两道校验 exit 0、模型逐字对齐根表、三处对账一致。
+- **supervisor 复检 P0-3＝打回 1/2（2026-09-14，复检节在 `docs/qa/P0-3-STATE-ENTRY-QA-2026-09-14.md:42` 起）**：唯一打回项 **P1-1（阻断）FR-14 收敛未完成**——旧三入口实测仍在（`app/index.html:605` 表头『重试全部失败』绑 `retryAllFailed`，与首屏箱『重新转写』同函数属纯重复；`:270` 词库区『全部应用新词库重跑』；`:742` 详情高级『应用新词库重跑』），P0-3 DoD 明文验收句「全文不再出现三个互不关联的批量重跑入口」不达成，等于用户「追加反馈二」投诉未闭环。返工要求（Change A/B 级、留 DEVELOP、不召 Planner）：① 删表头与词库区两个批量入口；② 删除后 `#recoverBox` 需就地给出**范围**（当前所选／全部已完成）并沿用既有 confirm 语义（转写 0 次／库内改过跳过／不覆盖）；③ 详情高级单条允许保留但文案须标明"当前任务"与首屏区隔、全文不得再出现第二个批量入口；④ 删 UI 入口不得动后端 API/函数。2×P2 记 backlog 不返工。FR-13/FR-17/主题浅色默认经复测无回归。
+- **P0-3 返工一轮（2026-09-14，supervisor 仍 1/2）**：builder 按四条收敛旧入口（删表头＋词库区批量入口、`#recoverBox` 就地范围 radio、`reapplyAll/reapplyOne` 范围分流、详情标明"当前任务"；server 零改动）→ code-reviewer 复核 **FAIL（新 P1-1 阻断）**（`docs/review/P0-3-STATE-ENTRY-REWORK-REVIEW.md`）：`btnRecPublish` 与详情 PUBLISH_BLOCKED「重试入库」文案承诺"whisper 0次"但实际只调 `retryRun→POST /api/retry`（必走转写或静默跳过），承诺不兑现；①②③④旧要求全 PASS；另裁决词库候选区「错词重跑」保留（FR-9 不回退，属豁免项，title 去术语）。
+- **P0-3 返工二轮（2026-09-14）**：builder 首选改法新增 `publishOnlyRetry(run_id)`（约 `index.html:1098`）走 P0-2 已有 PUBLISH_ONLY 通路（retry-plan 取 plan/token→retry-batch confirm 单条，`run_ids:[id]`；非 PUBLISH_ONLY fail-closed 零执行）；三处接线（首屏 `#btnRecPublish`／行级 `data-retry-publish`／详情 failbox），只改 `index.html`。→ code-reviewer **PASS**（`docs/review/P0-3-STATE-ENTRY-REWORK2-REVIEW.md`；1×P2 术语残留不拦）→ qa **FAIL（新 P0：`QA-P03-RR2-001`）**（`docs/qa/P0-3-STATE-ENTRY-RETEST2-2026-09-14.md`）：静态全 PASS，但 tmp 真 handler 发现 `_diagnosis_item()` 把正常 `PUBLISH_BLOCKED`（展示 `FAIL`）字面判 mismatch，经 FR-13 降级门变 `NEEDS_HUMAN`，retry-plan `PUBLISH_ONLY eligible` 恒 0，前端链路实际不可达。属 QA 挂，不计 supervisor 打回。
+- **P0-3 语义修复（2026-09-14，仍 1/2）**：builder 只改 `app/server.py` 约 `:1339` 起 mismatch 判定一块——语义归一化（`display==FAIL` 时持久态属 FAIL 家族 `FAIL/PUBLISH_BLOCKED/TRANSCRIBE_FAILED/RAW_FAILED/MIRROR_FAILED/NORM_RENDER_FAILED` 即不算 mismatch，口径与 `_scan_disk_states` 一致；其余字面比较；真 mismatch 仍 fail-closed；零 DB/manifest/产物写）→ code-reviewer **PASS**（`docs/review/P0-3-SEMANTICS-FIX-REVIEW.md`；1×P2 provenance 加性注记；server 计数 `28/3` vs 报告 `+19/−3` 口径差已由 neat 加注待 supervisor 裁定）→ qa **PASS**（`docs/qa/P0-3-SEMANTICS-FIX-QA-2026-09-14.md`：`QA-P03-RR2-001` CLOSED——正常 `PUBLISH_BLOCKED→AUTO_PUBLISH/PUBLISH_ONLY/eligible=1/whisper=0`，真 mismatch 仍 `NEEDS_HUMAN/MANUAL_REVIEW`，`state.db` SHA-256 前后不变，静态回归全过；真实 whisper/batch 发布/HTTP 服务/真机 UI 未跑）。**→ supervisor 复检 2026-09-14 23:31 PASS（收口）**（复检节在 `docs/qa/P0-3-SEMANTICS-FIX-QA-2026-09-14.md` 尾：计数口径裁定 `28/3` ＝返工前 `19/3` ＋语义修复净增 9 行（`_FAIL_SEMANTICS`＋归一化分支＋8 个只读 provenance 字段），逐行归因无未申报内容→**属修复前快照口径、非失实、不打断口**；两账本 exit 0；三处对账一致；Phase Integrity 五查过；红线抽查过；无 blocking。遗留 2×P2 与「真实 whisper／batch 发布／HTTP 服务／真机 UI 未跑」作已知缺口不拦收口）。
+- **暂停前收尾（2026-09-14 23:27，neat-freak PASS）**：四份报告加注对齐（历史快照正文未动）、删 2 个 `.DS_Store`（仓根＋`docs/`）、`__pycache__` 本就为空、`git diff --check` 通过；未动业务/文档文件，未碰 `008林粒粒AI编程/`；`env.err`、`results/*.log` 保留。详见文末「收尾记一笔（neat-freak，2026-09-14本轮）」。
+- **账本（TM，23:31 收口版）**：`DISPATCH-LOG` 34→**35** 行（新增一行 supervisor「DEVELOP-P0-3 语义修复复检」，`used=主`／`runtime=本窗口`／模型 `opencode-go/muse-spark-1.3-contributor` 逐字对根表）；`TASK-MODEL-LOG` **48** 行（语义修复链任务级行 `DEVELOP-P0-3-FIX-PUBLISH-SEMANTICS` 已由 builder 初版落盘 `rework=0`，TM 判 PASS）。两道校验 23:31 回跑 **exit 0**（TASK 48 行／DISPATCH 35 行）；supervisor 复检已独立校验并三处对账一致。
+- **工作树现状（暂停时，未提交未推送，基于 b94845e）**：`M app/index.html 181/31`＋`M app/server.py 28/3`＋`M docs/handoff/HANDOFF.md`＋`M docs/model/DISPATCH-LOG.jsonl`＋`M docs/model/TASK-MODEL-LOG.jsonl`；新文件 7 个（`docs/review/` 4：REWORK/REWORK2/SEMANTICS-FIX＋旧 CODE-REVIEW；`docs/qa/` 3：旧 QA＋RETEST2＋SEMANTICS-FIX-QA）。`compileall exit 0`，`git diff --check` 通过。**服务：8765 无监听。**
 - **模型通道现状**：luna 2026-09-14 多次 capacity（首版那次 patch 落盘但尾部报错、返工三次零落盘）；sol 探针也无回包，属 codex 侧不稳、非本地登录问题。supervisor 已由用户切为 `opencode-go/muse-spark-1.3-contributor`（走本窗口），builder 切为 `opencode-go/deepseek-v4.1-flash`（走本窗口），以 `USER_MODEL_OVERRIDE.md` 为准。
-- **本窗口已做准备**：P1-7 改名只读盘点（`index.html` 可见 4 处待改＋`server.py` 兼容 7 处不动）；`data/state.db` 仓根不存在（旧记约 2.97MB）已记账，待核 data_root 真源。**git 未提交未推送**（`app/server.py` P0-1＋治理镜像改动在工作树）。
+- **本窗口已做准备（暂停前，历史）**：P1-7 改名只读盘点（`index.html` 可见 4 处待改＋`server.py` 兼容 7 处不动）；`data/state.db` 仓根不存在已记账，待核 data_root 真源。工作树未提交未推送（以本节“工作树现状”行为准）。**服务现状：8765 当前无监听**（旧记 PID 12429 已不在，勿再引用该 PID）。
 - **Phase1 基线（继承）**：`docs/pm/PRODUCT_PLAN.md`=V1.3；16 条红字真相=用户自移视频、DB 全 QUEUED；HD-1~9 全=A；Readiness 89/83 未达 90 用户已知开工。Phase1 详情见本文后段各节与文末附录。
 
 ## 二、下一步的任务
 
 - **下一步（Next Single Action，按序）**：
-  1. 派 builder P0-3 核心状态、恢复入口与可退出反馈（FR-13 四层状态＋监听脱钩、FR-14 统一恢复入口、FR-17 查询/复制可退出；D-16/D-19/D-23）。
-  2. code-reviewer 复核返工（PASS 才往下），qa 独立复验（luna/codex）＋supervisor 复检（go Muse Spark/本窗口），TM 收齐落账本。
-  3. 续 P0-2 批量恢复闭环 → P0-3 状态/入口/复制修复 → P1-1~P1-7（解不了的挂账记报告，不拦主线）。
+  1. ~~派 supervisor 复检 P0-3~~ **已办（23:31 PASS，P0-3 收口，全 P0 清）**。
+  2. **TM 汇总找人一次（本行即该次）**：等用户拍板——① 是否 commit/push＋分支名；② 继续做 P1-1~P1-7 还是先真机目检一遍 P0 交付；③ 是否换主用模型。
+  3. 用户拍板后才动 git；未给分支名则保持工作树未提交未推送（基于 b94845e）。
+  4. 若继续开发：P1-1~P1-7（P1-6 视觉布局/历史管理独立验收；解不了的挂账记报告，不拦主线）。P1-7 改名盘点已备好（`index.html` 可见 4 处待改＋`server.py` 兼容 7 处不动）。
+  5. 真机目检要做先起服务（8765 现无监听，PORT 硬编码；改 `app/` 或 `src/` 后必须重启再验）；**自动化禁点真机主题开关**。
+  6. 经验／neat-freak 收尾只派一次，等用户说收工再派。
 - **人要拍什么板（只问大事，小事不问直接推）**：
-  1. 何时继续（你说"继续"即重派；luna 仍 capacity 则继续挂账）。
-  2. 是否换 builder/qa/supervisor 主用模型（给精确 ID 才改表，不自切）。
-  3. 是否 commit/push（含分支名才动；API 密钥问题才找你，其他一律往前推）。
-- **待排期 backlog（非阻塞）**：22 条 P3 按 V1.3 处置表分流；`data/state.db` 真源待核；P1-7 改名盘点已备好等 builder；benchmark `results/*.log` 19 个保留不删。
+  1. **commit/push 与分支名**：本轮 P0 交付全在工作树未提交（`M app/index.html 181/31`＋`M app/server.py 28/3`＋`M HANDOFF`＋两账本＋7 份新报告，基于 b94845e）；给分支名才动，前序 91beaf8 推的是 `main`。
+  2. **下一步做哪块**：继续 P1-1~P1-7，还是先起服务真机目检 P0 交付（真实 whisper／batch 发布／HTTP 服务／真机 UI 本链未跑，属已知缺口不拦收口）。
+  3. 是否换 builder/qa/supervisor 主用模型（给精确 ID 才改表，不自切）。
+- **待排期 backlog（非阻塞）**：P0-3 遗留 2×P2（provenance 加性字段、术语残留 `obhint:741`）；22 条 P3 按 V1.3 处置表分流；`data/state.db` 真源待核；P1-7 改名盘点已备好等 builder；benchmark `results/*.log` 19 个保留不删；真实 whisper／真机 UI 未跑。
 
 ## 三、注意事项及相关规矩（本项目专用）
 
@@ -47,7 +58,7 @@
 - **红线**：**不 push**（commit 需用户明确给分支名）；**不碰 secrets**；不改 V1.10/V2.0 封存；`docs/sop/` 仅模板示例。
 - **数据安全**：测试只用**外置 tmp ＋ 合成数据**；用户真实视频目录与 Obsidian 库**禁写**（只读浏览例外）；**凡调 handler 的测试，首行必须断言 `data_root` 在 tmp 下**（污染事故补丁）；只读真实库时先拷到 tmp 查、**用完即删**。
 - **No-Clobber**：已发布笔记**永不覆盖**（EXISTS/CONFLICT 只判不写）；缺失 vault 不重建；user-edited ＝ 一切字节差异。
-- **服务**：`stage0bench venv python` 跑 `app/server.py`，固定 **8765**（PORT 硬编码）；**改 `app/` 或 `src/` 后必须重启服务再验**；当前 PID **12429**；**别请求、别重启**用户正在用的 8765。
+- **服务**：`stage0bench venv python` 跑 `app/server.py`，固定 **8765**（PORT 硬编码）；**改 `app/` 或 `src/` 后必须重启服务再验**；**当前 8765 无监听**（本轮实测；旧记 PID 12429 已不在，要真机目检先由用户或 TM 起服务）。
 - **主题**：默认必须**浅色**；自动化**禁止点真机主题开关**，用「抽源码 + node 桩」验。
 - **词库三铁律**：wrong ≥ 2 字；正确文本含 wrong 即删条；长 wrong 排前；上限 500。
 - **产品名**：用户已定 **「懒得笔记」**（落地范围见 PRODUCT_PLAN P1-7；GitHub 仓库名与内部 `v2o-*` 标识**不动**）。
@@ -301,3 +312,17 @@
   - Research Reviewer 虽引了 26 条外部来源（GitHub Actions / Todoist / Docker Desktop / HandBrake / qBittorrent / aria2 / yt-dlp / Android DownloadManager / Apple / MLX 等），但**只用于"验证设计对不对"，没有用于"找别人有什么功能可以抄"**——用户这条批评**成立**。
 - **下一轮规划应做（用户若再提"第一阶段，计划"时）**：以「**功能对标 / feature gap**」为主题——对标同类本地转写与笔记工作流产品（如 MacWhisper、Aiko、whisper.cpp GUI、Obsidian 相关插件等），产出「**别人有、我们没有**」的功能清单，由用户挑要哪些；而不是再打磨现有链路的工程细节。
 - **当前状态**：Phase1 停在 V1.3（正文已写、尾部 Readiness/未验证项为 V1.2 旧文本）；PROJECT_PHASE=PLAN、PLAN_GATE=IN_PROGRESS；**未提交、未推送**；无外派在跑。
+
+---
+
+## 收尾记一笔（neat-freak，2026-09-14本轮）
+
+- 范围：只改对应 docs 原文加注＋本节＋清系统产物；未改业务代码，未 commit/push，未碰 secrets，未碰 `008林粒粒AI编程/`。
+- 报告核对（结论/计数/引用行号 vs 当前工作树 `M app/index.html 181/31＋M app/server.py 28/3`，基于 b94845e 未提交）：
+  - `docs/review/P0-3-STATE-ENTRY-REWORK2-REVIEW.md`（PASS）：`publishOnlyRetry:1098` 在约 1093-1137 内 ✓；三处接线（首屏 1821／行级 658／详情 752）✓；批量三入口全文 0 命中 ✓；`obhint:741` 文案与 P2-1 描述逐字一致 ✓；`btnCandidateApply` title 已改用户语言（:251）✓；`rerun_old` confirm「转写0次」在 1396 行前后 ✓；index `181/31` 与工作树一致 ✓。server 记 `+19/−3` 属返工前 carryover 口径，无新增后端改动断言成立。
+  - `docs/review/P0-3-SEMANTICS-FIX-REVIEW.md`（PASS）：`_FAIL_SEMANTICS:1342` ✓；`_scan_disk_states:660`、docstring `:664-665`、失败映射分支 `:713-716` ✓；`display_persisted_mismatch` 唯一写点 `:1373` ✓。**不一致 1 处**：报告记 server `+19/−3`，工作树实测 `28/3`，差 9 行插入（疑 provenance 字段计数口径差）——已在该文件尾加注，正文未动，待 supervisor 裁定。
+  - `docs/qa/P0-3-STATE-ENTRY-RETEST2-2026-09-14.md`（FAIL，`QA-P03-RR2-001` OPEN）：当时快照无误；该 BUG 已在语义修复链 CLOSED（`docs/qa/P0-3-SEMANTICS-FIX-QA-2026-09-14.md`）——已在该文件尾加注链路，正文未动。
+  - `docs/qa/P0-3-SEMANTICS-FIX-QA-2026-09-14.md`（PASS，`QA-P03-RR2-001` CLOSED）：断言输出（`AUTO_PUBLISH/PUBLISH_ONLY/eligible=1`、真 mismatch 仍 `NEEDS_HUMAN`、哈希 `3a88…19b` 前后不变）均为当时取证值，未复跑；静态回归项与当前工作树一致（批量 0 命中、文案/三态/面板/窄屏均在位）。未改动该文件。
+  - `docs/qa/P0-3-STATE-ENTRY-QA-2026-09-14.md` 尾部 supervisor 复检节（打回 1/2）：历史快照，只加注不改正文——当时 `+112/−11`、账本 46／派工 24，当前已为 `+209/−34`；当时行号 `:605/:270/:742` 为旧位置，旧三入口现 0 命中；P0-3 本链打回计数仍为 `1/2`（语义修复链未新增 supervisor 打回）。
+- 清理：删仓根 `./.DS_Store`＋`docs/.DS_Store` 共 2 个；`__pycache__` 全仓本就为空；复查 `find -name __pycache__ -o -name .DS_Store` 输出为空。未删任何业务/文档文件；`env.err`、benchmark `results/*.log` 未动（按要求保留）。
+- 未决（P0-3 未收口，差 supervisor 复检；不写收口/完成）：① supervisor 复检语义修复链（含 server `28/3` vs `+19/−3` 计数口径裁定）；② `TASK-MODEL-LOG`／`DISPATCH-LOG` 语义修复链四行（builder/reviewer/qa/语义builder）落盘与 `rework` 口径（仍 1/2）由 TM 定；③ `HANDOFF.md` 工作树 `M`（TM 本轮落盘改动）与四份新报告均未提交未推送，是否 commit/push 待用户给分支名；④ QA 真 mismatch 夹具曾用 `FAILED_RETRYABLE`（旧报告）vs 现实枚举 `*_FAILED` 家族，口径差已记不拦。

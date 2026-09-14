@@ -126,6 +126,271 @@ def normalize_path(raw) -> str:
     return text
 
 
+# ------------------------------------------------- P1-2 严格请求参数层与错误脱敏
+#
+# 目的（PRODUCT_PLAN V1.3 P1-2 / D-6 / D-9 / D-12）：
+# 请求字段坏类型一律 400 人话失败、零执行、零写盘；错误响应不回真实绝对
+# 路径、请求体、转写正文或密钥。
+#
+# 约定（各 handler 共用，不各写一套）：
+# - 布尔只认 JSON true/false；1 / 0 / "true" / 1.0 一律 400，不得静默当 False。
+# - 整数只认 JSON int 且显式排除 bool（bool 是 int 子类，True 会被 isinstance 命中）。
+# - 字段缺键（键不存在）才走 default；键存在但值坏 → 400，不静默兜底。
+# - 错误文本只回字段名与收到的类型，不回原值（原值可能是 token/正文/密钥）。
+
+_MISSING = object()
+
+_TYPE_ZH = {
+    "bool": "布尔值", "int": "整数", "float": "小数", "str": "字符串",
+    "NoneType": "空值 null", "list": "数组", "dict": "对象",
+}
+
+
+class ParamError(ValueError):
+    """请求参数不合法：调用方统一转 400 人话，零执行。"""
+
+
+def _type_zh(value) -> str:
+    return _TYPE_ZH.get(type(value).__name__, type(value).__name__)
+
+
+def _bad(key: str, want: str, value) -> ParamError:
+    return ParamError("%s 须为%s（收到 %s）" % (key, want, _type_zh(value)))
+
+
+def _body_json(body: bytes) -> dict:
+    """空体/坏 JSON/非对象一律 400；不做任何默认值兜底。"""
+    try:
+        params = json.loads(body.decode("utf-8")) if body.strip() else {}
+    except (ValueError, UnicodeDecodeError):
+        raise ParamError("请求体须为 JSON 对象")
+    if not isinstance(params, dict):
+        raise ParamError("请求体须为 JSON 对象")
+    return params
+
+
+def _take_bool(params: dict, key: str, default=_MISSING) -> bool:
+    if key not in params:
+        if default is _MISSING:
+            raise ParamError("缺少 %s（布尔值 true/false）" % key)
+        return bool(default)
+    value = params[key]
+    if not isinstance(value, bool):
+        raise _bad(key, "布尔值 true/false", value)
+    return value
+
+
+def _take_int(params: dict, key: str, default=_MISSING,
+              minimum=None, maximum=None) -> int:
+    if key not in params:
+        if default is _MISSING:
+            raise ParamError("缺少 %s（整数）" % key)
+        return int(default)
+    value = params[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _bad(key, "整数", value)
+    if minimum is not None and value < minimum:
+        raise ParamError("%s 不能小于 %d" % (key, minimum))
+    if maximum is not None and value > maximum:
+        raise ParamError("%s 不能大于 %d" % (key, maximum))
+    return value
+
+
+def _take_str(params: dict, key: str, default=_MISSING, *,
+              allow_empty=False, max_len=4096) -> str:
+    if key not in params:
+        if default is _MISSING:
+            raise ParamError("缺少 %s（字符串）" % key)
+        return str(default)
+    value = params[key]
+    if not isinstance(value, str):
+        raise _bad(key, "字符串", value)
+    text = value.strip()
+    if not allow_empty and not text:
+        raise ParamError("%s 不能为空" % key)
+    if len(text) > max_len:
+        raise ParamError("%s 过长（上限 %d 字）" % (key, max_len))
+    return text
+
+
+def _take_str_list(params: dict, key: str, *, allow_empty=False,
+                   max_items=500) -> list:
+    if key not in params:
+        raise ParamError("缺少 %s（字符串数组）" % key)
+    value = params[key]
+    if not isinstance(value, list):
+        raise _bad(key, "字符串数组", value)
+    if not allow_empty and not value:
+        raise ParamError("%s 不能为空数组" % key)
+    if len(value) > max_items:
+        raise ParamError("%s 项数过多（上限 %d）" % (key, max_items))
+    out = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise _bad(key, "字符串数组（每项为非空字符串）", item)
+        out.append(item.strip())
+    return out
+
+
+def _take_int_list(params: dict, key: str, *, allow_empty=False,
+                   max_items=500, minimum=None) -> list:
+    if key not in params:
+        raise ParamError("缺少 %s（整数数组）" % key)
+    value = params[key]
+    if not isinstance(value, list):
+        raise _bad(key, "整数数组", value)
+    if not allow_empty and not value:
+        raise ParamError("%s 不能为空数组" % key)
+    if len(value) > max_items:
+        raise ParamError("%s 项数过多（上限 %d）" % (key, max_items))
+    out = []
+    for item in value:
+        # bool 是 int 子类：true/false 必须显式拒，不能 int() 静默转 1/0
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise _bad(key, "整数数组（每项为整数，不收 true/false、小数、字符串）",
+                       item)
+        if minimum is not None and item < minimum:
+            raise ParamError("%s 每项不能小于 %d" % (key, minimum))
+        out.append(item)
+    return out
+
+
+def _take_data_root(params: dict, default_data_root: str,
+                    key: str = "data_root") -> str:
+    """data_root：缺键或空串 → 默认目录（旧行为）；给了就必须是绝对路径。
+
+    显式传 null/数字/布尔/数组 → 400，不静默当默认值（P1-2 严格类型）。
+    """
+    if key not in params:
+        return default_data_root
+    value = params[key]
+    if not isinstance(value, str):
+        raise _bad(key, "字符串（绝对路径）", value)
+    text = normalize_path(value)
+    if not text:
+        return default_data_root
+    if not os.path.isabs(text):
+        raise ParamError("数据目录须为绝对路径，请点浏览重选")
+    return text
+
+
+def _take_required_data_root(params: dict, key: str = "data_root") -> str:
+    """候选 apply 专用严格取参：data_root 必须**显式给且非空**（P2-新1）。
+
+    背景：job 的身份绑定在 data_root 上，而状态查询按 D-9 契约要求显式
+    data_root（`_handle_vocab_apply_status` 无 data_root 一律回 job:null）。
+    若申请侧允许缺省到 DEFAULT_DATA_ROOT，就会出现「POST 建成 job、GET 永远
+    读不到」的前后端非对称。宁可在入口 400 拒收，也不放宽查询侧的严格性。
+
+    文案口径（P3-三2）：缺键/空值/类型错/相对路径一律「数据目录…」人话，
+    不再混用裸键名 `data_root`。
+    """
+    if key not in params:
+        raise ParamError("请先选择数据目录（data_root 必填，绝对路径）再提交")
+    value = params[key]
+    if not isinstance(value, str):
+        raise ParamError("数据目录须为绝对路径（收到 %s），请先选择数据目录再提交"
+                         % (_type_zh(value),))
+    if not value.strip():
+        raise ParamError("请先选择数据目录（data_root 不能为空，绝对路径）再提交")
+    text = normalize_path(value)
+    if not os.path.isabs(text):
+        raise ParamError("数据目录须为绝对路径，请点浏览重选")
+    return text
+
+
+def _query_str(query: dict, key: str, default: str = "") -> str:
+    """query（parse_qs 的 {key: [v]}）取首个字符串；缺/空一律回 default。"""
+    raw = query.get(key)
+    if not raw:
+        return default
+    value = raw[0] if isinstance(raw, list) else raw
+    return value if isinstance(value, str) else default
+
+
+def _query_data_root(query: dict, default_data_root: str,
+                     key: str = "data_root") -> str:
+    """query 版 data_root：非空则必须是绝对路径，否则 400（不得静默忽略）。"""
+    text = normalize_path(_query_str(query, key))
+    if not text:
+        return default_data_root
+    if not os.path.isabs(text):
+        raise ParamError("数据目录须为绝对路径，请点浏览重选")
+    return text
+
+
+def _query_int(query: dict, key: str, default: int,
+               minimum=None, maximum=None) -> int:
+    text = _query_str(query, key).strip()
+    if not text:
+        return default
+    try:
+        value = int(text)
+    except (TypeError, ValueError):
+        raise ParamError("%s 须为整数（收到非整数文本）" % key)
+    if minimum is not None and value < minimum:
+        raise ParamError("%s 不能小于 %d" % (key, minimum))
+    if maximum is not None and value > maximum:
+        raise ParamError("%s 不能大于 %d" % (key, maximum))
+    return value
+
+
+def _reject_duplicates(values: list, key: str) -> None:
+    """重复项一律 400（重复 run_id / 重复索引会让汇总口径不可复算）。"""
+    seen = set()
+    for value in values:
+        if value in seen:
+            raise ParamError("%s 有重复项（去掉重复后重试）" % key)
+        seen.add(value)
+
+
+# 路径片段收尾字符：遇到引号/中文标点/换行即视为路径结束（避免吃掉后续人话）
+_PATH_STOP_CHARS = frozenset(
+    "'\"`，。；：、！？（）《》【】()[]{}<>|*?\t\n\r")
+
+
+def _strip_paths(text: str) -> str:
+    """把文本里的路径片段整体抹成 …（含空格路径，遇引号/中文标点/换行收尾）。
+
+    逐字符扫描而非按空白切词：`/Users/zzy/My Data/vault/note.md 打不开`
+    这类含空格路径必须**整段**抹掉，否则会漏出 `Data/vault/note.md` 尾段。
+    宁可多抹一点（把紧跟在路径后的纯文本一并吃掉），也不漏真路径尾段。
+    """
+    out: list = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "/":
+            j = i + 1
+            while j < n and text[j] not in _PATH_STOP_CHARS:
+                j += 1
+            if not (out and out[-1] == "…"):
+                out.append("…")
+            i = j
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def _err_text(exc, limit: int = 180) -> str:
+    """异常转人话错误片段：抹掉路径（D-12）、压平空白、截断超长。
+
+    只保留异常类别与不带路径的部分，避免把 data_root/vault 真实路径或
+    请求体回给客户端。
+    """
+    try:
+        text = str(exc) or type(exc).__name__
+    except Exception:  # noqa: BLE001  (坏 __str__ 不得再炸一层)
+        text = type(exc).__name__
+    text = " ".join(_strip_paths(text).split()).strip()
+    if not text or text == "…":
+        # 纯路径/空消息：异常回类型名，普通文本回省略号
+        text = "…" if isinstance(exc, str) else type(exc).__name__
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
+
 def _mlx_available() -> bool:
     """probe import，不 hard 依赖：缺 mlx_whisper 时返回 False。"""
     try:
@@ -635,7 +900,8 @@ def _suggest_data_root(data_root: str) -> str:
 
 def _humanize_startup_error(exc: Exception, data_root: str) -> tuple:
     """启动门失败转人话：返回 (message, code, suggested_data_root)。"""
-    text = str(exc)
+    # D-12：先脱敏再进文案（text 之后只做人话拼接，不再暴露原始异常文本）
+    text = _err_text(exc)
     if "Stage3+ table not empty" in text:
         return (
             "本目录在这个数据目录下已有转写记录，按规则不能重复启动→"
@@ -650,7 +916,7 @@ def _humanize_startup_error(exc: Exception, data_root: str) -> tuple:
             "GATE_RUN_STATE_BLOCKED",
             _suggest_data_root(data_root),
         )
-    return ("启动监听失败：%s，请检查路径后重试" % (exc,), None, None)
+    return ("启动监听失败：%s，请检查路径后重试" % (_err_text(exc),), None, None)
 
 
 def _jobs_dir(data_root: str) -> str:
@@ -955,6 +1221,9 @@ def _listener_snapshot() -> dict:
         mem_all = list(_worker["processed"])
         running = _worker["running"]
         last_error = _worker["last_error"]
+    # D-12：last_error 会经 /api/start 原样出网，出网前统一脱敏（防未来再有裸 exc 写进来）
+    if isinstance(last_error, str) and last_error:
+        last_error = _err_text(last_error)
     with _state_lock:
         done_ids = set(_worker_done)
     data_root = snap.get("data_root")
@@ -1104,7 +1373,7 @@ def _serve_index(handler: BaseHTTPRequestHandler) -> None:
         with open(path, "rb") as fh:
             body = fh.read()
     except OSError as exc:
-        _send_json(handler, 500, {"ok": False, "error": "index.html missing: %s" % (exc,)})
+        _send_json(handler, 500, {"ok": False, "error": "index.html missing: %s" % (_err_text(exc),)})
         return
     handler.send_response(200)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1390,9 +1659,14 @@ def _diagnosis_item(row: dict, source: dict, data_root: str, persisted_at: str) 
 
 
 def _handle_failure_diagnosis(query: dict) -> tuple[int, dict]:
-    data_root = normalize_path((query.get("data_root") or [DEFAULT_DATA_ROOT])[0]) or DEFAULT_DATA_ROOT
-    con = _open_ro(data_root)
+    """只读失败诊断；坏库/缺表/半文件一律结构化人话失败（D-12），不回路径。"""
     generated = _diag_now()
+    try:
+        data_root = _query_data_root(query, DEFAULT_DATA_ROOT)
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc), "generated_at": generated,
+                     "diagnosis_version": DIAGNOSIS_VERSION}
+    con = _open_ro(data_root)
     if con is None:
         return 200, {"ok": False, "code": "DB_MISSING", "generated_at": generated,
                      "diagnosis_version": DIAGNOSIS_VERSION}
@@ -1435,6 +1709,13 @@ def _handle_failure_diagnosis(query: dict) -> tuple[int, dict]:
                      "persisted_snapshot_at": persisted_at, "page_snapshot_at": "UNKNOWN",
                      "provenance_status": "NOT_TIME_ALIGNED", "counts": counts,
                       "categories": categories, "items": items}
+    except (sqlite3.Error, OSError) as exc:
+        # 坏库（非 sqlite 文件）/半文件/权限：结构化失败，不回绝对路径（D-12）
+        return 200, {"ok": False, "code": "DB_UNREADABLE",
+                     "generated_at": generated,
+                     "diagnosis_version": DIAGNOSIS_VERSION,
+                     "error": "状态库读不出来：%s，请检查数据目录或先启动一次监听"
+                              % (_err_text(exc),)}
     finally:
         con.close()
 
@@ -1459,12 +1740,66 @@ RECOVERY_AUTO_STRATEGY = {
     "AUTO_PUBLISH": "PUBLISH_ONLY",
 }
 RECOVERY_JOB_FINAL = frozenset({"SUCCEEDED", "FAILED", "SKIPPED", "NEEDS_HUMAN"})
+# P1-2 字段一致（RERUN-PROGRESS P3-1）：results[] 每条都带同一组键，任何分支
+# 都不缺键；未能归类的额外键统一进 extra 对象，前端可按固定契约解释部分失败。
+RECOVERY_RESULT_FIELDS = (
+    "run_id", "strategy", "ok", "state", "whisper_calls", "reason",
+    "rendered_path", "canonical_output_path", "gate_ok", "finished_at", "extra",
+)
 _RECOVERY_PLANS: dict = {}
 _RECOVERY_PLAN_LOCK = threading.Lock()
 
 
+def _recovery_result_entry(payload: dict, *, gate_ok: bool = True) -> dict:
+    """把任意分支结果收敛成固定字段集合（缺键补空值，多余键进 extra）。"""
+    entry = {k: None for k in RECOVERY_RESULT_FIELDS}
+    entry["ok"] = False
+    entry["whisper_calls"] = 0
+    entry["reason"] = ""
+    entry["gate_ok"] = bool(gate_ok)
+    entry["extra"] = {}
+    for key, value in (payload or {}).items():
+        if key in RECOVERY_RESULT_FIELDS:
+            entry[key] = value
+        else:
+            entry["extra"][key] = value
+    return entry
+
+
+def _normalize_recovery_results(results) -> list:
+    """只读归一：老 job 文件里的半结构结果也按同一契约返回。"""
+    out = []
+    for item in (results or []):
+        out.append(_recovery_result_entry(item if isinstance(item, dict) else {}))
+    return out
+
+
+
 def _recovery_jobs_dir(data_root: str) -> str:
     return os.path.join(os.path.abspath(str(data_root or "")), "data", "recovery_jobs")
+
+
+def _recovery_root_digest(data_root: str) -> str:
+    """job↔data_root 绑定摘要（realpath 口径，与本仓其它身份判定一致）。
+
+    用 realpath 而非 abspath：符号链接/尾斜杠/`..` 指向同一目录时必须是同一
+    身份（abspath 会把这些写法算成不同目录，造成取 job 被 409 误拒）。
+    """
+    real = os.path.realpath(os.path.abspath(str(data_root or "")))
+    return hashlib.sha256(real.encode()).hexdigest()[:16]
+
+
+def _recovery_root_digest_legacy(data_root: str) -> str:
+    """旧口径摘要（abspath）：仅用于兼容本改动之前写下的 job 文件，别在新代码用。"""
+    return hashlib.sha256(
+        os.path.abspath(str(data_root or "")).encode()).hexdigest()[:16]
+
+
+def _recovery_digest_ok(value) -> bool:
+    """摘要合法性：必须是非空 16 位十六进制字符串（空/缺/null 一律不合法）。"""
+    if not isinstance(value, str) or len(value) != 16:
+        return False
+    return all(c in "0123456789abcdef" for c in value)
 
 
 def _recovery_atomic_write(path: str, obj: dict) -> None:
@@ -1543,20 +1878,14 @@ def _recovery_plan_items(data_root: str, run_ids: list) -> tuple[dict | None, li
 def _handle_retry_plan_post(body: bytes) -> tuple[int, dict]:
     """FR-5 dry-run：只读组装计划，服务端只存摘要，不执行、零写入业务数据。"""
     try:
-        params = json.loads(body.decode("utf-8")) if body.strip() else {}
-    except (ValueError, UnicodeDecodeError):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    if not isinstance(params, dict):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
-    if not os.path.isabs(data_root):
-        return 400, {"ok": False, "error": "数据目录须为绝对路径，请点浏览重选"}
-    run_ids = params.get("run_ids")
-    if not isinstance(run_ids, list) or not run_ids or not all(
-            isinstance(r, str) and r.strip() for r in run_ids):
-        return 400, {"ok": False, "error": "run_ids 须为非空字符串数组"}
-    run_ids = [str(r).strip() for r in run_ids]
-    snap_id = params.get("diagnosis_snapshot_id")
+        params = _body_json(body)
+        data_root = _take_data_root(params, DEFAULT_DATA_ROOT)
+        run_ids = _take_str_list(params, "run_ids")
+        _reject_duplicates(run_ids, "run_ids")
+        snap_id = _take_str(params, "diagnosis_snapshot_id", "",
+                            allow_empty=True)
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc)}
     diag, eligible, excluded = _recovery_plan_items(data_root, run_ids)
     if diag is None:
         return 500, {"ok": False, "error": "诊断不可用，重新查询失败原因后再试"}
@@ -1571,7 +1900,8 @@ def _handle_retry_plan_post(body: bytes) -> tuple[int, dict]:
     items = {e["run_id"]: {"fingerprint": e["fingerprint"], "strategy": e["strategy"]}
              for e in eligible}
     data_abs = os.path.abspath(data_root)
-    data_digest = hashlib.sha256(data_abs.encode()).hexdigest()[:16]
+    # 绑定摘要用 realpath 口径（符号链接/尾斜杠/.. 视同一目录），与 _recovery_job_read 对齐
+    data_digest = _recovery_root_digest(data_root)
     with _RECOVERY_PLAN_LOCK:
         # 服务端只存摘要：内存键与落盘均为 digest，token 原文不存储
         _RECOVERY_PLANS[digest] = {
@@ -1710,7 +2040,7 @@ def _exec_publish_only(data_root: str, run_id: str, work_dir: str,
         con = _open_rw(os.path.abspath(data_root))
     except (sqlite3.Error, OSError) as exc:
         return {"ok": False, "state": "FAILED", "strategy": "PUBLISH_ONLY",
-                "whisper_calls": 0, "reason": "状态库不可读：%s" % (exc,)}
+                "whisper_calls": 0, "reason": "状态库不可读：%s" % (_err_text(exc),)}
     try:
         from stage4.publish import initial_publish  # noqa: E402
         # ③预判：目标已存在只判不写（initial_publish 内再判一次，双保险）
@@ -1773,7 +2103,7 @@ def _exec_publish_only(data_root: str, run_id: str, work_dir: str,
         except Exception:
             pass
         return {"ok": False, "state": "FAILED", "strategy": "PUBLISH_ONLY",
-                "whisper_calls": 0, "reason": "入库失败：%s" % (exc,)}
+                "whisper_calls": 0, "reason": "入库失败：%s" % (_err_text(exc),)}
     finally:
         try:
             con.close()
@@ -1784,25 +2114,20 @@ def _exec_publish_only(data_root: str, run_id: str, work_dir: str,
 def _handle_retry_batch_post(body: bytes) -> tuple[int, dict]:
     """FR-6 确认执行：confirm:true + token + 指纹复核；幂等同 token 单 job。"""
     try:
-        params = json.loads(body.decode("utf-8")) if body.strip() else {}
-    except (ValueError, UnicodeDecodeError):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    if not isinstance(params, dict):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
-    if not os.path.isabs(data_root):
-        return 400, {"ok": False, "error": "数据目录须为绝对路径，请点浏览重选"}
-    if params.get("confirm") is not True:
+        params = _body_json(body)
+        data_root = _take_data_root(params, DEFAULT_DATA_ROOT)
+        confirm = _take_bool(params, "confirm", False)
+        token = _take_str(params, "plan_token", "", allow_empty=True)
+        run_ids = _take_str_list(params, "run_ids", allow_empty=True)
+        _reject_duplicates(run_ids, "run_ids")
+        vault_s = _take_str(params, "ob_vault_root", "", allow_empty=True) or None
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    if confirm is not True:
         return 400, {"ok": False,
                      "error": "批量恢复须在预览后确认（confirm:true），请先预览再确认"}
-    token = params.get("plan_token")
-    if not (isinstance(token, str) and token.strip()):
+    if not token:
         return 400, {"ok": False, "error": "缺少预览令牌，请先预览再确认"}
-    token = token.strip()
-    run_ids = params.get("run_ids")
-    if not isinstance(run_ids, list) or not all(
-            isinstance(r, str) and r.strip() for r in (run_ids or [])):
-        return 400, {"ok": False, "error": "run_ids 须为字符串数组"}
     run_ids = [str(r).strip() for r in run_ids]
     import time as _time
     import hashlib as _hl
@@ -1825,7 +2150,8 @@ def _handle_retry_batch_post(body: bytes) -> tuple[int, dict]:
         with _RECOVERY_PLAN_LOCK:
             _RECOVERY_PLANS.pop(digest, None)
         return 409, {"ok": False, "error": "预览已过期（10 分钟），请重新预览"}
-    if os.path.abspath(str(plan.get("data_root"))) != data_abs:
+    # 目录身份用 realpath 口径：符号链接/尾斜杠/.. 指向同一目录不该误判成“换了目录”
+    if os.path.realpath(str(plan.get("data_root"))) != os.path.realpath(data_abs):
         return 409, {"ok": False, "error": "数据目录与预览不一致，零执行；请重选目录后重新预览"}
     if existing:
         code, job = _recovery_job_read(data_abs, existing)
@@ -1870,9 +2196,9 @@ def _handle_retry_batch_post(body: bytes) -> tuple[int, dict]:
             cur = _RECOVERY_PLANS.get(digest)
             if cur is not None and str(cur.get("job_id")) == job_id:
                 _RECOVERY_PLANS[digest] = {**cur, "job_id": None}
-        return 500, {"ok": False, "error": "批量任务落盘失败（零执行）：%s" % (exc,)}
-    vault = params.get("ob_vault_root")
-    vault_s = vault.strip() if isinstance(vault, str) and vault.strip() else None
+        return 500, {"ok": False,
+                     "error": "批量任务落盘失败（零执行）：%s，检查磁盘空间/目录权限后重试"
+                              % (_err_text(exc),)}
     work_base = os.path.join(_recovery_jobs_dir(data_abs), job_id, "work")
     for rid in run_ids:
         want = plan["items"][rid]
@@ -1881,10 +2207,11 @@ def _handle_retry_batch_post(body: bytes) -> tuple[int, dict]:
         gate_ok, gate_msg = _recovery_gate_ok(strategy, {"run_id": rid, **want},
                                               data_abs)
         if not gate_ok:
-            entry = {"run_id": rid, "strategy": strategy, "ok": False,
-                     "state": "NEEDS_HUMAN", "whisper_calls": 0,
-                     "reason": "复用门未过：%s" % gate_msg,
-                     "finished_at": _diag_now()}
+            entry = _recovery_result_entry({
+                "run_id": rid, "strategy": strategy, "ok": False,
+                "state": "NEEDS_HUMAN", "whisper_calls": 0,
+                "reason": "复用门未过：%s" % gate_msg,
+                "finished_at": _diag_now()}, gate_ok=False)
         else:
             work_dir = os.path.join(work_base, rid)
             try:
@@ -1893,20 +2220,26 @@ def _handle_retry_batch_post(body: bytes) -> tuple[int, dict]:
                 pass
             try:
                 if strategy == "RETRANSCRIBE":
-                    entry = {"run_id": rid, **_exec_retranscribe(
-                        data_abs, rid, work_dir), "finished_at": _diag_now()}
+                    entry = _recovery_result_entry({
+                        "run_id": rid, **_exec_retranscribe(
+                            data_abs, rid, work_dir),
+                        "finished_at": _diag_now()})
                 elif strategy == "REUSE_DERIVED":
-                    entry = {"run_id": rid, **_exec_reuse_derived(
-                        data_abs, rid, work_dir), "finished_at": _diag_now()}
+                    entry = _recovery_result_entry({
+                        "run_id": rid, **_exec_reuse_derived(
+                            data_abs, rid, work_dir),
+                        "finished_at": _diag_now()})
                 else:
-                    entry = {"run_id": rid, **_exec_publish_only(
-                        data_abs, rid, work_dir, vault_s),
-                        "finished_at": _diag_now()}
-            except Exception as exc:
-                entry = {"run_id": rid, "strategy": strategy, "ok": False,
-                         "state": "FAILED", "whisper_calls": 0,
-                         "reason": "执行异常：%s" % (exc,),
-                         "finished_at": _diag_now()}
+                    entry = _recovery_result_entry({
+                        "run_id": rid, **_exec_publish_only(
+                            data_abs, rid, work_dir, vault_s),
+                        "finished_at": _diag_now()})
+            except Exception as exc:  # noqa: BLE001  (逐项异常不炸整批)
+                entry = _recovery_result_entry({
+                    "run_id": rid, "strategy": strategy, "ok": False,
+                    "state": "FAILED", "whisper_calls": 0,
+                    "reason": "执行异常：%s" % (_err_text(exc),),
+                    "finished_at": _diag_now()}, gate_ok=False)
         job["results"].append(entry)
         job["done"] = len(job["results"])
         job["whisper_calls"] = sum(int(r.get("whisper_calls") or 0)
@@ -1929,7 +2262,7 @@ def _handle_retry_batch_post(body: bytes) -> tuple[int, dict]:
         _recovery_atomic_write(job_path, job)
     except OSError as exc:
         job = dict(job)
-        job["error"] = "终态落盘失败：%s（逐项结果仍以此前落盘为准）" % (exc,)
+        job["error"] = "终态落盘失败：%s（逐项结果仍以此前落盘为准）" % (_err_text(exc),)
     out = dict(job)
     out["ok"] = True
     return 202, out
@@ -1952,11 +2285,24 @@ def _recovery_job_read(data_root: str, job_id: str) -> tuple[int, dict]:
                      "source_location_blocked": 0, "skipped": 0,
                      "needs_human": 0, "interrupted": 1,
                      "results": [], "current": None,
-                     "error": "任务文件不完整，标为中断（不自动续跑）：%s" % (exc,)}
+                     "error": "任务文件不完整，标为中断（不自动续跑）：%s"
+                              % (_err_text(exc),)}
     if not isinstance(job, dict):
         return 200, {"ok": True, "job_id": job_id, "state": "INTERRUPTED",
                      "interrupted": 1, "results": [],
                      "error": "任务文件不是对象，标为中断（不自动续跑）"}
+    # P1-2/D-9 目录绑定：job 自带的 data_root 摘要必须与本次请求的数据目录一致，
+    # 否则一律结构化失败且不返回任务内容（防串目录/被搬过来的 job 文件）。
+    # 摘要缺失/空/null/非法一律 409（不做“空值=放行”的旁路）；realpath 口径
+    # 命中同一目录的符号链接/尾斜杠/`..` 写法；旧 abspath 口径仅作显式兼容白名单。
+    stored_digest = job.get("data_root_digest")
+    if not _recovery_digest_ok(stored_digest):
+        return 409, {"ok": False, "job_id": job_id,
+                     "error": "任务文件缺少数据目录绑定（零渲染），请重新预览后新建任务"}
+    if str(stored_digest) not in (_recovery_root_digest(data_abs),
+                                  _recovery_root_digest_legacy(data_abs)):
+        return 409, {"ok": False, "job_id": job_id,
+                     "error": "该任务属于另一个数据目录（零渲染），请核对数据目录后重查"}
     if str(job.get("state")) not in RECOVERY_JOB_FINAL and job.get("state") != "DONE_PARTIAL":
         # 未终态（服务重启遗留 RUNNING）→ INTERRUPTED，不自动续跑；尽力持久化
         job = dict(job)
@@ -1970,16 +2316,24 @@ def _recovery_job_read(data_root: str, job_id: str) -> tuple[int, dict]:
         except OSError:
             pass
     out = dict(job)
+    # P1-2 字段一致：老 job 文件也按固定契约返回 results[]
+    out["results"] = _normalize_recovery_results(job.get("results"))
     out["ok"] = True
     return 200, out
 
 
 def _handle_retry_batch_status(query: dict) -> tuple[int, dict]:
-    data_root = normalize_path((query.get("data_root") or [DEFAULT_DATA_ROOT])[0]) \
-        or DEFAULT_DATA_ROOT
-    job_id = ((query.get("job_id") or [""])[0] or "").strip()
-    if not os.path.isabs(data_root):
-        return 400, {"ok": False, "error": "数据目录须为绝对路径"}
+    """按 data_root + job_id 双键取 job；缺任一或跨目录一律结构化人话失败。"""
+    try:
+        data_root = _query_data_root(query, "", "data_root")
+        job_id = _query_str(query, "job_id").strip()
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    if not data_root:
+        return 400, {"ok": False,
+                     "error": "缺少数据目录 data_root，无法定位批量任务（零渲染）"}
+    if not job_id:
+        return 400, {"ok": False, "error": "缺少任务编号 job_id（零渲染）"}
     return _recovery_job_read(data_root, job_id)
 
 
@@ -2403,7 +2757,7 @@ def _obsidian_url(vault_root: str | None,
                   urllib.parse.quote(rel, safe="")))
         return url, None
     except (ValueError, OSError) as exc:
-        return None, "路径不在同一本机盘：%s" % (exc,)
+        return None, "路径不在同一本机盘：%s" % (_err_text(exc),)
 
 
 def _note_entry_for_run(run_id: str, data_root: str | None) -> tuple:
@@ -2488,6 +2842,8 @@ VOCAB_MAX_ENTRIES = 500
 VOCAB_MAX_SIDE_CHARS = 128
 VOCAB_MAX_PROMPT_TERMS = 20
 VOCAB_CANDIDATES_FILENAME = "vocab-candidates.json"
+# 候选清单缺失时的哨兵版本值：它不是可用版本锁，apply 入口见到即 409（见 _run_vocab_candidates_apply）
+RECOVERY_CANDIDATES_ABSENT = "absent"
 VOCAB_DOMAIN_STATE_FILENAME = "vocab-domains.json"
 
 
@@ -2707,7 +3063,7 @@ def _apply_v25_postpass(job_dir: str, norm_final_path: str | None,
         from stage3 import render as _rend  # noqa: E402  (只读复用 assemble)
         from stage9 import formatter_v2 as _fv9  # noqa: E402
     except Exception as exc:
-        return {"fixed": False, "error": "postpass import 失败：%s" % (exc,)}
+        return {"fixed": False, "error": "postpass import 失败：%s" % (_err_text(exc),)}
     try:
         if not norm_final_path or not os.path.isfile(str(norm_final_path)):
             return {"fixed": False, "error": "normalized 缺失，不覆写"}
@@ -2722,17 +3078,17 @@ def _apply_v25_postpass(job_dir: str, norm_final_path: str | None,
         try:
             want_paras = _fv9.render_with_v2(segments)
         except Exception as exc:
-            return {"fixed": False, "error": "render_with_v2 失败：%s" % (exc,)}
+            return {"fixed": False, "error": "render_with_v2 失败：%s" % (_err_text(exc),)}
         try:
             want_md = _rend.assemble_markdown(
                 want_paras, title or "untitled", render_profile)
         except Exception as exc:
-            return {"fixed": False, "error": "assemble 失败：%s" % (exc,)}
+            return {"fixed": False, "error": "assemble 失败：%s" % (_err_text(exc),)}
         try:
             with open(str(rend_final_path), "r", encoding="utf-8") as fh:
                 cur_md = fh.read()
         except OSError as exc:
-            return {"fixed": False, "error": "读稿失败：%s" % (exc,)}
+            return {"fixed": False, "error": "读稿失败：%s" % (_err_text(exc),)}
         if cur_md == want_md:
             return {"fixed": False, "already_ok": True,
                     "paras": len(want_paras),
@@ -2753,7 +3109,7 @@ def _apply_v25_postpass(job_dir: str, norm_final_path: str | None,
                 "max_len": max((len(p) for p in want_paras), default=0),
                 "lengths": [len(p) for p in want_paras]}
     except Exception as exc:
-        return {"fixed": False, "error": "后处理异常：%s" % (exc,)}
+        return {"fixed": False, "error": "后处理异常：%s" % (_err_text(exc),)}
 
 
 def _user_prompt_terms(data_root: str) -> list:
@@ -2864,15 +3220,32 @@ def _handle_vocab_candidates_get(query: dict) -> tuple[int, dict]:
                  "candidates": groups,
                  "count": sum(len(items) for items in groups.values()),
                  "has_candidates": bool(sum(len(items) for items in groups.values())),
+                 # P1-2 候选版本锁：POST apply 必须回传同一指纹，漂移即 409 零执行
+                 "candidates_revision": _vocab_candidates_revision(data_root),
                  "source_exists": os.path.isfile(_vocab_candidates_path(data_root))}
 
 
 def _candidate_detail(index, item, accepted: bool, reason: str = "") -> dict:
+    """候选明细固定契约：任何分支都带同一组键（RERUN-PROGRESS P3-1）。"""
     view = _candidate_view(index, item)
-    view.update({"accepted": accepted, "decision": "保留" if accepted else "拒收"})
-    if reason:
-        view["reason"] = reason
+    view.update({"accepted": bool(accepted),
+                 "decision": "保留" if accepted else "拒收",
+                 "reason": str(reason or "")})
     return view
+
+
+def _vocab_candidates_revision(data_root: str) -> str:
+    """候选清单内容指纹（GET 快照与 POST 应用之间的版本锁）。
+
+    清单缺失 → 哨兵 `RECOVERY_CANDIDATES_ABSENT`（不是可用版本，apply 入口
+    见到即 409，防伪造常量过锁）。
+    """
+    try:
+        with open(_vocab_candidates_path(data_root), "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return RECOVERY_CANDIDATES_ABSENT
+    return hashlib.sha256(raw).hexdigest()[:16]
 
 
 def _run_vocab_candidates_apply(params: dict,
@@ -2882,33 +3255,45 @@ def _run_vocab_candidates_apply(params: dict,
     progress_cb 仅用于页面进度回传（(ev) -> None）；为 None 时不改变任何行为。
     本函数本身仍是同步阻塞的，异步外壳见 _handle_vocab_candidates_apply。
     """
-    data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
-    vault = params.get("ob_vault_root")
-    vault_s = vault.strip() if isinstance(vault, str) and vault.strip() else None
-    # 新前端显式传 false 表示只入库；缺字段沿用旧 API 的全量重跑行为。
-    rerun_old = params.get("rerun_old", True) is True
-    indices = params.get("indices")
-    if not isinstance(indices, list):
-        return 400, {"ok": False, "error": "请传 indices 数组（勾选要导入的候选）"}
+    try:
+        # P2-新1：申请侧必须显式带 data_root，与状态查询侧的显式要求对称
+        data_root = _take_required_data_root(params)
+        # 新前端显式传 false 表示只入库；字段缺失沿用旧 API 的全量重跑行为，
+        # 但字段存在就必须是布尔（1/"true"/null 一律 400，不静默当 False）。
+        rerun_old = _take_bool(params, "rerun_old", True)
+        # 严格 int 且非 bool（true/1.5/"3"/null 一律 400）；越界与重复仍走逐条
+        # 拒收明细（既有行为，前端按 details 统一解释）。
+        indices = _take_int_list(params, "indices")
+        vault_s = _take_str(params, "ob_vault_root", "", allow_empty=True) or None
+        want_revision = _take_str(params, "candidates_revision", "")
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    # 候选版本锁（CANDIDATE-APPLY P3-5）：GET 快照与 POST 之间的候选清单若已
+    # 变化，下标可能指向别的候选 → 409 且零执行（不写词库、不标记、不重跑）。
+    cur_revision = _vocab_candidates_revision(data_root)
+    if not want_revision:
+        return 400, {"ok": False,
+                     "error": "缺少候选清单版本 candidates_revision（请刷新待审清单后重试）"}
+    if cur_revision == RECOVERY_CANDIDATES_ABSENT:
+        # 没有清单就没有可应用的候选：伪造常量版本也不许过锁建空 job（P1-2 修）
+        return 409, {"ok": False, "data_root": data_root,
+                     "candidates_revision": cur_revision,
+                     "error": "没有待审清单可应用（零执行），请先跑一次 AI 审查生成清单"}
+    if want_revision != cur_revision:
+        return 409, {"ok": False, "data_root": data_root,
+                     "candidates_revision": cur_revision,
+                     "error": "候选清单已变化（零执行），请刷新待审清单后重新勾选"}
     candidates = _load_vocab_candidates(data_root)
     details = []
     selected = []
     seen_indices = set()
-    for raw_index in indices:
-        try:
-            index = int(raw_index)
-        except (TypeError, ValueError):
-            details.append({"index": raw_index, "accepted": False,
-                            "decision": "拒收", "reason": "候选索引无效"})
-            continue
+    for index in indices:
         if index in seen_indices:
-            details.append({"index": index, "accepted": False,
-                            "decision": "拒收", "reason": "候选索引重复"})
+            details.append(_candidate_detail(index, None, False, "候选索引重复"))
             continue
         seen_indices.add(index)
         if index < 0 or index >= len(candidates):
-            details.append({"index": index, "accepted": False,
-                            "decision": "拒收", "reason": "候选索引不存在"})
+            details.append(_candidate_detail(index, None, False, "候选索引不存在"))
             continue
         if isinstance(candidates[index], dict) and candidates[index].get("imported"):
             details.append(_candidate_detail(
@@ -2944,7 +3329,7 @@ def _run_vocab_candidates_apply(params: dict,
             _save_vocab_entries(data_root, entries)
         except OSError as exc:
             return 500, {"ok": False, "data_root": data_root,
-                         "error": "词库保存失败，未生效：%s→检查磁盘空间/目录权限后重试" % exc,
+                         "error": "词库保存失败，未生效：%s→检查磁盘空间/目录权限后重试" % (_err_text(exc),),
                          "details": details}
         try:
             reg = _register_user_rules(entries)
@@ -2955,7 +3340,7 @@ def _run_vocab_candidates_apply(params: dict,
             except Exception:
                 pass
             return 400, {"ok": False, "data_root": data_root,
-                         "error": "词库注册失败，已回滚未生效：%s" % exc,
+                         "error": "词库注册失败，已回滚未生效：%s" % (_err_text(exc),),
                          "details": details}
         except Exception as exc:
             try:
@@ -2963,7 +3348,7 @@ def _run_vocab_candidates_apply(params: dict,
             except Exception:
                 pass
             return 500, {"ok": False, "data_root": data_root,
-                         "error": "词库注册失败，已回滚未生效：%s" % exc,
+                         "error": "词库注册失败，已回滚未生效：%s" % (_err_text(exc),),
                          "details": details}
     if not imported:
         return 200, {"ok": True, "data_root": data_root, "imported": 0,
@@ -2976,7 +3361,7 @@ def _run_vocab_candidates_apply(params: dict,
         _mark_vocab_candidates_imported(
             data_root, {d["index"] for d in details if d.get("accepted")})
     except Exception as exc:
-        candidate_mark_error = "候选清单标记失败，原文件未改动：%s" % exc
+        candidate_mark_error = "候选清单标记失败，原文件未改动：%s" % (_err_text(exc),)
     if not rerun_old:
         message = "已导入%d条；未重跑老稿，老稿未动" % imported
         if candidate_mark_error:
@@ -2999,7 +3384,8 @@ def _run_vocab_candidates_apply(params: dict,
         reapply_code, reapply = _handle_reapply_post(reapply_body,
                                                      progress_cb=progress_cb)
     except Exception as exc:
-        reapply_code, reapply = 500, {"ok": False, "error": "重跑接口异常：%s" % exc}
+        reapply_code, reapply = 500, {"ok": False,
+                                           "error": "重跑接口异常：%s" % (_err_text(exc),)}
     summary = reapply.get("summary") if isinstance(reapply, dict) else None
     results = reapply.get("results") if isinstance(reapply, dict) else []
     if not isinstance(summary, dict):
@@ -3069,7 +3455,7 @@ def _vocab_apply_worker(job_id: str, params: dict) -> None:
     try:
         code, obj = _run_vocab_candidates_apply(params, progress_cb=_on_progress)
     except Exception as exc:  # noqa: BLE001  (兜底转 failed，不炸线程)
-        code, obj = 500, {"ok": False, "error": "错词重跑异常：%s" % (exc,)}
+        code, obj = 500, {"ok": False, "error": "错词重跑异常：%s" % (_err_text(exc),)}
     obj = obj if isinstance(obj, dict) else {}
     with _state_lock:
         job = _vocab_apply_job
@@ -3111,13 +3497,39 @@ def _handle_vocab_candidates_apply(body: bytes) -> tuple[int, dict]:
     """
     global _vocab_apply_job, _vocab_apply_seq
     try:
-        params = json.loads(body.decode("utf-8")) if body.strip() else {}
-    except (ValueError, UnicodeDecodeError):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    if not isinstance(params, dict):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    if not isinstance(params.get("indices"), list):
-        return 400, {"ok": False, "error": "请传 indices 数组（勾选要导入的候选）"}
+        params = _body_json(body)
+        # P2-新1：异步入口同口径——必须显式带 data_root（否则 400，不建 job）
+        data_root = _take_required_data_root(params)
+        rerun_old = _take_bool(params, "rerun_old", True)
+        indices = _take_int_list(params, "indices")
+        vault_s = _take_str(params, "ob_vault_root", "", allow_empty=True) or None
+        want_revision = _take_str(params, "candidates_revision", "")
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    if not want_revision:
+        return 400, {"ok": False,
+                     "error": "缺少候选清单版本 candidates_revision（请刷新待审清单后重试）"}
+    # 候选版本锁：同步入口先判，漂移即 409 且零执行（不建 job、不写盘）
+    cur_revision = _vocab_candidates_revision(data_root)
+    if cur_revision == RECOVERY_CANDIDATES_ABSENT:
+        return 409, {"ok": False, "data_root": data_root,
+                     "candidates_revision": cur_revision,
+                     "error": "没有待审清单可应用（零执行），请先跑一次 AI 审查生成清单"}
+    if want_revision != cur_revision:
+        return 409, {"ok": False, "data_root": data_root,
+                     "candidates_revision": cur_revision,
+                     "error": "候选清单已变化（零执行），请刷新待审清单后重新勾选"}
+    # P1-三1：可选字段「笔记库目录」缺省/为空时**不要写回这个键**——写回 None 会让
+    # worker 侧 `_take_str` 把「键存在且值为 None」判成类型错（显式 null 必须拒，
+    # D-6 既定契约），于是「不填笔记库」这条合法路径必然 400→任务 failed。
+    # 只归一必填/已知键；可选键按需补，缺省即不出现。
+    job_params = {k: v for k, v in params.items() if k != "ob_vault_root"}
+    job_params.update({"data_root": data_root, "rerun_old": rerun_old,
+                       "indices": indices,
+                       "candidates_revision": want_revision})
+    if vault_s is not None:
+        job_params["ob_vault_root"] = vault_s
+    params = job_params
     with _state_lock:
         cur = _vocab_apply_job
         if isinstance(cur, dict) and cur.get("state") == "running":
@@ -3131,8 +3543,9 @@ def _handle_vocab_candidates_apply(body: bytes) -> tuple[int, dict]:
             "job_id": job_id,
             "state": "running",
             "stage": "importing",
-            "data_root": normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT,
-            "rerun_old": params.get("rerun_old", True) is True,
+            "data_root": data_root,
+            "rerun_old": rerun_old,
+            "candidates_revision": want_revision,
             "started_at": _utc_now_iso(),
             "finished_at": None,
             "total": 0,
@@ -3152,7 +3565,7 @@ def _handle_vocab_candidates_apply(body: bytes) -> tuple[int, dict]:
         )
         thread.start()
     except Exception as exc:  # noqa: BLE001  起线程失败不得悬挂单例
-        reason = "后台任务启动失败：%s，请重试或重启服务" % (exc,)
+        reason = "后台任务启动失败：%s，请重试或重启服务" % (_err_text(exc),)
         with _state_lock:
             cur2 = _vocab_apply_job
             if isinstance(cur2, dict) and cur2.get("job_id") == job_id:
@@ -3164,11 +3577,38 @@ def _handle_vocab_candidates_apply(body: bytes) -> tuple[int, dict]:
 
 
 def _handle_vocab_apply_status(query: dict) -> tuple[int, dict]:
-    """只读：返回最近一次错词重跑任务进度（results 明细不在这里，避免响应过大）。"""
+    """只读：按 data_root + job_id 取最近一次错词重跑进度（明细不在这里）。
+
+    隔离口径（RERUN-PROGRESS P3-2/P3-3）：**必须显式传 data_root**（+可选
+    job_id）才回明细；两者都不传 → 一律 `{ok:true, job:null}`，不给"最近一次
+    任务"的回落口子。传了 data_root 就按目录比对，传了 job_id 就按任务比对；
+    任一不匹配一律结构化失败且**不回**该任务内容，防换目录后或另一个标签页
+    把别人的进度画到自己页面上。
+    """
+    try:
+        data_root = _query_data_root(query, "", "data_root")
+        want_job = _query_str(query, "job_id").strip()
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    if not data_root:
+        # 没有 data_root 就无法判定隔离：不回任何明细（P1-2 契约，不做回落）
+        return 200, {"ok": True, "job": None}
     with _state_lock:
         job = dict(_vocab_apply_job) if isinstance(_vocab_apply_job, dict) else None
     if job is None:
         return 200, {"ok": True, "job": None}
+    job_root = normalize_path(job.get("data_root")) or DEFAULT_DATA_ROOT
+    # realpath 口径：符号链接/尾斜杠指向同一目录时不该误判成跨目录
+    if os.path.realpath(job_root) != os.path.realpath(data_root):
+        return 409, {"ok": False, "job": None, "data_root": data_root,
+                     "error": "最近一次任务属于另一个数据目录（零渲染），"
+                              "请核对数据目录后重查"}
+    cur_job_id = str(job.get("job_id") or "")
+    if want_job and want_job != cur_job_id:
+        # 不回当前 job 的任何字段（含 job_id），避免把别的标签页的任务信息透出去
+        return 409, {"ok": False, "job": None,
+                     "error": "最近一次任务不是你发起的那个（零渲染），"
+                              "可能另一个标签页在跑；请刷新后再看"}
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
     return 200, {"ok": True, "job": {
         "job_id": job.get("job_id"),
@@ -3176,6 +3616,7 @@ def _handle_vocab_apply_status(query: dict) -> tuple[int, dict]:
         "stage": job.get("stage"),
         "data_root": job.get("data_root"),
         "rerun_old": job.get("rerun_old"),
+        "candidates_revision": job.get("candidates_revision"),
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
         "total": job.get("total"),
@@ -3256,7 +3697,7 @@ def _handle_vocab_add(body: bytes) -> tuple[int, dict]:
     except OSError as exc:
         return 500, {"ok": False,
                      "error": "词库保存失败，未生效：%s→检查磁盘空间/目录权限后重试"
-                              % (exc,)}
+                              % (_err_text(exc),)}
     try:
         reg = _register_user_rules(entries)
     except ValueError as exc:
@@ -3265,7 +3706,7 @@ def _handle_vocab_add(body: bytes) -> tuple[int, dict]:
             _save_vocab_entries(data_root, entries_before)
         except Exception:
             pass
-        return 400, {"ok": False, "error": str(exc)}
+        return 400, {"ok": False, "error": _err_text(exc)}
     _msg = (("已覆盖更新：%s→%s" % (wrong_s, right_s))
             if err is not None else
             ("已添加：%s→%s，新转写自动应用" % (wrong_s, right_s)))
@@ -3301,7 +3742,7 @@ def _handle_vocab_del(body: bytes) -> tuple[int, dict]:
     except OSError as exc:
         return 500, {"ok": False,
                      "error": "词库保存失败，未生效：%s→检查磁盘空间/目录权限后重试"
-                              % (exc,)}
+                              % (_err_text(exc),)}
     return 200, {"ok": True, "data_root": data_root, "vocab": kept,
                  "count": len(kept), "revision": _user_rules_revision(kept),
                  "effective_revision": _effective_vocab_revision(data_root, kept),
@@ -3388,23 +3829,39 @@ def _handle_vocab_presets_get(query: dict | None = None) -> tuple[int, dict]:
 
 
 def _handle_vocab_presets_domains_post(body: bytes) -> tuple[int, dict]:
-    """保存预置域启用开关；停用只影响新转写/重跑，不改老稿。"""
+    """保存预置域启用开关；停用只影响新转写/重跑，不改老稿。
+
+    P1-2 部分更新安全（CANDIDATE-UI2 P3-5）：只改本次提交的域，未提交的域
+    保持原值（缺键不得当重置/当 True 回启），未知域忽略，值必须是真布尔。
+    """
     try:
-        params = json.loads(body.decode("utf-8")) if body.strip() else {}
-    except (ValueError, UnicodeDecodeError):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    if not isinstance(params, dict):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
+        params = _body_json(body)
+        data_root = _take_data_root(params, DEFAULT_DATA_ROOT)
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc)}
     raw = params.get("enabled")
     if not isinstance(raw, dict):
         return 400, {"ok": False, "error": "请传 enabled 对象（每个预置域 true/false）"}
     known = {p["domain"] for p in _load_vocab_presets()}
-    enabled = {domain: bool(raw.get(domain, True)) for domain in known}
+    current = _load_vocab_domain_state(data_root)
+    enabled = {}
+    for domain in known:
+        if domain in raw:
+            value = raw[domain]
+            if not isinstance(value, bool):
+                return 400, {"ok": False,
+                             "error": "enabled.%s 须为布尔值 true/false（收到 %s）"
+                                      % (domain, _type_zh(value))}
+            enabled[domain] = value
+        else:
+            # 未提交域保持原值（读不到时沿用默认启用），不产生旁路副作用
+            enabled[domain] = bool(current.get(domain, True))
     try:
         _save_vocab_domain_state(data_root, enabled)
     except OSError as exc:
-        return 500, {"ok": False, "error": "启用状态保存失败：%s" % exc}
+        return 500, {"ok": False,
+                     "error": "启用状态保存失败：%s，检查磁盘空间/目录权限后重试"
+                              % (_err_text(exc),)}
     disabled = [domain for domain, value in enabled.items() if not value]
     return 200, {"ok": True, "data_root": data_root, "enabled": enabled,
                  "disabled": disabled,
@@ -3414,16 +3871,11 @@ def _handle_vocab_presets_domains_post(body: bytes) -> tuple[int, dict]:
 def _handle_vocab_presets_import(body: bytes) -> tuple[int, dict]:
     """预置域一键导入：合并进用户词库并 bump revision（撞基表拒收）。"""
     try:
-        params = json.loads(body.decode("utf-8")) if body.strip() else {}
-    except (ValueError, UnicodeDecodeError):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    if not isinstance(params, dict):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
-    want_raw = params.get("domains")
-    if not isinstance(want_raw, list):
-        return 400, {"ok": False, "error": "请传 domains 数组（勾选的领域）"}
-    want = [str(d).strip() for d in want_raw if str(d).strip()]
+        params = _body_json(body)
+        data_root = _take_data_root(params, DEFAULT_DATA_ROOT)
+        want = _take_str_list(params, "domains", allow_empty=True)
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc)}
     if not want:
         return 400, {"ok": False, "error": "先勾选至少一个领域再导入"}
     by_domain = {p["domain"]: p for p in _load_vocab_presets()}
@@ -3474,7 +3926,7 @@ def _handle_vocab_presets_import(body: bytes) -> tuple[int, dict]:
         except OSError as exc:
             return 500, {"ok": False,
                          "error": "词库保存失败，未生效：%s→检查磁盘空间/目录权限后重试"
-                                  % (exc,)}
+                                  % (_err_text(exc),)}
         try:
             reg = _register_user_rules(entries)
         except ValueError as exc:
@@ -3482,7 +3934,7 @@ def _handle_vocab_presets_import(body: bytes) -> tuple[int, dict]:
                 _save_vocab_entries(data_root, entries_before)
             except Exception:
                 pass
-            return 400, {"ok": False, "error": str(exc)}
+            return 400, {"ok": False, "error": _err_text(exc)}
         revision = reg["rules_revision"]
     else:
         revision = _user_rules_revision(entries)
@@ -3513,14 +3965,21 @@ def _handle_vocab_presets_import(body: bytes) -> tuple[int, dict]:
 
 
 def _handle_status(query: dict) -> tuple[int, dict]:
-    data_root = (query.get("data_root") or [DEFAULT_DATA_ROOT])[0] or DEFAULT_DATA_ROOT
-    data_root = normalize_path(data_root) or DEFAULT_DATA_ROOT
+    """状态快照：只读传入的 data_root（非空则必须是绝对路径，不得静默忽略）。"""
     try:
-        limit = int((query.get("limit") or ["20"])[0])
-    except (TypeError, ValueError):
-        limit = 20
+        data_root = _query_data_root(query, DEFAULT_DATA_ROOT)
+        limit = _query_int(query, "limit", 20)
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc)}
     limit = max(1, min(limit, 200))
     snap = collect(data_root, limit=limit)
+    # D-12：collect 的失败分支会把 state.db 真实绝对路径写进 message，
+    # 那是「错误响应回绝对路径」，出网前一律抹掉（成功快照不动）。
+    if isinstance(snap, dict) and snap.get("ok") is False:
+        snap = dict(snap)
+        for _k in ("message", "error"):
+            if isinstance(snap.get(_k), str):
+                snap[_k] = _err_text(snap[_k])
     # P0-2：默认只返回当前 input_root 的 runs（传参优先，监听态兜底）
     eff = ""
     try:
@@ -3566,19 +4025,21 @@ def _handle_browse(query: dict) -> tuple[int, dict]:
         # 空则从用户主目录起步（本地盘，可列）
         path = os.path.expanduser("~")
     if not os.path.isabs(path):
-        return 400, {"ok": False, "error": "所填路径须为绝对路径：%r，请点浏览重选" % (raw,)}
+        return 400, {"ok": False,
+                     "error": "所填路径须为绝对路径（收到 %s），请点浏览重选"
+                              % (_diag_redact_path(raw),)}
     real = os.path.realpath(path)
     if os.path.isfile(real):
-        return 400, {"ok": False, "error": "所选路径须为目录（当前是文件）：%s，请点浏览重选" % (real,)}
+        return 400, {"ok": False, "error": "所选路径须为目录（当前是文件）：%s，请点浏览重选" % (_diag_redact_path(real),)}
     if not os.path.isdir(real):
-        return 400, {"ok": False, "error": "所选路径不存在：%s，请点浏览重选" % (real,)}
+        return 400, {"ok": False, "error": "所选路径不存在：%s，请点浏览重选" % (_diag_redact_path(real),)}
     try:
         from stage1.ingest import probe_volume  # noqa: E402  (只读复用)
         verdict = probe_volume(real).get("verdict")
     except Exception:
         return 400, {"ok": False, "error": "所选目录不在本机硬盘上，仅支持本机硬盘，请点浏览重选"}
     if verdict != "ALLOW":
-        return 400, {"ok": False, "error": "仅支持本机硬盘目录：%s，请点浏览重选" % (real,)}
+        return 400, {"ok": False, "error": "仅支持本机硬盘目录：%s，请点浏览重选" % (_diag_redact_path(real),)}
     try:
         names = sorted(
             name for name in os.listdir(real)
@@ -3586,9 +4047,9 @@ def _handle_browse(query: dict) -> tuple[int, dict]:
             and name not in (".", "..")
         )
     except PermissionError:
-        return 400, {"ok": False, "error": "所选目录无权限列出：%s，请检查权限后点浏览重选" % (real,)}
+        return 400, {"ok": False, "error": "所选目录无权限列出：%s，请检查权限后点浏览重选" % (_diag_redact_path(real),)}
     except OSError as exc:
-        return 400, {"ok": False, "error": "所选目录列出失败：%s，请点浏览重选" % (exc,)}
+        return 400, {"ok": False, "error": "所选目录列出失败：%s，请点浏览重选" % (_err_text(exc),)}
     parent = os.path.dirname(real)
     dirs = names[:1000]
     # 当前目录视频统计
@@ -3792,7 +4253,7 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
         tres = _transcribe_audio(os.path.join(job_dir, "asr"), src_real,
                                  prompt_terms=_prompt_terms)
     except Exception as exc:
-        verdict = "听写这段视频失败了：%s→换一个有声音的视频再试，或点重试" % (exc,)
+        verdict = "听写这段视频失败了：%s→换一个有声音的视频再试，或点重试" % (_err_text(exc),)
         _receipt("TRANSCRIBE_FAILED", verdict, {"whisper_calls": 0})
         out = {"run_id": run_id, "state": "FAIL", "source_filename": _src_fn,
                "verdict": verdict, "whisper_calls": 0}
@@ -3828,7 +4289,7 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
             text, segments, asr_profile, post_verify)
         validate_raw_artifact(raw_content)
     except Exception as exc:
-        verdict = "整理初稿时数据异常：%s→换一个视频再试，或点重试" % (exc,)
+        verdict = "整理初稿时数据异常：%s→换一个视频再试，或点重试" % (_err_text(exc),)
         _receipt("RAW_FAILED", verdict, {"whisper_calls": engine_calls})
         out = {"run_id": run_id, "state": "FAIL", "source_filename": _src_fn,
                "verdict": verdict,
@@ -3854,7 +4315,7 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
             canonical_probe = mapping["canonical_output_path"]
             source_rel = mapping["source_relative_path"]
         except Exception as exc:
-            verdict = "笔记库路径映射失败：%s→检查库目录是否存在与可写，修正后点重试" % (exc,)
+            verdict = "笔记库路径映射失败：%s→检查库目录是否存在与可写，修正后点重试" % (_err_text(exc),)
             _receipt("MIRROR_FAILED", verdict, {"whisper_calls": engine_calls})
             out = {"run_id": run_id, "state": "FAIL", "source_filename": _src_fn,
                    "verdict": verdict,
@@ -3914,7 +4375,7 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
         except Exception:
             pass
         con.close()
-        verdict = "整理成稿失败：%s→点重试再试一次，或换一个视频" % (exc,)
+        verdict = "整理成稿失败：%s→点重试再试一次，或换一个视频" % (_err_text(exc),)
         _receipt("NORM_RENDER_FAILED", verdict, {"whisper_calls": engine_calls})
         out = {"run_id": run_id, "state": "FAIL", "source_filename": _src_fn,
                "verdict": verdict,
@@ -3976,7 +4437,7 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
         return out
     except Exception as exc:
         # 入库受阻等：字节未动，初稿保留，记 verdict 不炸 worker
-        verdict = "笔记库不可写：%s→检查库路径权限后点重试" % (exc,)
+        verdict = "笔记库不可写：%s→检查库路径权限后点重试" % (_err_text(exc),)
         _receipt("PUBLISH_BLOCKED", verdict,
                  {"whisper_calls": engine_calls,
                   "render_revision_id": rend.get("render_revision_id"),
@@ -4055,7 +4516,7 @@ def _transcribe_worker(data_root: str, input_root: str, ob_vault_root: str | Non
                 finally:
                     con.close()
             except Exception as exc:
-                _worker_note_error("轮询待处理任务失败：%s" % (exc,))
+                _worker_note_error("轮询待处理任务失败：%s" % (_err_text(exc),))
                 run_ids = []
             for run_id in run_ids:
                 with _state_lock:
@@ -4086,13 +4547,14 @@ def _transcribe_worker(data_root: str, input_root: str, ob_vault_root: str | Non
                                 else "未知文件") or "未知文件"
                     except Exception:
                         _ffn = "未知文件"
-                    _worker_note_error("任务 %s 处理时遇到意外：%s" % (_ffn, exc))
+                    _worker_note_error("任务 %s 处理时遇到意外：%s"
+                                       % (_ffn, _err_text(exc)))
                     _worker_clear_current()
                     # P1-1：未知异常补 FAIL 记录再进 done
                     try:
                         res = {"run_id": run_id, "state": "FAIL",
                                "source_filename": _ffn,
-                               "verdict": "处理时遇到意外：%s→点重试再试一次" % (exc,)}
+                               "verdict": "处理时遇到意外：%s→点重试再试一次" % (_err_text(exc),)}
                         _worker_record(dict(res))
                     except Exception:
                         try:
@@ -4239,7 +4701,7 @@ def _handle_start_post(body: bytes) -> tuple[int, dict]:
     try:
         os.makedirs(os.path.join(os.path.abspath(data_root), "data"), exist_ok=True)
     except OSError as exc:
-        return 400, {"ok": False, "error": "数据目录不可用：%s，请检查权限" % (exc,)}
+        return 400, {"ok": False, "error": "数据目录不可用：%s，请检查权限" % (_err_text(exc),)}
 
     # 人话预检：转写必须在就绪的 python 下跑（probe，不 hard 依赖）
     if not _mlx_available():
@@ -4391,15 +4853,13 @@ def _handle_clear_post(body: bytes) -> tuple[int, dict]:
       （门侧 fail-closed 计挡住，清理侧同步可清，否则清不掉却挡门不一致）。
     """
     try:
-        params = json.loads(body.decode("utf-8")) if body.strip() else {}
-    except (ValueError, UnicodeDecodeError):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    if not isinstance(params, dict):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
+        params = _body_json(body)
+        data_root = _take_data_root(params, DEFAULT_DATA_ROOT)
+        dry_run = _take_bool(params, "dry_run", False)
+        only_failed = _take_bool(params, "only_failed", False)
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc)}
     input_root = normalize_path(params.get("input_root"))
-    dry_run = bool(params.get("dry_run"))
-    only_failed = bool(params.get("only_failed"))
     if not os.path.isabs(data_root):
         return 400, {"ok": False, "error": "数据目录须为绝对路径，请点浏览重选"}
     if not input_root:
@@ -4409,7 +4869,8 @@ def _handle_clear_post(body: bytes) -> tuple[int, dict]:
     db_path = os.path.join(os.path.abspath(data_root), "data", "state.db")
     if not os.path.isfile(db_path):
         return 404, {"ok": False,
-                     "error": "该数据目录下还没有任务库，无需清空：%s" % (db_path,)}
+                     "error": "该数据目录下还没有任务库，无需清空：%s"
+                              % (_diag_redact_path(db_path),)}
 
     # ---- dry_run：只读算代价，不写库、不删盘 ----
     if dry_run:
@@ -4421,7 +4882,7 @@ def _handle_clear_post(body: bytes) -> tuple[int, dict]:
             plan = _clear_plan(con, data_root, input_root, only_failed=False)
         except Exception as exc:
             return 500, {"ok": False,
-                         "error": "核对清空代价失败：%s，稍后重试" % (exc,)}
+                         "error": "核对清空代价失败：%s，稍后重试" % (_err_text(exc),)}
         finally:
             try:
                 con.close()
@@ -4484,7 +4945,7 @@ def _handle_clear_post(body: bytes) -> tuple[int, dict]:
             con.row_factory = sqlite3.Row
         except Exception as exc:
             return 500, {"ok": False,
-                         "error": "任务库打开失败：%s，稍后重试" % (exc,)}
+                         "error": "任务库打开失败：%s，稍后重试" % (_err_text(exc),)}
     cleared = {"sources": 0, "runs": 0, "candidates": 0, "artifacts": 0,
                "normalization_revisions": 0, "render_revisions": 0,
                "publish_records": 0, "archive_commits": 0, "state_events": 0,
@@ -4586,7 +5047,7 @@ def _handle_clear_post(body: bytes) -> tuple[int, dict]:
         except Exception:
             pass
         return 500, {"ok": False,
-                     "error": "清空失败已回滚：%s，稍后重试" % (exc,)}
+                     "error": "清空失败已回滚：%s，稍后重试" % (_err_text(exc),)}
     try:
         con.close()
     except Exception:
@@ -4651,10 +5112,12 @@ def _handle_reveal_post(body: bytes) -> tuple[int, dict]:
     if not path:
         return 400, {"ok": False, "error": "缺少文件路径，请刷新后重试"}
     if not os.path.isabs(path):
-        return 400, {"ok": False, "error": "路径须为绝对路径：%s，请刷新后重试" % (raw,)}
+        return 400, {"ok": False,
+                     "error": "路径须为绝对路径（收到 %s），请刷新后重试"
+                              % (_diag_redact_path(raw),)}
     real = os.path.realpath(path)
     if not os.path.exists(real):
-        return 400, {"ok": False, "error": "文件找不到了：%s→检查文件是否被移动或删除" % (real,)}
+        return 400, {"ok": False, "error": "文件找不到了：%s→检查文件是否被移动或删除" % (_diag_redact_path(real),)}
     try:
         import subprocess  # noqa: E402  (open 子进程仅 reveal 一处)
 
@@ -4663,14 +5126,15 @@ def _handle_reveal_post(body: bytes) -> tuple[int, dict]:
         if res.returncode != 0:
             err = (res.stderr or "").strip()
             return 400, {"ok": False,
-                         "error": "在访达中定位失败：%s→检查文件是否存在" % (err or real,)}
+                         "error": "在访达中定位失败：%s→检查文件是否存在"
+                                  % (_err_text(err or real),)}
         return 200, {"ok": True, "path": real}
     except FileNotFoundError:
         return 400, {"ok": False,
                      "error": "在访达中定位失败：系统 open 命令不可用→检查是否在 macOS 上运行"}
     except Exception as exc:
         return 400, {"ok": False,
-                     "error": "在访达中定位失败：%s→检查文件是否存在" % (exc,)}
+                     "error": "在访达中定位失败：%s→检查文件是否存在" % (_err_text(exc),)}
 
 
 def _note_user_edited(data_root: str, run_id: str) -> bool:
@@ -4751,7 +5215,7 @@ def _handle_note(query: dict) -> tuple[int, dict]:
         except OSError as exc:
             return 200, {"ok": True, "run_id": run_id, "state": state or "UNKNOWN",
                          "verdict": verdict, "path": md_path,
-                         "stage_text": "笔记文件读不出来：%s→检查文件权限" % (exc,),
+                         "stage_text": "笔记文件读不出来：%s→检查文件权限" % (_err_text(exc),),
                          "text": None, "truncated": False, "total_chars": 0,
                          "finder_url": _finder_url(md_path),
                          "ob_url": None,
@@ -4827,11 +5291,11 @@ def _open_rw(data_root: str):
     if not os.path.isdir(parent):
         raise FileNotFoundError(
             "状态库不可读：数据目录不存在（%s），请检查数据目录后刷新重试"
-            % (parent,))
+            % (_diag_redact_path(parent),))
     if not os.path.isfile(db_path):
         raise FileNotFoundError(
             "状态库不可读：尚未初始化（%s 缺失），请先开始一次监听或检查数据目录"
-            % (db_path,))
+            % (_diag_redact_path(db_path),))
     try:
         con = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
         con.execute("PRAGMA busy_timeout=30000")
@@ -4839,7 +5303,7 @@ def _open_rw(data_root: str):
         con.row_factory = sqlite3.Row
         return con
     except (sqlite3.Error, OSError) as exc:
-        raise OSError("状态库不可读：%s，请检查数据目录后刷新重试" % (exc,))
+        raise OSError("状态库不可读：%s，请检查数据目录后刷新重试" % (_err_text(exc),))
 
 
 def _append_manifest_receipt(job_dir: str, entry: dict) -> None:
@@ -4885,17 +5349,17 @@ def _reapply_one(data_root: str, run_id: str,
     try:
         con = _open_rw(data_root)
     except (sqlite3.Error, OSError) as exc:
-        return {"ok": False, "run_id": run_id, "error": str(exc)}
+        return {"ok": False, "run_id": run_id, "error": _err_text(exc)}
     except Exception as exc:
         return {"ok": False, "run_id": run_id,
-                "error": "状态库不可读：%s，请检查数据目录后刷新重试" % (exc,)}
+                "error": "状态库不可读：%s，请检查数据目录后刷新重试" % (_err_text(exc),)}
     try:
         try:
             row = con.execute(
                 "SELECT * FROM processing_runs WHERE run_id=?", (run_id,)).fetchone()
         except (sqlite3.Error, OSError) as exc:
             return {"ok": False, "run_id": run_id,
-                    "error": "状态库不可读：%s，请检查数据目录后刷新重试" % (exc,)}
+                    "error": "状态库不可读：%s，请检查数据目录后刷新重试" % (_err_text(exc),)}
         if row is None:
             return {"ok": False, "run_id": run_id,
                     "error": "任务不存在，请刷新后重试"}
@@ -4938,7 +5402,7 @@ def _reapply_one(data_root: str, run_id: str,
             norm_profile = _norm_profile_for_new_jobs(data_root)
             render_profile = _render_profile_for_new_jobs()
         except ValueError as exc:
-            return {"ok": False, "run_id": run_id, "error": str(exc)}
+            return {"ok": False, "run_id": run_id, "error": _err_text(exc)}
         try:
             out = _derive.derive_on_correction_change(
                 con, job_dir, raw_artifact_id, norm_profile,
@@ -4951,7 +5415,7 @@ def _reapply_one(data_root: str, run_id: str,
             except Exception:
                 pass
             return {"ok": False, "run_id": run_id,
-                    "error": "重跑失败已回滚：%s，稍后重试" % (exc,)}
+                    "error": "重跑失败已回滚：%s，稍后重试" % (_err_text(exc),)}
         if int(out.get("whisper_calls") or 0) != 0:
             return {"ok": False, "run_id": run_id,
                     "error": "重跑触碰了转写引擎（whisper!=0），已拦截"}
@@ -4983,7 +5447,7 @@ def _reapply_one(data_root: str, run_id: str,
                     and not _fix.get("already_ok"):
                 _postpass["note"] = str(_fix.get("error"))
         except Exception as exc:
-            _postpass = {"applied": False, "note": "后处理异常：%s" % (exc,)}
+            _postpass = {"applied": False, "note": "后处理异常：%s" % (_err_text(exc),)}
         result = {"ok": True, "run_id": run_id,
                   "source_filename": src_fn, "prev_state": prev_state,
                   "whisper_calls": 0, "raw_unchanged": True,
@@ -5069,7 +5533,8 @@ def _reapply_one(data_root: str, run_id: str,
                     result.update({
                         "new_state": prev_state,
                         "note": ("新稿已生成在数据目录：%s；入库未试：%s"
-                                 % (os.path.abspath(new_rendered), exc))})
+                                 % (os.path.abspath(new_rendered),
+                                    _err_text(exc)))})
                     _append_manifest_receipt(job_dir, {
                         "stage": "app-worker", "state": prev_state,
                         "run_id": run_id, "source_id": source_id,
@@ -5123,7 +5588,7 @@ def _reapply_one(data_root: str, run_id: str,
         return result
     except (sqlite3.Error, OSError) as exc:
         return {"ok": False, "run_id": run_id,
-                "error": "状态库不可读：%s，请检查数据目录后刷新重试" % (exc,)}
+                "error": "状态库不可读：%s，请检查数据目录后刷新重试" % (_err_text(exc),)}
     finally:
         try:
             con.close()
@@ -5176,10 +5641,10 @@ def _reapply_all(data_root: str, vault_s, progress_cb=None) -> tuple[int, dict]:
         except (sqlite3.Error, OSError) as exc:
             results.append({"ok": False, "run_id": rid,
                             "error": "状态库不可读：%s，请检查数据目录后刷新重试"
-                                     % (exc,)})
+                                     % (_err_text(exc),)})
         except Exception as exc:
             results.append({"ok": False, "run_id": rid,
-                            "error": "重跑失败：%s，稍后重试" % (exc,)})
+                            "error": "重跑失败：%s，稍后重试" % (_err_text(exc),)})
         if progress_cb is not None:
             try:
                 last = results[-1] if isinstance(results[-1], dict) else {}
@@ -5204,27 +5669,26 @@ def _reapply_all(data_root: str, vault_s, progress_cb=None) -> tuple[int, dict]:
 def _handle_reapply_post(body: bytes, progress_cb=None) -> tuple[int, dict]:
     """存量一键重跑：单个 run_id 或 all=true（全部已完成）。"""
     try:
-        params = json.loads(body.decode("utf-8")) if body.strip() else {}
-    except (ValueError, UnicodeDecodeError):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    if not isinstance(params, dict):
-        return 400, {"ok": False, "error": "请求体须为 JSON 对象"}
-    data_root = normalize_path(params.get("data_root")) or DEFAULT_DATA_ROOT
-    vault = params.get("ob_vault_root")
-    vault_s = vault.strip() if isinstance(vault, str) and vault.strip() else None
-    if params.get("all"):
+        params = _body_json(body)
+        data_root = _take_data_root(params, DEFAULT_DATA_ROOT)
+        # all 必须是真布尔：字符串 "false"/数字会被 truthy 判成"全量重跑"
+        all_runs = _take_bool(params, "all", False)
+        vault_s = _take_str(params, "ob_vault_root", "", allow_empty=True) or None
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    if all_runs:
         return _reapply_all(data_root, vault_s, progress_cb=progress_cb)
-    run_id = str(params.get("run_id") or "").strip()
+    run_id = _take_str(params, "run_id", "", allow_empty=True)
     if not run_id:
         return 400, {"ok": False, "error": "缺少任务编号 run_id（或传 all=true 全跑）"}
     try:
         res = _reapply_one(data_root, run_id, vault_s)
     except (sqlite3.Error, OSError) as exc:
         return 500, {"ok": False, "run_id": run_id,
-                     "error": "状态库不可读：%s，请检查数据目录后刷新重试" % (exc,)}
+                     "error": "状态库不可读：%s，请检查数据目录后刷新重试" % (_err_text(exc),)}
     except Exception as exc:
         return 500, {"ok": False, "run_id": run_id,
-                     "error": "重跑失败：%s，稍后重试" % (exc,)}
+                     "error": "重跑失败：%s，稍后重试" % (_err_text(exc),)}
     if not res.get("ok") and not res.get("skipped") and "error" in res \
             and "任务不存在" in str(res.get("error")):
         return 404, {"ok": False, **res}
@@ -5239,6 +5703,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
+        # D-12：GET 侧同样外层接管，未预见异常回 500 JSON 丢掉线、不裸抛
+        try:
+            self._do_get(parsed)
+        except BrokenPipeError:
+            pass
+        except ParamError as exc:
+            _send_json(self, 400, {"ok": False, "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            try:
+                _send_json(self, 500, {"ok": False,
+                                       "error": "服务开小差：%s，稍后重试"
+                                                % (_err_text(exc),)})
+            except Exception:
+                pass
+
+    def _do_get(self, parsed):  # noqa: N802
         if parsed.path in ("/", "/index.html"):
             _serve_index(self)
             return
@@ -5353,7 +5833,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             try:
                 _send_json(self, 500, {"ok": False,
-                                       "error": "服务开小差：%s，稍后重试" % (exc,)})
+                                       "error": "服务开小差：%s，稍后重试" % (_err_text(exc),)})
             except Exception:
                 pass
 

@@ -1259,6 +1259,11 @@ function loadVocab(){
 function candidateCheckboxes(){return Array.prototype.slice.call(el("candidateList").querySelectorAll("[data-candidate-index]"));}
 function candidateGroupCheckboxes(){return Array.prototype.slice.call(el("candidateList").querySelectorAll("[data-candidate-group]"));}
 var vocabApplyTimer=null,vocabApplyRunning=false;
+// P1-2 任务身份：本页发起的那次任务的 job_id（轮询只认它），以及待审清单版本
+var vocabApplyJobId=null,vocabCandidatesRevision=null;
+// P2-新1：后端实际生效的数据目录。框里为空时（UI 判绿＝用默认外置测试目录）
+// 从这里取值，apply 与 status 两处口径一致，绝不出现「提交成功但查不到进度」。
+var effectiveDataRoot="";
 // R2：轮询容错——单次/短暂失败不停表；连续失败或超时上限才停，且必须给人话提示。
 var vocabApplyFailStreak=0,vocabApplyStartedAt=0;
 var VOCAB_APPLY_MAX_FAIL=8,VOCAB_APPLY_MAX_MS=10*60*1000;
@@ -1273,7 +1278,12 @@ function loadVocabCandidates(){
   if(dataRoot())q+="?data_root="+encodeURIComponent(dataRoot());
   fetch(q).then(function(r){return r.json();}).then(function(o){
     var box=el("candidateList"), btn=el("btnCandidateApply"), all=el("candidateSelectAll");
-    if(!o||!o.ok){box.innerHTML='<div class="hint err">待审清单读取失败，请刷新后重试。</div>';setCandidateControls(false);return;}
+    if(!o||!o.ok){box.innerHTML='<div class="hint err">待审清单读取失败，请刷新后重试。</div>';setCandidateControls(false);vocabCandidatesRevision=null;return;}
+    // P1-2 候选版本锁：POST 时回传该指纹，清单变了后端 409 零执行；
+    // 清单缺失时后端回哨兵 "absent"（伪版本），前端按“没有版本”处理并禁止提交
+    vocabCandidatesRevision=(o.candidates_revision&&o.candidates_revision!=="absent")?o.candidates_revision:null;
+    // P2-新1：同一份回包既给版本也给生效目录——两者同源，保证「能提交」即「查得到进度」
+    if(o.data_root)effectiveDataRoot=String(o.data_root);
     if(!o.has_candidates){box.innerHTML='<div class="hint">暂无待审候选，去跑一次AI审查生成清单（找编排者要提示词）</div>';setCandidateControls(false);all.checked=false;return;}
     var labels={high:"高置信度",medium:"中置信度",low:"低置信度"}, h="";
     ["high","medium","low"].forEach(function(level){
@@ -1292,7 +1302,7 @@ function loadVocabCandidates(){
       candidateCheckboxes().forEach(function(item){if(item.getAttribute("data-candidate-level")===c.getAttribute("data-candidate-group"))item.checked=c.checked;});
       syncCandidateSelectAll();
     };});
-  }).catch(function(){el("candidateList").innerHTML='<div class="hint err">待审清单读取失败，请刷新后重试。</div>';setCandidateControls(false);});
+  }).catch(function(){el("candidateList").innerHTML='<div class="hint err">待审清单读取失败，请刷新后重试。</div>';setCandidateControls(false);vocabCandidatesRevision=null;});
 }
 function syncCandidateSelectAll(){
   var cs=candidateCheckboxes();el("candidateSelectAll").checked=cs.length>0&&cs.every(function(c){return c.checked;});
@@ -1340,6 +1350,38 @@ function vocabApplyStartTimer(){
   if(!vocabApplyStartedAt)vocabApplyStartedAt=Date.now();
   if(!vocabApplyTimer)vocabApplyTimer=setInterval(pollVocabApplyStatus,1500);
 }
+// P1-2 任务身份：轮询必须带 data_root + job_id，只渲染本页发起的那次任务，
+// 多标签页/换数据目录时不得把别人的进度画到自己页面上。
+// P2-新1：框为空时用 effectiveDataRoot（后端生效目录），保证与 apply 同口径。
+function vocabJobDataRoot(){
+  return String(dataRoot()||"").trim()||String(effectiveDataRoot||"").trim()||"";
+}
+function vocabApplyStatusQuery(){
+  var qs=[],root=vocabJobDataRoot();
+  if(root)qs.push("data_root="+encodeURIComponent(root));
+  if(vocabApplyJobId)qs.push("job_id="+encodeURIComponent(vocabApplyJobId));
+  return qs.length?("?"+qs.join("&")):"";
+}
+function vocabApplyDropPoll(reason){
+  vocabApplyStopPoll();vocabApplyRunning=false;
+  el("btnCandidateApply").disabled=false;
+  if(reason)vocabApplySetText(reason,"warn");
+}
+// P2-三1：任何“接管不了/查不到”的出口都必须复原按钮并给人话，
+// 杜绝「停表＋按钮禁用＋零提示」把用户卡在假象里。
+function vocabApplyGiveUp(reason){
+  vocabApplyDropPoll(reason||"后台任务进度读不到了，请点「刷新」重看");
+}
+// 终态统一渲染（轮询与续看共用，避免两处口径分叉）
+function vocabApplyFinish(s){
+  vocabApplyJobId=(s&&s.job_id)||vocabApplyJobId;
+  vocabApplyStopPoll();vocabApplyRunning=false;
+  el("btnCandidateApply").disabled=false;
+  renderVocabApplyFinal(s);
+  loadVocab();loadVocabCandidates();refresh();
+}
+// P3-三1：与后端同口径——生效目录必须是绝对路径（相对值不入库、不提交）
+function isAbsRoot(p){return !!p&&String(p).charAt(0)==="/";}
 function vocabApplyNotePollFailure(err){
   vocabApplyFailStreak++;
   el("candidateApplyProgress").style.display="";  // 提示必须可见，不许静默
@@ -1358,9 +1400,36 @@ function vocabApplyNotePollFailure(err){
     +"请点「刷新」或稍后重开页面查看","err");
 }
 function pollVocabApplyStatus(){
-  fetch("/api/vocab/candidates/apply/status").then(function(r){return r.json();}).then(function(o){
-    var s=o&&o.job;
-    if(!s){vocabApplyFailStreak=0;vocabApplyStopPoll();vocabApplyRunning=false;el("btnCandidateApply").disabled=false;return;}
+  fetch("/api/vocab/candidates/apply/status"+vocabApplyStatusQuery())
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    var o=x.o||{};
+    if(x.code===400||x.code===404||x.code===409){
+      // 服务端明确拒绝（跨目录/非本页任务/参数不对）：不渲染别人的任务，给人话就停表
+      vocabApplyFailStreak=0;
+      vocabApplyDropPoll(String(o.error||"进度读取被拒绝，请刷新后再看"));
+      return;
+    }
+    if(x.code!==200||o.ok===false){
+      // 服务端抖动（5xx 等）：按轮询容错口径计数重试，不静默冻结也不无限重试
+      vocabApplyNotePollFailure("HTTP "+x.code);
+      return;
+    }
+    var s=o.job;
+    if(!s){
+      // P2-新1：曾经在跑的任务忽然查不到，必须给人话，不许静默停表
+      var wasRunning=vocabApplyRunning;
+      vocabApplyFailStreak=0;vocabApplyStopPoll();vocabApplyRunning=false;
+      el("btnCandidateApply").disabled=false;
+      if(wasRunning)vocabApplySetText("后台任务已查不到（服务可能重启过或换了数据目录），"
+        +"进度停在这里；请点「刷新」重看，或重开页面","warn");
+      return;
+    }
+    if(vocabApplyJobId&&s.job_id&&String(s.job_id)!==String(vocabApplyJobId)){
+      vocabApplyDropPoll("后端最近任务已换成另一次（不是本页发起的），已停止刷新本页进度");
+      return;
+    }
+    vocabApplyJobId=s.job_id||vocabApplyJobId;
     vocabApplyFailStreak=0;
     if(s.state==="running"){
       vocabApplyRunning=true;el("btnCandidateApply").disabled=true;
@@ -1368,42 +1437,103 @@ function pollVocabApplyStatus(){
       vocabApplyStartTimer();
       return;
     }
-    vocabApplyStopPoll();vocabApplyRunning=false;el("btnCandidateApply").disabled=false;
-    renderVocabApplyFinal(s);
-    loadVocab();loadVocabCandidates();refresh();
+    vocabApplyFinish(s);
   }).catch(function(e){vocabApplyNotePollFailure(e);});
 }
 function resumeVocabApplyPoll(){
-  // 页面重载续看：只有后端还有进行中的任务才接管进度显示，终态不打扰。
-  fetch("/api/vocab/candidates/apply/status").then(function(r){return r.json();}).then(function(o){
-    var s=o&&o.job;
-    if(s&&s.state==="running"){
+  // 页面重载续看：只接管「本页生效数据目录」下进行中的任务，终态不打扰；
+  // P2-新1：与 apply 同一口径（框为空时用后端生效目录），不得出现「能提交但续看不到」
+  // P2-三1：本页刚提交过（vocabApplyRunning）时，下面的每条“接管不了”都必须
+  //         给人话＋复原按钮，不许静默 return。
+  var root=vocabJobDataRoot();
+  if(!isAbsRoot(root)){
+    // P3-三1：相对/空值不算生效目录——本地就拦，不留到服务端 400
+    if(vocabApplyRunning)vocabApplyGiveUp("数据目录须为绝对路径（可点「浏览」重选，"
+      +"或清空该框改用默认外置测试目录），无法接管后台任务");
+    return;
+  }
+  fetch("/api/vocab/candidates/apply/status"+vocabApplyStatusQuery())
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    var o=x.o||{};
+    if(x.code===400||x.code===404||x.code===409){
+      // 别目录/别任务被服务端拒：本页刚提交过就必须说清，不能停在“正在导入…”假象
+      if(vocabApplyRunning)vocabApplyGiveUp(String(o.error
+        ||"后台正在跑的任务不属于本页数据目录，无法接管；请核对数据目录后刷新"));
+      return;
+    }
+    if(x.code!==200||o.ok===false){
+      // 服务端抖动：仍开表限期重试（由 poll 的容错给明确提示），不静默冻结
+      vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
+      vocabApplyStartTimer();
+      return;
+    }
+    var s=o.job;
+    if(!s){
+      if(vocabApplyRunning)vocabApplyGiveUp("后台任务已查不到（服务可能重启过），"
+        +"请点「刷新」重看");
+      return;
+    }
+    if(!sameDataRoot(s.data_root,root)){  // 双保险：目录不符不画
+      if(vocabApplyRunning)vocabApplyGiveUp("后台任务属于另一个数据目录，本页不再显示它的进度；"
+        +"请核对数据目录后点「刷新」");
+      return;
+    }
+    if(s.state==="running"){
+      vocabApplyJobId=s.job_id||vocabApplyJobId;
       vocabApplyRunning=true;el("btnCandidateApply").disabled=true;
       vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
       renderVocabApplyProgress(s);
       vocabApplyStartTimer();
+      return;
     }
+    // 提交与接管之间任务已跑完：本页刚提交过就直接落终态（不是静默丢），冷启动不打扰
+    if(vocabApplyRunning)vocabApplyFinish(s);
   }).catch(function(){
     // 载入时读不到：仍开表限期重试；连续失败由 poll 的容错给明确提示，不静默冻结
     vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
     vocabApplyStartTimer();
   });
 }
+function sameDataRoot(a,b){
+  var x=String(a||"").replace(/\/+$/,""),y=String(b||"").replace(/\/+$/,"");
+  return !!x&&!!y&&x===y;
+}
 function applyVocabCandidates(){
   var ids=candidateCheckboxes().filter(function(c){return c.checked;}).map(function(c){return Number(c.getAttribute("data-candidate-index"));});
   if(!ids.length){el("vCandidate").textContent="先勾选至少一条待审候选";el("vCandidate").className="vhint err";return;}
+  if(!vocabCandidatesRevision){
+    el("vCandidate").textContent="候选清单还没读到版本，先点「刷新」重载待审清单再提交（防应用到错的候选）";
+    el("vCandidate").className="vhint err";return;
+  }
+  // P2-新1：提交必须带显式绝对 data_root（与状态查询同口径）；解析不到就人话阻止，
+  // 绝不提交一个「后台跑了但本页看不到进度」的任务。
+  // P3-三1：相对路径同样在本地拦住（后端也要求绝对），把 400 提前成本地人话。
+  var submitRoot=vocabJobDataRoot();
+  if(!submitRoot){
+    el("vCandidate").textContent="请先选择数据目录（或点「刷新」让页面读到当前生效目录）再提交";
+    el("vCandidate").className="vhint err";return;
+  }
+  if(!isAbsRoot(submitRoot)){
+    el("vCandidate").textContent="数据目录须为绝对路径，请点「浏览」重选（或清空该框改用默认外置测试目录）再提交";
+    el("vCandidate").className="vhint err";return;
+  }
   var rerunOld=el("candidateRerunOld").checked;
   if(!confirm(rerunOld?"导入所选错词并重跑全部已完成任务吗？\n转写0次，改过的笔记会按 No-Clobber 跳过。":"只导入所选错词，不重跑老稿吗？\n老稿保持不动，新视频会自动应用。"))return;
   el("btnCandidateApply").disabled=true;vocabApplyRunning=true;
   vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
+  vocabApplyJobId=null;
   el("vCandidate").textContent="";el("vCandidate").className="vhint";
   renderVocabApplyProgress({state:"running",stage:"importing",rerun_old:rerunOld,total:0,done:0});
-  fetch("/api/vocab/candidates/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(reapplyPayload({indices:ids,rerun_old:rerunOld}))})
+  fetch("/api/vocab/candidates/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(reapplyPayload({indices:ids,rerun_old:rerunOld,candidates_revision:vocabCandidatesRevision,data_root:submitRoot}))})
   .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
   .then(function(x){
     var o=x.o||{};
-    if(x.code===202){vocabApplyStartTimer();pollVocabApplyStatus();return;}
-    if(x.code===409){vocabApplySetText(String(o.error||"已有任务在进行中"),"warn");resumeVocabApplyPoll();return;}
+    if(x.code===202){vocabApplyJobId=o.job_id||null;vocabApplyStartTimer();pollVocabApplyStatus();return;}
+    if(x.code===409&&o.running){   // 已有任务在跑：先落人话再接管（接管失败也必须留话，P2-三1）
+      vocabApplySetText(String(o.error||"已有一次任务在进行中，请等它跑完再试"),"warn");
+      resumeVocabApplyPoll();return;
+    }
     vocabApplyRunning=false;el("btnCandidateApply").disabled=false;
     vocabApplySetText(String(o.error||o.message||("处理失败："+x.code)),"err");
   }).catch(function(e){
@@ -1506,25 +1636,33 @@ function refresh(autoPoll){
   var irf=el("inInput").value.trim()||((lastLock&&lastLock.input_root)||"");
   if(irf)qs.push("input_root="+encodeURIComponent(irf));
   var q=qs.length?("?"+qs.join("&")):"";
-  var p1=fetch("/api/status"+q).then(function(r){return r.json();}).then(function(s){
+  var p1=fetch("/api/status"+q).then(function(r){return r.json().then(function(s){return{code:r.status,s:s};});}).then(function(x){
+    var s=x.s;
+    // 后端按 data_root 只回本目录的数据；400 时如实说明原因，不静默忽略
+    if(x.code!==200){say("状态读取失败："+((s&&s.error)||x.code),"err");return;}
     renderTape(s);renderRuns(s);
     if(s&&s.ok===false)say("状态库尚不存在，填入视频文件夹后点击「开始监听」。");
   }).catch(function(e){say("状态读取失败："+e,"err");});
   var p2=fetch("/api/start").then(function(r){return r.json();}).then(function(o){
     lastFetchAt=Date.now();
     renderLock(o);
+    // P2-新1：框为空时后端用的就是 default_data_root；只在本页还没学到生效目录时兜底
+    if(o&&o.default_data_root&&!effectiveDataRoot)effectiveDataRoot=String(o.default_data_root);
     if(o&&o.error)say("启动失败："+o.error,"err");
   }).catch(function(){});
   if(!autoPoll){
     try{loadVocab();}catch(e){}
     try{loadPresets();}catch(e){}
     try{loadVocabCandidates();}catch(e){}
-    try{resumeVocabApplyPoll();}catch(e){}
   }
   Promise.all([p1,p2]).then(function(){
     refreshing=false;
     el("btnRefresh").disabled=false;
     el("btnRefresh").textContent="刷新";
+    // P2-新1：等生效目录/候选版本回包之后再续看，避免因目录未知而漏接管
+    // 注（P3-三3，只记不修）：续看只在本轮 refresh 里调一次；两个真源
+    // （default_data_root 是常量、清单回包恒带 data_root）恒有值，当前不可达。
+    if(!autoPoll){try{resumeVocabApplyPoll();}catch(e){}}
   });
 }
 function openBrowser(target){

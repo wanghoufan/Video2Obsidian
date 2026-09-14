@@ -1,0 +1,1459 @@
+#!/usr/bin/env python3
+"""builder 自验（DEVELOP-P1-2 任务身份与 API 契约加固）：严格类型层、data_root
+与 job_id 绑定、字段一致、候选版本锁、部分更新安全、错误信息安全（D-12）。
+
+红线口径（照 HANDOFF）：
+  - 只用**外置 tmp + 合成数据**；不碰用户真实视频目录与 Obsidian 库；
+  - 凡调 handler 的用例，首行断言 data_root 在系统 tmp 下（经验 2026-09-13）；
+  - 不起 8765、不请求线上服务、不写真实 data/state.db。
+
+运行：python3 tests/selftest_p1_2_contract.py
+全过 EXIT=0；任一断言失败 EXIT=1（坏例只看 exit 码，不看打印）。
+"""
+
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shutil
+import sqlite3
+import sys
+import tempfile
+import threading
+import time
+import traceback
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "src"))
+sys.path.insert(0, ROOT)
+
+TMP_ROOT = os.path.realpath(tempfile.gettempdir())
+FAILS = []
+CHECKS = [0]
+
+
+def check(name, cond, detail=""):
+    CHECKS[0] += 1
+    print(("PASS " if cond else "FAIL ") + name + (("  << " + str(detail)) if (detail and not cond) else ""))
+    if not cond:
+        FAILS.append(name)
+
+
+def assert_tmp(root, who):
+    """凡调 handler 的用例首行必须过这道门：data_root 必须在系统 tmp 下。"""
+    real = os.path.realpath(str(root))
+    ok = real.startswith(TMP_ROOT + os.sep) and real != TMP_ROOT
+    if not ok:
+        raise AssertionError("用例 %s 的 data_root 不在系统 tmp 下：%s" % (who, real))
+    return real
+
+
+def load_server():
+    spec = importlib.util.spec_from_file_location(
+        "v2o_server_p12", os.path.join(ROOT, "app", "server.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def sha(path):
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+def tree_snapshot(root):
+    out = {}
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for fn in sorted(filenames):
+            p = os.path.join(dirpath, fn)
+            rel = os.path.relpath(p, root)
+            if rel.startswith("data" + os.sep + "state.db"):
+                continue  # sqlite 副产物单独用 size 判，不参与字节比对
+            try:
+                out[rel] = sha(p)
+            except OSError:
+                out[rel] = "UNREADABLE"
+    return out
+
+
+def body(obj):
+    return json.dumps(obj, ensure_ascii=False).encode("utf-8")
+
+
+# ------------------------------------------------------------------ 夹具
+
+def add_run(con, run_id, src_path, status, aligned=True, source_size=None):
+    """按真 DDL 落一行（processing_runs 无 raw_error_code/reason 列，诊断只读 status）。"""
+    now = "2026-09-14T00:00:00Z"
+    event_at = now if aligned else "2026-09-01T00:00:00Z"
+    size = os.path.getsize(src_path) if os.path.isfile(src_path) else 0
+    mtime = os.stat(src_path).st_mtime_ns if os.path.isfile(src_path) else 0
+    con.execute(
+        "INSERT INTO sources (source_id, path_identity_key, content_identity,"
+        " logical_source_identity, current_path, current_location_type,"
+        " source_size, source_mtime_ns, status, first_seen_at, last_seen_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("src_" + run_id, src_path, "x" * 40, "lsid_" + run_id, src_path,
+         "LOCAL", size if source_size is None else source_size, mtime,
+         "ACTIVE", now, now))
+    con.execute(
+        "INSERT INTO processing_runs (run_id, source_id, creation_mode,"
+        " auto_run_identity, asr_profile_hash, status, created_at, updated_at)"
+        " VALUES (?,?,'AUTO',?,?,?,?,?)",
+        (run_id, "src_" + run_id, "auto_" + run_id, "profhash", status,
+         now, now))
+    con.execute(
+        "INSERT INTO state_events (event_id, entity_type, entity_id,"
+        " from_status, to_status, reason, created_at) VALUES (?,?,?,?,?,?,?)",
+        ("ev_" + run_id, "processing_run", run_id, None, status,
+         "synthetic", event_at))
+
+
+def make_data_root(server, tag, runs):
+    """建合成 data_root：DDL 直接复用 src/stage2 真 DDL，不另写一套 schema。"""
+    from stage2.store import DDL
+
+    root = tempfile.mkdtemp(prefix="p12_%s_" % tag)
+    assert_tmp(root, "make_data_root")
+    src_dir = os.path.join(root, "_src")
+    os.makedirs(src_dir, exist_ok=True)
+    os.makedirs(os.path.join(root, "data"), exist_ok=True)
+    db = os.path.join(root, "data", "state.db")
+    con = sqlite3.connect(db)
+    try:
+        con.executescript(DDL)
+        for spec in runs:
+            src = os.path.join(src_dir, spec["run_id"] + ".mp4")
+            if spec.get("with_src", True):
+                with open(src, "wb") as fh:
+                    fh.write(b"fake-media-" + spec["run_id"].encode())
+            add_run(con, spec["run_id"], src, spec["status"],
+                    aligned=spec.get("aligned", True))
+            manifest = spec.get("manifest")
+            if manifest:
+                job_dir = os.path.join(root, "data", "jobs", spec["run_id"])
+                os.makedirs(job_dir, exist_ok=True)
+                payload = dict(manifest)
+                rendered = payload.get("rendered_path")
+                if rendered == "@render":
+                    render_dir = os.path.join(job_dir, "render")
+                    os.makedirs(render_dir, exist_ok=True)
+                    render_file = os.path.join(render_dir, "rev1.md")
+                    with open(render_file, "w", encoding="utf-8") as fh:
+                        fh.write("# 合成成稿 %s\n" % spec["run_id"])
+                    payload["rendered_path"] = render_file
+                with open(os.path.join(job_dir, "manifest.json"), "w",
+                          encoding="utf-8") as fh:
+                    json.dump(payload, fh, ensure_ascii=False)
+        con.commit()
+    finally:
+        con.close()
+    return root
+
+
+def write_candidates(root, entries):
+    with open(os.path.join(root, "vocab-candidates.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump(entries, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+
+
+def read_json(path, default=None):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+RETRY_SPEC = {"run_id": "run-retry", "status": "TRANSCRIBE_FAILED"}
+REUSE_SPEC = {"run_id": "run-reuse", "status": "NORM_RENDER_FAILED",
+              "manifest": {"raw_path": "@raw", "normalized_path": "@norm",
+                           "rendered_path": "@render", "render_revision_id": "rev1"}}
+PUB_SPEC = {"run_id": "run-publish", "status": "PUBLISH_BLOCKED",
+            "manifest": {"raw_path": "@raw", "normalized_path": "@norm",
+                         "rendered_path": "@render", "render_revision_id": "rev1"}}
+OK_SPEC = {"run_id": "run-ok", "status": "SUCCEEDED"}
+
+
+def build_root_a(server):
+    return make_data_root(server, "A", [RETRY_SPEC, REUSE_SPEC, PUB_SPEC, OK_SPEC])
+
+
+def plan_token_for(server, root, run_ids):
+    code, res = server._handle_retry_plan_post(
+        body({"data_root": root, "run_ids": run_ids}))
+    assert code == 200 and res.get("ok"), (code, res)
+    return res
+
+
+# ------------------------------------------------------------------ 1 严格类型层
+
+BAD_BOOLS = [1, 0, 1.0, "true", "false", "yes", None, [], {}]
+BAD_INTS = [True, False, 1.5, 1.0, "3", "0", None, [], {}]
+
+
+def part1_strict_types(server):
+    assert_tmp(server.DEFAULT_DATA_ROOT, "part1_strict_types(default)")
+    root = build_root_a(server)
+    assert_tmp(root, "part1_strict_types")
+    try:
+        write_candidates(root, [
+            {"wrong": "严格错词A", "right": "严格正词A", "confidence": "high"},
+            {"wrong": "严格错词B", "right": "严格正词B", "confidence": "high"},
+        ])
+        rev = server._vocab_candidates_revision(root)
+        vocab_path = os.path.join(root, "vocab-user.json")
+        before = tree_snapshot(root)
+        db_before = os.path.getsize(os.path.join(root, "data", "state.db"))
+
+        # 1a 坏 JSON / 非对象 / 空体（三个入口）
+        for raw in (b"", b"{bad", b"[1,2]", b"null", b"\"x\""):
+            for name, fn in (("retry-plan", server._handle_retry_plan_post),
+                             ("retry-batch", server._handle_retry_batch_post),
+                             ("vocab-apply", server._handle_vocab_candidates_apply)):
+                code, res = fn(raw)
+                check("1a 坏体 %s.%r -> 400" % (name, raw[:6]), code == 400)
+                check("1a 坏体 %s.%r 有人话错误" % (name, raw[:6]),
+                      isinstance(res.get("error"), str) and len(res["error"]) > 2)
+
+        # 1b indices：bool / float / str / None 一律 400 + 零执行 + 零写盘
+        for bad in BAD_INTS:
+            payload = {"data_root": root, "indices": [bad],
+                       "rerun_old": False, "candidates_revision": rev}
+            code, res = server._handle_vocab_candidates_apply(body(payload))
+            check("1b indices=%r -> 400" % (bad,), code == 400, (code, res))
+            check("1b indices=%r 有人话" % (bad,),
+                  isinstance(res.get("error"), str) and "indices" in res["error"])
+            code2, res2 = server._run_vocab_candidates_apply(payload)
+            check("1b(同步) indices=%r -> 400" % (bad,), code2 == 400)
+        code, res = server._handle_vocab_candidates_apply(
+            body({"data_root": root, "indices": "0", "rerun_old": False,
+                  "candidates_revision": rev}))
+        check("1b indices 非数组 -> 400", code == 400)
+
+        # 1c rerun_old：非布尔不静默当 False
+        for bad in BAD_BOOLS:
+            payload = {"data_root": root, "indices": [0], "rerun_old": bad,
+                       "candidates_revision": rev}
+            code, res = server._handle_vocab_candidates_apply(body(payload))
+            check("1c rerun_old=%r -> 400" % (bad,), code == 400, (code, res))
+            code2, _ = server._run_vocab_candidates_apply(payload)
+            check("1c(同步) rerun_old=%r -> 400" % (bad,), code2 == 400)
+        check("1c rerun_old 缺键 -> 默认 True（旧 API 行为保留，只直测取参层）",
+              server._take_bool({"indices": [0]}, "rerun_old", True) is True)
+        check("1c rerun_old=False 正常取到布尔",
+              server._take_bool({"rerun_old": False}, "rerun_old", True) is False)
+
+        # 1d data_root 显式 null/数字 -> 400（不静默当默认目录）
+        for bad in (None, 1, True, ["x"]):
+            code, res = server._handle_vocab_candidates_apply(
+                body({"data_root": bad, "indices": [0], "rerun_old": False,
+                      "candidates_revision": rev}))
+            check("1d data_root=%r -> 400" % (bad,), code == 400, res)
+        code, res = server._handle_retry_plan_post(
+            body({"data_root": "relative/dir", "run_ids": ["run-retry"]}))
+        check("1d 相对 data_root -> 400", code == 400)
+
+        # 1e confirm：非布尔 confirm -> 400 人话（且不回请求体）
+        for bad in BAD_BOOLS + [False]:
+            code, res = server._handle_retry_batch_post(body({
+                "data_root": root, "confirm": bad,
+                "plan_token": "SECRET-TOKEN-SHOULD-NOT-ECHO",
+                "run_ids": ["run-retry"]}))
+            check("1e confirm=%r -> 400" % (bad,), code == 400, (code, res))
+            check("1e confirm=%r 不回请求体/令牌" % (bad,),
+                  "SECRET-TOKEN" not in json.dumps(res, ensure_ascii=False))
+
+        # 1f clear / reapply 的布尔字段不再 bool() 兜底
+        for bad in ("false", 1, None):
+            code, res = server._handle_clear_post(body({
+                "data_root": root, "input_root": root, "dry_run": bad}))
+            check("1f clear dry_run=%r -> 400" % (bad,), code == 400, res)
+            code2, res2 = server._handle_clear_post(body({
+                "data_root": root, "input_root": root, "only_failed": bad}))
+            check("1f clear only_failed=%r -> 400" % (bad,), code2 == 400)
+            code3, res3 = server._handle_reapply_post(body({
+                "data_root": root, "all": bad}))
+            check("1f reapply all=%r -> 400（不再 truthy 触发全量重跑）" % (bad,),
+                  code3 == 400, res3)
+
+        # 1g 严格类型全部零执行零写盘
+        check("1g 全程 vocab-user.json 未生成/未变",
+              os.path.exists(vocab_path) == ("vocab-user.json" in before))
+        check("1g 全程目录字节快照未变", tree_snapshot(root) == before)
+        check("1g state.db 未被改写",
+              os.path.getsize(os.path.join(root, "data", "state.db")) == db_before)
+        check("1g 未建任何后台任务", server._vocab_apply_job is None)
+        check("1g 未建任何 recovery job 文件",
+              not os.path.isdir(os.path.join(root, "data", "recovery_jobs"))
+              or not os.listdir(os.path.join(root, "data", "recovery_jobs")))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 2 目录绑定 / job_id
+
+def part2_binding(server):
+    root_a = build_root_a(server)
+    root_b = tempfile.mkdtemp(prefix="p12_B_")
+    assert_tmp(root_a, "part2_binding.A")
+    assert_tmp(root_b, "part2_binding.B")
+    try:
+        # 2a /api/status 不得忽略 data_root
+        code, snap_b = server._handle_status({"data_root": [root_b]})
+        text_b = json.dumps(snap_b, ensure_ascii=False)
+        check("2a status(rootB) 200 且人话失败（无库）",
+              code == 200 and snap_b.get("ok") is False, (code, snap_b))
+        check("2a status(rootB) 不返回 rootA 的任务",
+              "run-retry" not in text_b and "run-ok" not in text_b)
+        check("2a status(rootB) 不回绝对路径", root_a not in text_b)
+        code, snap_a = server._handle_status({"data_root": [root_a], "limit": ["200"]})
+        check("2a status(rootA) 200", code == 200, (code, snap_a))
+        check("2a status(rootA) 只含 rootA（不含 rootB 绝对路径）",
+              root_b not in json.dumps(snap_a, ensure_ascii=False))
+        code, res = server._handle_status({"data_root": ["relative/x"]})
+        check("2a status(相对 data_root) -> 400", code == 400 and res.get("error"))
+        code, res = server._handle_status({"data_root": [root_a], "limit": ["abc"]})
+        check("2a status(limit=abc) -> 400", code == 400 and res.get("error"))
+        code, res = server._handle_status({"data_root": [root_a], "limit": ["1.5"]})
+        check("2a status(limit=1.5) -> 400", code == 400)
+
+        # 2b retry-batch status：缺任一 / 未知 job / 跨目录
+        code, res = server._handle_retry_batch_status({"job_id": ["rec-1"]})
+        check("2b 缺 data_root -> 400 人话", code == 400 and "data_root" in res.get("error", ""))
+        code, res = server._handle_retry_batch_status({"data_root": [root_a]})
+        check("2b 缺 job_id -> 400 人话", code == 400 and "job_id" in res.get("error", ""))
+        code, res = server._handle_retry_batch_status(
+            {"data_root": [root_b], "job_id": ["rec-nope"]})
+        check("2b 未知 job -> 404 人话", code == 404, (code, res))
+
+        # 2c 真 job：同目录可取，别目录不给数据
+        plan = plan_token_for(server, root_a, ["run-reuse"])
+        code, job = server._handle_retry_batch_post(body({
+            "data_root": root_a, "confirm": True, "plan_token": plan["plan_token"],
+            "run_ids": ["run-reuse"]}))
+        check("2c batch 202", code == 202 and job.get("ok"), (code, job))
+        job_id = str(job.get("job_id"))
+        code, got = server._handle_retry_batch_status(
+            {"data_root": [root_a], "job_id": [job_id]})
+        check("2c 同目录可读终态", code == 200 and got.get("job_id") == job_id, (code, got))
+        check("2c job 目录绑定摘要存在", bool(got.get("data_root_digest")))
+        check("2c 别目录不给数据（404）",
+              server._handle_retry_batch_status(
+                  {"data_root": [root_b], "job_id": [job_id]})[0] in (404, 409))
+        check("2c 别目录响应不含 job 内容",
+              "results" not in json.dumps(server._handle_retry_batch_status(
+                  {"data_root": [root_b], "job_id": [job_id]})[1], ensure_ascii=False))
+        # 把 A 的 job 文件人为搬到 B（模拟跨目录/被搬文件）→ 必须 409 零渲染
+        b_jobs = os.path.join(root_b, "data", "recovery_jobs")
+        os.makedirs(b_jobs, exist_ok=True)
+        shutil.copyfile(os.path.join(root_a, "data", "recovery_jobs",
+                                     "%s.json" % job_id),
+                        os.path.join(b_jobs, "%s.json" % job_id))
+        code, moved = server._handle_retry_batch_status(
+            {"data_root": [root_b], "job_id": [job_id]})
+        check("2c 搬到别目录的 job -> 409", code == 409, (code, moved))
+        check("2c 搬到别目录的 job 不返回 results", "results" not in moved)
+
+        # 2d 前端轮询带 job_id + data_root：只渲染匹配 job
+        write_candidates(root_a, [
+            {"wrong": "绑定错词一", "right": "绑定正词一", "confidence": "high"}])
+        code, res = server._handle_vocab_candidates_apply(body({
+            "data_root": root_a, "indices": [0], "rerun_old": False,
+            "candidates_revision": server._vocab_candidates_revision(root_a)}))
+        check("2d 候选 apply 202", code == 202 and res.get("job_id"), (code, res))
+        vjob = str(res.get("job_id"))
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            with server._state_lock:
+                cur = server._vocab_apply_job
+                state = (cur or {}).get("state")
+            if state and state != "running":
+                break
+            time.sleep(0.2)
+        code, ok_res = server._handle_vocab_apply_status(
+            {"data_root": [root_a], "job_id": [vjob]})
+        check("2d 同目录+同 job_id 可读", code == 200 and (ok_res.get("job") or {}).get("job_id") == vjob,
+              (code, ok_res))
+        code, cross_dir = server._handle_vocab_apply_status(
+            {"data_root": [root_b], "job_id": [vjob]})
+        check("2d 别目录轮询 -> 409 不渲染", code == 409 and cross_dir.get("job") is None,
+              (code, cross_dir))
+        code, cross_job = server._handle_vocab_apply_status(
+            {"data_root": [root_a], "job_id": ["vocab-apply-999-1"]})
+        check("2d 别 job_id 轮询 -> 409 不渲染", code == 409 and cross_job.get("job") is None,
+              (code, cross_job))
+        check("2d 跨目录/跨 job 响应不含他任务内容",
+              "details" not in json.dumps(cross_dir, ensure_ascii=False)
+              and vjob not in json.dumps(cross_job, ensure_ascii=False))
+        code, res = server._handle_vocab_apply_status({"data_root": ["relative/y"]})
+        check("2d 相对 data_root -> 400", code == 400)
+        code, bare = server._handle_vocab_apply_status({})
+        check("2d 无参查询不回明细（job:null，P1-2 契约不回落）",
+              code == 200 and bare.get("job") is None
+              and bare.get("ok") is True, (code, bare))
+        code, only_root = server._handle_vocab_apply_status({"data_root": [root_a]})
+        check("2d 只给 data_root（不给 job_id）仍可读本目录任务",
+              code == 200 and (only_root.get("job") or {}).get("job_id") == vjob,
+              (code, only_root))
+    finally:
+        shutil.rmtree(root_a, ignore_errors=True)
+        shutil.rmtree(root_b, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 3 字段一致
+
+def part3_field_consistency(server):
+    root = build_root_a(server)
+    assert_tmp(root, "part3_field_consistency")
+    try:
+        # 3a 候选 details：真候选 / 越界 / 重复 / 已导入 / 校验拒收 全在同一分支集
+        write_candidates(root, [
+            {"wrong": "字段错词一", "right": "字段正词一", "confidence": "high"},
+            {"wrong": "已", "right": "已导入条", "confidence": "low",
+             "imported": True},
+        ])
+        code, res = server._run_vocab_candidates_apply({
+            "data_root": root, "indices": [0, 0, 99, 1], "rerun_old": False,
+            "candidates_revision": server._vocab_candidates_revision(root)})
+        details = res.get("details") or []
+        check("3a details 非空且覆盖四种分支", len(details) >= 4, details)
+        keysets = {frozenset(d.keys()) for d in details}
+        check("3a details 各分支键集合一致", len(keysets) == 1, keysets)
+        need = {"index", "wrong", "right", "confidence", "evidence",
+                "accepted", "decision", "reason"}
+        check("3a details 固定键齐备", need.issubset(set(list(keysets)[0])))
+        check("3a index 恒为 int",
+              all(isinstance(d.get("index"), int) and not isinstance(d.get("index"), bool)
+                  for d in details))
+        check("3a reason 恒为字符串（无该字段的分支补空串）",
+              all(isinstance(d.get("reason"), str) for d in details))
+        check("3a accepted/decision 取值合法",
+              all(d.get("accepted") in (True, False)
+                  and d.get("decision") in ("保留", "拒收") for d in details))
+
+        # 3b 诊断 items：不同 action_category 的行键集合一致
+        code, diag = server._handle_failure_diagnosis({"data_root": [root]})
+        items = diag.get("items") or []
+        check("3b 诊断覆盖多类", len({i.get("action_category") for i in items}) >= 3,
+              {i.get("action_category") for i in items})
+        dkeys = {frozenset(i.keys()) for i in items}
+        check("3b 诊断 items 键集合一致", len(dkeys) == 1, dkeys)
+
+        # 3c retry-batch results：混合分支（门未过 / 策略执行）键集合一致
+        plan = plan_token_for(server, root, ["run-retry", "run-reuse", "run-publish"])
+        code, job = server._handle_retry_batch_post(body({
+            "data_root": root, "confirm": True, "plan_token": plan["plan_token"],
+            "run_ids": ["run-retry", "run-reuse", "run-publish"]}))
+        results = job.get("results") or []
+        check("3c results 每项都有", len(results) == 3, results)
+        rkeys = {frozenset(r.keys()) for r in results}
+        check("3c results 键集合一致（不因分支缺键）", len(rkeys) == 1, rkeys)
+        check("3c results 固定契约齐备",
+              set(server.RECOVERY_RESULT_FIELDS) == set(list(rkeys)[0]))
+        check("3c 每项 whisper_calls 恒为 int",
+              all(isinstance(r.get("whisper_calls"), int) for r in results))
+        check("3c 每项 ok 恒为 bool", all(isinstance(r.get("ok"), bool) for r in results))
+
+        # 3d 老 job 文件（半结构）读回也按同一契约归一
+        legacy_path = os.path.join(root, "data", "recovery_jobs", "rec-legacy.json")
+        os.makedirs(os.path.dirname(legacy_path), exist_ok=True)
+        with open(legacy_path, "w", encoding="utf-8") as fh:
+            json.dump({"job_id": "rec-legacy", "state": "SUCCEEDED",
+                       "data_root_digest": hashlib.sha256(
+                           os.path.abspath(root).encode()).hexdigest()[:16],
+                       "results": [{"run_id": "x"}, {"run_id": "y", "state": "FAILED",
+                                                     "ok": False}]}, fh)
+        code, legacy = server._handle_retry_batch_status(
+            {"data_root": [root], "job_id": ["rec-legacy"]})
+        lr = legacy.get("results") or []
+        check("3d 老 job 读回归一", len(lr) == 2
+              and all(set(r.keys()) == set(server.RECOVERY_RESULT_FIELDS)
+                      for r in lr), lr)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 4 候选版本锁 / 漂移
+
+def part4_candidate_lock(server):
+    root = build_root_a(server)
+    assert_tmp(root, "part4_candidate_lock")
+    try:
+        write_candidates(root, [
+            {"wrong": "漂移错词一", "right": "漂移正词一", "confidence": "high"},
+            {"wrong": "漂移错词二", "right": "漂移正词二", "confidence": "high"},
+        ])
+        job_before = server._vocab_apply_job
+        code, get1 = server._handle_vocab_candidates_get({"data_root": [root]})
+        rev1 = get1.get("candidates_revision")
+        check("4a GET 回候选版本", code == 200 and isinstance(rev1, str) and rev1,
+              (code, get1))
+
+        # 缺版本 -> 400（POST 必须带）
+        code, res = server._handle_vocab_candidates_apply(body({
+            "data_root": root, "indices": [0], "rerun_old": False}))
+        check("4b 缺 candidates_revision -> 400", code == 400, (code, res))
+
+        # 快照漂移：GET 后清单被改写 -> 409 零执行
+        cand_path = os.path.join(root, "vocab-candidates.json")
+        before_bytes = sha(cand_path)
+        write_candidates(root, [
+            {"wrong": "新插入错词", "right": "新插入正词", "confidence": "high"},
+            {"wrong": "漂移错词一", "right": "漂移正词一", "confidence": "high"},
+            {"wrong": "漂移错词二", "right": "漂移正词二", "confidence": "high"},
+        ])
+        code, res = server._handle_vocab_candidates_apply(body({
+            "data_root": root, "indices": [0], "rerun_old": False,
+            "candidates_revision": rev1}))
+        check("4c 漂移 -> 409", code == 409, (code, res))
+        check("4c 漂移 -> 零执行（未建新任务、未写词库）",
+              server._vocab_apply_job is job_before
+              and not os.path.exists(os.path.join(root, "vocab-user.json")))
+        check("4c 漂移 -> 候选文件未被动过", sha(cand_path) != before_bytes)
+        code, res2 = server._run_vocab_candidates_apply({
+            "data_root": root, "indices": [0], "rerun_old": False,
+            "candidates_revision": rev1})
+        check("4c(同步) 漂移 -> 409", code == 409)
+        stale = res2.get("candidates_revision")
+        check("4c 409 回最新版本便于前端刷新", isinstance(stale, str) and stale != rev1)
+
+        # 用最新版本提交：index 0 指向新条目（证明版本锁防错位）
+        code, ok = server._run_vocab_candidates_apply({
+            "data_root": root, "indices": [0], "rerun_old": False,
+            "candidates_revision": stale})
+        check("4d 最新版本提交 200", code == 200 and ok.get("ok"), (code, ok))
+        vocab = read_json(os.path.join(root, "vocab-user.json"), [])
+        check("4d 应用的是新 index 0（防索引漂移串项）",
+              any(e.get("wrong") == "新插入错词" for e in vocab), vocab)
+        check("4d 未误用旧 index 0 之外的条目",
+              not any(e.get("wrong") == "漂移错词二" for e in vocab))
+
+        # 版本再次变化 -> 旧版本继续 409（锁是持续生效的）
+        write_candidates(root, [{"wrong": "再改错词", "right": "再改正词",
+                                 "confidence": "low"}])
+        code, res3 = server._run_vocab_candidates_apply({
+            "data_root": root, "indices": [0], "rerun_old": False,
+            "candidates_revision": stale})
+        check("4e 版本再变 -> 仍 409", code == 409)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 5 部分更新安全
+
+def part5_partial_update(server):
+    root = build_root_a(server)
+    assert_tmp(root, "part5_partial_update")
+    try:
+        presets = server._load_vocab_presets()
+        domains = [p["domain"] for p in presets]
+        check("5 预置域至少 2 个（可测部分更新）", len(domains) >= 2, domains)
+        if len(domains) < 2:
+            return
+        d1, d2 = domains[0], domains[1]
+
+        # 先关 d2
+        code, res = server._handle_vocab_presets_domains_post(body({
+            "data_root": root, "enabled": {d2: False}}))
+        check("5a 关闭一个域 200", code == 200 and res["enabled"][d2] is False,
+              (code, res))
+        check("5a 未提交域保持默认启用", res["enabled"][d1] is True)
+
+        # 只提交 d1 -> d2 必须保持 False（旧实现会回启）
+        code, res = server._handle_vocab_presets_domains_post(body({
+            "data_root": root, "enabled": {d1: False}}))
+        check("5b 部分提交不回启未提交域",
+              code == 200 and res["enabled"][d2] is False, (code, res))
+        state = read_json(os.path.join(root, "vocab-domains.json"), {})
+        check("5b 落盘状态同样保持 d2=False",
+              (state.get("enabled") or {}).get(d2) is False, state)
+
+        # 未知域忽略 + 空对象不产生旁路副作用
+        code, res = server._handle_vocab_presets_domains_post(body({
+            "data_root": root, "enabled": {"NOT_A_DOMAIN": False}}))
+        check("5c 未知域忽略、已存在状态不变",
+              code == 200 and res["enabled"][d1] is False
+              and res["enabled"][d2] is False, (code, res))
+        before = sha(os.path.join(root, "vocab-domains.json"))
+        code, res = server._handle_vocab_presets_domains_post(body({
+            "data_root": root, "enabled": {}}))
+        check("5c 空 enabled 不改状态", code == 200
+              and sha(os.path.join(root, "vocab-domains.json")) == before)
+
+        # 值必须真布尔：字符串 "false" 不得被 bool() 静默当 True
+        for bad in ("false", 0, 1, None, "true"):
+            code, res = server._handle_vocab_presets_domains_post(body({
+                "data_root": root, "enabled": {d1: bad}}))
+            check("5d enabled.%s=%r -> 400" % (d1, bad), code == 400, (code, res))
+        check("5d 坏值未改动任何状态",
+              sha(os.path.join(root, "vocab-domains.json")) == before)
+        check("5d 坏值未误删词库文件",
+              not os.path.exists(os.path.join(root, "vocab-user.json")))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 6 错误信息安全 D-12
+
+SENSITIVE = ["/Users/", "/private/var/", "/var/folders/", "SECRET-TOKEN",
+             "transcription-body-marker"]
+
+
+def err_fields(obj):
+    """只取响应里的错误类字段（成功响应回显用户自己填的 data_root 不算泄漏）。"""
+    out = {}
+    if isinstance(obj, dict):
+        for key in ("error", "reason", "message", "stage_text", "verdict"):
+            if isinstance(obj.get(key), str):
+                out[key] = obj[key]
+    return out
+
+
+def scan_leak(name, obj, extra=()):
+    text = json.dumps(obj, ensure_ascii=False)
+    hits = [s for s in SENSITIVE if s in text]
+    hits += [s for s in extra if s in text]
+    check("6 脱敏 " + name, not hits, hits)
+
+
+def part6_error_redaction(server):
+    root = build_root_a(server)
+    assert_tmp(root, "part6_error_redaction")
+    # 用「data_root 指向一个文件」逼出带绝对路径的 OSError
+    blocked = os.path.join(tempfile.mkdtemp(prefix="p12_file_"), "not-a-dir")
+    with open(blocked, "w", encoding="utf-8") as fh:
+        fh.write("x")
+    assert_tmp(blocked, "part6_error_redaction.blocked")
+    try:
+        code, res = server._handle_vocab_add(body({
+            "data_root": blocked, "wrong": "泄漏错词", "right": "泄漏正词"}))
+        check("6a 词库落盘失败 -> 5xx", code in (400, 500), (code, res))
+        scan_leak("6a 词库保存失败不回绝对路径", res, [blocked])
+
+        code, res = server._handle_reapply_post(body({
+            "data_root": blocked, "all": True}))
+        scan_leak("6b reapply 坏库不回绝对路径",
+                  err_fields(res), [blocked, os.path.dirname(blocked)])
+        code, res = server._handle_reapply_post(body({
+            "data_root": blocked, "run_id": "run-x"}))
+        check("6b reapply 单条坏库 -> 人话失败",
+              code == 200 and res.get("ok") is False, (code, res))
+        scan_leak("6b reapply 单条坏库不回绝对路径",
+                  err_fields(res), [blocked, os.path.dirname(blocked)])
+        code, res = server._handle_vocab_presets_import(body({
+            "data_root": blocked, "domains": ["programming"]}))
+        check("6b 预置导入坏目录 -> 失败", code in (400, 500), (code, res))
+        scan_leak("6b 预置导入坏目录不回绝对路径",
+                  err_fields(res), [blocked, os.path.dirname(blocked)])
+
+        # 真·无库目录（不是文件）→ clear 打开失败的人话错误
+        nolib = tempfile.mkdtemp(prefix="p12_nolib_")
+        code, res = server._handle_clear_post(body({
+            "data_root": nolib, "input_root": nolib, "dry_run": True}))
+        check("6c 无库目录 clear dry_run -> 404 人话", code == 404, (code, res))
+        scan_leak("6c 无库目录 clear 不回绝对路径",
+                  err_fields(res), [nolib, root])
+        shutil.rmtree(nolib, ignore_errors=True)
+
+        code, res = server._handle_retry_batch_post(body({
+            "data_root": root, "confirm": "yes",
+            "plan_token": "SECRET-TOKEN-ABC", "run_ids": ["run-retry"]}))
+        scan_leak("6d 非布尔 confirm 不回请求体", res)
+        code, res = server._handle_retry_batch_post(body({
+            "data_root": root, "confirm": True,
+            "plan_token": "SECRET-TOKEN-ABC", "run_ids": ["run-retry"]}))
+        check("6d 未知令牌 -> 409", code == 409, (code, res))
+        scan_leak("6d 未知令牌不回令牌原文", res)
+
+        code, res = server._handle_retry_plan_post(body({
+            "data_root": root, "run_ids": "not-a-list"}))
+        check("6e run_ids 类型错 -> 400", code == 400)
+        scan_leak("6e run_ids 类型错不回路径", res, [root])
+
+        code, res = server._handle_retry_plan_post(body({
+            "data_root": root, "run_ids": ["run-retry", "run-retry"]}))
+        check("6e 重复 run_id -> 400", code == 400, (code, res))
+        check("6e 重复 run_id 人话提到 run_ids", "run_ids" in res.get("error", ""))
+
+        code, res = server._handle_status({"data_root": [root],
+                                           "limit": ["1 OR 1=1"]})
+        check("6e limit 注入串 -> 400", code == 400)
+        scan_leak("6e limit 注入串不回请求体", res)
+
+        # 6h 未知 run_id：结构化人话失败、零执行（不进 eligible）
+        writer_before = tree_snapshot(root)
+        code, res = server._handle_retry_plan_post(body({
+            "data_root": root, "run_ids": ["run-不存在"]}))
+        check("6h 未知 run_id -> 200 dry-run 且不可恢复", code == 200
+              and res.get("eligible") == [], (code, res))
+        check("6h 未知 run_id 有人话排除原因",
+              (res.get("excluded") or [{}])[0].get("reason"))
+        check("6h 未知 run_id 零写盘", tree_snapshot(root) == writer_before)
+
+        # 6i 坏库 / 缺表：结构化失败且不回路径
+        bad_db = tempfile.mkdtemp(prefix="p12_baddb_")
+        os.makedirs(os.path.join(bad_db, "data"), exist_ok=True)
+        with open(os.path.join(bad_db, "data", "state.db"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("this is not a sqlite database")
+        code, res = server._handle_failure_diagnosis({"data_root": [bad_db]})
+        check("6i 坏库 -> 结构化失败(ok=false)", code == 200 and res.get("ok") is False,
+              (code, res))
+        scan_leak("6i 坏库不回绝对路径", res, [bad_db])
+        code, res = server._handle_retry_plan_post(body({
+            "data_root": bad_db, "run_ids": ["run-x"]}))
+        check("6i 坏库 retry-plan -> 结构化失败", code in (400, 409, 500), (code, res))
+        scan_leak("6i 坏库 retry-plan 不回绝对路径", res, [bad_db])
+        empty_db = tempfile.mkdtemp(prefix="p12_nodb_")
+        code, res = server._handle_failure_diagnosis({"data_root": [empty_db]})
+        check("6i 缺库 -> ok:false 结构化",
+              code == 200 and res.get("ok") is False and res.get("code"),
+              (code, res))
+        scan_leak("6i 缺库不回绝对路径", res, [empty_db])
+        code, res = server._handle_status({"data_root": [empty_db]})
+        check("6i 缺库 status -> 不回 state.db 绝对路径",
+              code == 200 and empty_db not in json.dumps(res, ensure_ascii=False))
+        shutil.rmtree(bad_db, ignore_errors=True)
+        shutil.rmtree(empty_db, ignore_errors=True)
+
+        # _err_text 本体：抹路径、压平空白、截断
+        msg = server._err_text(OSError(
+            "[Errno 28] No space left on device: '%s/data/vocab-user.json'"
+            % root))
+        check("6f _err_text 抹掉绝对路径",
+              root not in msg and "/Users/" not in msg and "No space" in msg, msg)
+        check("6f _err_text 压平换行",
+              "\n" not in server._err_text(ValueError("a\nb\tc")))
+        check("6f _err_text 截断超长",
+              len(server._err_text(ValueError("z" * 500))) <= 181)
+        check("6f _err_text 空消息回类型名",
+              server._err_text(ValueError("")) == "ValueError")
+
+        # 诊断/复制摘要口径：真实路径必须已被打码
+        code, diag = server._handle_failure_diagnosis({"data_root": [root]})
+        text = json.dumps(diag, ensure_ascii=False)
+        check("6g 诊断不回真实绝对路径",
+              root not in text and "/Users/" not in text, root)
+        check("6g 诊断路径已打码（…/ 形式）",
+              all(str(i.get("recorded_path_redacted", "")).startswith("…/")
+                  for i in (diag.get("items") or [])))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(os.path.dirname(blocked), ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 7 回归（P0-1/P0-2/P0-3）
+
+def part7_regression(server):
+    root = build_root_a(server)
+    assert_tmp(root, "part7_regression")
+    try:
+        # 7a retry-plan dry-run：可复算 + eta 未验证 + token TTL
+        plan = plan_token_for(server, root, ["run-retry", "run-reuse", "run-publish"])
+        check("7a dry_run=true", plan.get("dry_run") is True)
+        check("7a eta=未验证", plan.get("eta") == "未验证")
+        check("7a token/过期时间在位",
+              isinstance(plan.get("plan_token"), str)
+              and int(plan["expires_at"]) - int(time.time())
+              <= server.RECOVERY_TOKEN_TTL_SEC + 2)
+        elig = plan.get("eligible") or []
+        ex = plan.get("excluded") or []
+        check("7a summary 等于逐项复算",
+              plan["summary"]["eligible"] == len(elig)
+              and plan["summary"]["excluded"] == len(ex)
+              and plan["summary"]["selected"] == 3)
+        check("7a 成功项不进可恢复集合", all(e["run_id"] != "run-ok" for e in elig))
+        check("7a 三种策略命中",
+              {e["strategy"] for e in elig} == {"RETRANSCRIBE", "REUSE_DERIVED",
+                                               "PUBLISH_ONLY"}, elig)
+        check("7a 诊断快照 id 与计划一致",
+              plan["diagnosis_snapshot_id"] == elig[0]["diagnosis_snapshot_id"])
+        code, stale = server._handle_retry_plan_post(body({
+            "data_root": root, "run_ids": ["run-retry"],
+            "diagnosis_snapshot_id": "diag-0000"}))
+        check("7a 旧快照 id -> 409 零执行", code == 409, (code, stale))
+
+        # 7b 幂等：同 token 连点只建一个 job
+        plan2 = plan_token_for(server, root, ["run-reuse"])
+        b1 = body({"data_root": root, "confirm": True,
+                   "plan_token": plan2["plan_token"], "run_ids": ["run-reuse"]})
+        c1, j1 = server._handle_retry_batch_post(b1)
+        c2, j2 = server._handle_retry_batch_post(b1)
+        check("7b 首次 202", c1 == 202 and j1.get("ok"))
+        check("7b 二次回既有 job（idempotent）",
+              c2 == 202 and j2.get("idempotent") is True
+              and j2.get("job_id") == j1.get("job_id"), (c2, j2))
+        jobs_dir = os.path.join(root, "data", "recovery_jobs")
+        job_files = [f for f in os.listdir(jobs_dir) if f.endswith(".json")]
+        check("7b 只有一个 job 文件", len(job_files) == 1, job_files)
+        check("7b 原子写不留 tmp",
+              not [f for f in os.listdir(jobs_dir) if ".tmp" in f])
+        check("7b 终态可复算",
+              j1.get("total") == len(j1.get("results") or [])
+              and j1.get("recovered") == sum(1 for r in j1["results"]
+                                             if r["state"] == "SUCCEEDED"))
+        check("7b REUSE_DERIVED whisper=0", j1.get("whisper_calls") == 0)
+
+        # 7c 漂移 -> 409 零执行；执行集合不符 -> 409
+        plan3 = plan_token_for(server, root, ["run-retry"])
+        c3, r3 = server._handle_retry_batch_post(body({
+            "data_root": root, "confirm": True,
+            "plan_token": plan3["plan_token"], "run_ids": ["run-reuse"]}))
+        check("7c 执行集合与预览不一致 -> 409", c3 == 409, (c3, r3))
+        c4, r4 = server._handle_retry_batch_post(body({
+            "data_root": root, "confirm": True,
+            "plan_token": plan3["plan_token"], "run_ids": ["run-retry"]}))
+        check("7c 诊断漂移（该 run 已执行过）-> 409 或正常终态",
+              c4 in (409, 202), (c4, r4))
+
+        # 7d 过期令牌 -> 409
+        plan4 = plan_token_for(server, root, ["run-publish"])
+        digest = hashlib.sha256(plan4["plan_token"].encode()).hexdigest()
+        with server._RECOVERY_PLAN_LOCK:
+            server._RECOVERY_PLANS[digest]["expires_at"] = int(time.time()) - 10
+        c5, r5 = server._handle_retry_batch_post(body({
+            "data_root": root, "confirm": True,
+            "plan_token": plan4["plan_token"], "run_ids": ["run-publish"]}))
+        check("7d 过期令牌 -> 409", c5 == 409, (c5, r5))
+        check("7d 过期令牌零执行（无新 job）",
+              len([f for f in os.listdir(jobs_dir) if f.endswith(".json")]) == len(job_files))
+
+        # 7e 目录不一致 -> 409
+        other = tempfile.mkdtemp(prefix="p12_C_")
+        try:
+            plan5 = plan_token_for(server, root, ["run-publish"])
+            c6, r6 = server._handle_retry_batch_post(body({
+                "data_root": other, "confirm": True,
+                "plan_token": plan5["plan_token"], "run_ids": ["run-publish"]}))
+            check("7e 跨目录执行 -> 409 零执行", c6 == 409, (c6, r6))
+        finally:
+            shutil.rmtree(other, ignore_errors=True)
+
+        # 7h 两线程同 token：只有一个新 job（D-6 并发）
+        jobs_before = len([f for f in os.listdir(jobs_dir) if f.endswith(".json")])
+        plan6 = plan_token_for(server, root, ["run-reuse"])
+        body6 = body({"data_root": root, "confirm": True,
+                      "plan_token": plan6["plan_token"], "run_ids": ["run-reuse"]})
+        out = {}
+        threads = [threading.Thread(target=lambda i=i: out.__setitem__(
+            i, server._handle_retry_batch_post(body6))) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        codes = sorted(v[0] for v in out.values())
+        check("7h 两线程同 token -> 恰好一个新 job（202/202幂等 或 202/409）",
+              codes in ([202, 202], [202, 409]) and len(out) == 2, (codes, out))
+        jobs_after = [f for f in os.listdir(jobs_dir) if f.endswith(".json")]
+        check("7h 只多出一个 job 文件", len(jobs_after) == jobs_before + 1,
+              (jobs_before, jobs_after))
+        if codes == [202, 202]:
+            check("7h 两线程都 202 时其中一个是幂等回既有 job",
+                  any(v[1].get("idempotent") is True for v in out.values()), out)
+
+        # 7f P0-3 _FAIL_SEMANTICS 语义归一化未回退
+        code, diag = server._handle_failure_diagnosis({"data_root": [root]})
+        by_id = {i["run_id"]: i for i in diag.get("items") or []}
+        pub = by_id.get("run-publish") or {}
+        check("7f PUBLISH_BLOCKED 不算 mismatch（不降级 NEEDS_HUMAN）",
+              pub.get("display_persisted_mismatch") is False
+              and pub.get("recovery_eligibility") == "AUTO_PUBLISH", pub)
+        retry = by_id.get("run-retry") or {}
+        check("7f 可自动重试项资格保持",
+              retry.get("recovery_eligibility") == "AUTO_RETRANSCRIBE")
+        check("7f 成功项不进诊断", "run-ok" not in by_id)
+        check("7f 计数与逐项一致",
+              diag["counts"]["incomplete_or_blocked_total"] == len(diag["items"])
+              and diag["counts"]["auto_retryable_failure_count"]
+              == sum(1 for i in diag["items"]
+                     if i["recovery_eligibility"] in
+                     {"AUTO_RETRANSCRIBE", "AUTO_REUSE", "AUTO_PUBLISH"}))
+
+        # 7g No-Clobber：目标笔记已存在 -> SKIPPED 且字节不变
+        vault = tempfile.mkdtemp(prefix="p12_vault_")
+        try:
+            assert_tmp(root, "part7_regression.no-clobber")
+            job_dir = os.path.join(root, "data", "jobs", "run-publish")
+            manifest = read_json(os.path.join(job_dir, "manifest.json"), {})
+            rendered = manifest.get("rendered_path")
+            target = os.path.join(vault, os.path.basename(rendered))
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write("用户在库里手改过的笔记")
+            before_hash = sha(target)
+            entry = server._exec_publish_only(root, "run-publish",
+                                              os.path.join(root, "work"), vault)
+            check("7g 目标已存在 -> SKIPPED 未覆盖",
+                  entry.get("state") == "SKIPPED" and entry.get("whisper_calls") == 0,
+                  entry)
+            check("7g 库内笔记字节未变", sha(target) == before_hash)
+            check("7g 未新建 canonical 副本",
+                  len(os.listdir(vault)) == 1, os.listdir(vault))
+            missing = server._exec_publish_only(root, "run-publish",
+                                                os.path.join(root, "work"), None)
+            check("7g 缺库 -> NEEDS_HUMAN 且不重建库",
+                  missing.get("state") == "NEEDS_HUMAN", missing)
+        finally:
+            shutil.rmtree(vault, ignore_errors=True)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 8 真实 HTTP 路由（本进程临时端口，不碰 8765）
+
+def part8_http_contract(server):
+    """走真 Handler.do_GET/do_POST：路由、错误结构、坏库不掉线、主题默认浅色。"""
+    import threading
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    root = build_root_a(server)
+    assert_tmp(root, "part8_http_contract")
+    bad = root + "-baddb"
+    os.makedirs(os.path.join(bad, "data"), exist_ok=True)
+    with open(os.path.join(bad, "data", "state.db"), "w", encoding="utf-8") as fh:
+        fh.write("not a sqlite database")
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    port = int(srv.server_address[1])
+    check("8 端口不是 8765（不碰线上服务）", port != 8765 and port != 0, port)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = "http://127.0.0.1:%d" % port
+
+    def req(path, payload=None):
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        r = urllib.request.Request(
+            base + path, data=body,
+            method="POST" if payload is not None else "GET",
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(r, timeout=30) as fh:
+                return fh.status, json.loads(fh.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def raw(path):
+        with urllib.request.urlopen(base + path, timeout=30) as fh:
+            return fh.status, fh.read().decode("utf-8")
+
+    q = urllib.parse.quote
+    try:
+        code, html = raw("/")
+        check("8 首页 200", code == 200)
+        check("8 主题默认浅色未回退", 'data-theme="light"' in html)
+        code, res = req("/api/status?data_root=%s&limit=200" % q(root))
+        check("8 GET /api/status 按 data_root 200", code == 200, (code, res))
+        code, res = req("/api/status?data_root=relative")
+        check("8 GET /api/status 相对路径 400 人话",
+              code == 400 and isinstance(res.get("error"), str), (code, res))
+        code, res = req("/api/failures/retry-batch/status?data_root=%s" % q(root))
+        check("8 retry-batch status 缺 job_id -> 400",
+              code == 400 and "job_id" in res.get("error", ""), (code, res))
+        code, res = req("/api/vocab/candidates/apply",
+                        {"data_root": root, "indices": [True], "rerun_old": False,
+                         "candidates_revision": "x"})
+        check("8 POST 布尔索引 -> 400 人话", code == 400, (code, res))
+        code, res = req("/api/vocab/candidates/apply",
+                        {"indices": [0], "rerun_old": False,
+                         "candidates_revision": "x"})
+        check("8 POST 缺 data_root -> 400 人话（P2-新1 对称契约）",
+              code == 400 and "数据目录" in res.get("error", ""), (code, res))
+        code, res = req("/api/vocab/candidates/apply/status")
+        check("8 GET status 无参 -> job:null（不放宽查询侧）",
+              code == 200 and res.get("job") is None, (code, res))
+        code, res = req("/api/failures/retry-plan",
+                        {"data_root": root, "run_ids": "nope"})
+        check("8 POST run_ids 类型错 -> 400 人话", code == 400, (code, res))
+        code, res = req("/api/vocab/presets/domains",
+                        {"data_root": root, "enabled": {"programming": "false"}})
+        check("8 POST 字符串布尔 -> 400 人话", code == 400, (code, res))
+        code, res = req("/nope")
+        check("8 未知路径 -> 404 结构化", code == 404 and res.get("ok") is False)
+        code, res = req("/api/failures/diagnosis?data_root=%s" % q(bad))
+        check("8 坏库诊断 -> 200 ok:false 结构化（不掉线）",
+              code == 200 and res.get("ok") is False and res.get("code"),
+              (code, res))
+        check("8 坏库诊断不回绝对路径", bad not in json.dumps(res, ensure_ascii=False))
+        code, res = req("/api/status?data_root=%s" % q(bad))
+        check("8 坏库 status -> 200 且不回绝对路径",
+              code == 200 and bad not in json.dumps(res, ensure_ascii=False), (code, res))
+
+        # P1-1 出网链路：worker.last_error 经 GET /api/start 出网前必须已脱敏
+        leak = ("任务 视频.mp4 处理时遇到意外：打不开 "
+                + os.path.join(root, "data", "state.db"))
+        # 修复前对照：旧写法（裸 exc）产出的字符串确实逐字带真实绝对路径
+        leak_path = os.path.join(root, "data", "state.db")
+        old_producer = "任务 %s 处理时遇到意外：%s" % (
+            "视频.mp4", OSError("打不开 " + leak_path))
+        check("8 对照：旧写法产出串含真实绝对路径（=修复前会出网）",
+              leak_path in old_producer and "state.db" in old_producer)
+        check("8 修复后同一异常经 _err_text 已无路径",
+              leak_path not in server._err_text(OSError("打不开 " + leak_path)))
+        with server._state_lock:
+            server._worker["last_error"] = leak
+        code, res = req("/api/start")
+        text = json.dumps(res, ensure_ascii=False)
+        check("8 /api/start 200", code == 200, code)
+        err_field = str(res.get("worker", {}).get("last_error"))
+        check("8 worker.last_error 出网不含 data_root/state.db/绝对路径",
+              root not in err_field and "state.db" not in err_field
+              and "/Users/" not in err_field and "/private/var" not in err_field
+              and "/var/folders" not in err_field, err_field)
+        check("8 全响应体内也不含该泄漏串（含 state.db 名）", "state.db" not in text, text[:200])
+        check("8 脱敏后仍是人话（保留“遇到意外/打不开”）",
+              "遇到意外" in text and "打不开" in text,
+              res.get("worker", {}).get("last_error"))
+        check("8 注入的原始泄漏串不再逐字出现", leak not in text)
+        with server._state_lock:
+            server._worker["last_error"] = None
+
+        # ---- P1-三1 复验口径①②（真 Handler + 真 HTTP）：不带 ob_vault_root 键也必须成功
+        write_candidates(root, [
+            {"wrong": "无库错词", "right": "无库正词", "confidence": "high"}])
+        rev_http = server._vocab_candidates_revision(root)
+        code, res = req("/api/vocab/candidates/apply",
+                        {"data_root": root, "indices": [0], "rerun_old": False,
+                         "candidates_revision": rev_http})
+        check("8(P1-三1①) POST 不带 ob_vault_root 键 -> 202",
+              code == 202 and res.get("job_id"), (code, res))
+        jid_http = str(res.get("job_id"))
+        term = {}
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            c2, term = req("/api/vocab/candidates/apply/status?data_root=%s&job_id=%s"
+                           % (q(root), q(jid_http)))
+            st = (term.get("job") or {}).get("state")
+            if st and st != "running":
+                break
+            time.sleep(0.2)
+        job_http = term.get("job") or {}
+        check("8(P1-三1①) 不填笔记库也能跑成功：终态 done 且 imported>=1",
+              job_http.get("state") == "done"
+              and int(job_http.get("imported") or 0) >= 1, job_http)
+        check("8(P1-三1①) 终态不再出现 ob_vault_root 开发者文案",
+              "ob_vault_root" not in json.dumps(job_http, ensure_ascii=False),
+              job_http.get("message"))
+        check("8(P1-三1①) 词库落到该 tmp 数据目录",
+              os.path.isfile(os.path.join(root, "vocab-user.json")))
+        # 复验口径②：坏类型仍 400（HTTP 层，契约未放宽）
+        for label, bad_vault in (("null", None), ("整数", 1), ("数组", ["x"])):
+            c3, r3 = req("/api/vocab/candidates/apply",
+                         {"data_root": root, "indices": [0], "rerun_old": False,
+                          "candidates_revision": server._vocab_candidates_revision(root),
+                          "ob_vault_root": bad_vault})
+            check("8(P1-三1②) ob_vault_root=%s -> 400" % label, c3 == 400, (c3, r3))
+        # P3-三2：data_root 类型错文案统一成「数据目录」口吻
+        for label, bad_root in (("null", None), ("整数", 1), ("数组", ["x"])):
+            c4, r4 = req("/api/vocab/candidates/apply",
+                         {"data_root": bad_root, "indices": [0], "rerun_old": False,
+                          "candidates_revision": "x"})
+            check("8(P3-三2) data_root=%s 文案是「数据目录」口吻" % label,
+                  c4 == 400 and "数据目录" in r4.get("error", "")
+                  and "data_root 须为" not in r4.get("error", ""), (c4, r4))
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(bad, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 9 复核返工守卫（P1-1/P1-2/P2-3/P2-4/P2-5/P2-6＋item5/6/7/8）
+
+def _server_source():
+    with open(os.path.join(ROOT, "app", "server.py"), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def part9_rework_guards(server):
+    """复核 8 项返工的回归守卫：源头无裸 exc ＋ 脱敏本体 ＋ 绑定/锁/回落口子。"""
+    root_a = build_root_a(server)
+    root_b = tempfile.mkdtemp(prefix="p12_r_b_")
+    noroot = make_data_root(server, "NOCAND", [RETRY_SPEC, PUB_SPEC])
+    link = os.path.join(os.path.dirname(root_a),
+                        os.path.basename(root_a) + "-link")
+    assert_tmp(root_a, "part9.A")
+    assert_tmp(root_b, "part9.B")
+    assert_tmp(noroot, "part9.nocand")
+    try:
+        src = _server_source()
+
+        # ---- 9a 源头守卫：全仓再无裸 exc 插值（reviewer 的扫描口径）
+        bare = re.findall(r"%\s*\(?\s*exc\s*[,)]", src)
+        check("9a 源头无裸 exc 插值（漏改处=0）", bare == [], bare[:5])
+        calls = [m.start() for m in re.finditer(r"_worker_note_error\(", src)
+                 if not src[:m.start()].rstrip().endswith("def")]
+        check("9a _worker_note_error 调用点 2 处", len(calls) == 2, len(calls))
+        check("9a 每处都带 _err_text（P1-1 源头）",
+              all("_err_text" in src[i:i + 200] for i in calls))
+        note_path = os.path.join(root_a, "data", "jobs", "run-x", "render", "r.md")
+        old_note = ("新稿已生成在数据目录：%s；入库未试：%s"
+                    % (note_path, OSError("打不开 " + note_path)))
+        check("9a 对照：旧写法 note 含真实绝对路径（=修复前会渲染/进 receipt）",
+              note_path in old_note)
+        check("9a 修复后 note 里同一异常已无路径",
+              note_path not in server._err_text(OSError("打不开 " + note_path)))
+        idx = src.find("入库未试：%s")
+        window = src[max(0, idx - 200):idx + 200]
+        check("9a 新稿 note 分支走 _err_text（P1-2 源头）",
+              idx > 0 and "_err_text(exc)" in window
+              and not re.search(r",\s*exc\s*\)", window), window[-140:])
+        # str(exc) 白名单：只许出现在取参层 400（ParamError）与 _err_text 本体
+        str_exc_bad = []
+        for _m in re.finditer(r"str\(exc\)", src):
+            _before = src[max(0, _m.start() - 170):_m.start()]
+            _after = src[_m.start():_m.start() + 70]
+            if "except ParamError" in _before or "type(exc).__name__" in _after:
+                continue
+            str_exc_bad.append(src[:_m.start()].count("\n") + 1)
+        check("9a str(exc) 白名单式（只剩取参层 400 与 _err_text 本体）",
+              str_exc_bad == [], str_exc_bad)
+        check("9a reveal 失败分支不再回 real 路径",
+              "(err or real," not in src and not re.search(r"%\s*\(raw,", src))
+
+        # ---- 9b 脱敏本体：含空格/中文/引号路径整段抹掉（P2-6）
+        space_path = "/Users/zzy/My Data/vault/note.md"
+        got = server._err_text(OSError("打不开 " + space_path))
+        check("9b 含空格路径整段抹掉（末段不泄漏）",
+              "Data" not in got and "vault" not in got and "note.md" not in got
+              and "打不开" in got, got)
+        got2 = server._err_text(OSError(space_path + " 打不开"))
+        check("9b 路径在前也整段抹掉",
+              "note.md" not in got2 and "/" not in got2, got2)
+        cjk = "/Users/zzy/需转录视频 葫芦军师/文件.md"
+        got3 = server._err_text(OSError(cjk))
+        check("9b 中文含空格路径整段抹掉",
+              "葫芦军师" not in got3 and "需转录" not in got3, got3)
+        got4 = server._err_text(
+            OSError("[Errno 2] No such file or directory: '/Users/a/b c/d.md'"))
+        check("9b 引号内路径整段抹掉（保留 errno 人话）",
+              "/Users" not in got4 and "No such file" in got4, got4)
+        spaced_dir = os.path.join(root_b, "My Data", "vault")
+        os.makedirs(spaced_dir, exist_ok=True)
+        got5 = server._err_text(OSError(
+            "No space left on device: '%s/note.md'" % spaced_dir))
+        check("9b 真 tmp 含空格目录不泄漏",
+              root_b not in got5 and "My Data" not in got5, got5)
+        # 人话不被误抹（项目真实文案逐条过一遍）
+        for human in ("Stage3+ table not empty (n=3)",
+                      "transcription-stage status not terminal",
+                      "状态库读不出来：file is not a database，请检查数据目录或先启动一次监听",
+                      "该任务状态已漂移（零执行），请重新预览",
+                      "批量恢复须在预览后确认（confirm:true），请先预览再确认"):
+            check("9b 人话原样保留：%s" % human[:14],
+                  server._err_text(human) == human, server._err_text(human))
+        check("9b 已打码文案再脱敏仍可读（不重复堆省略号）",
+              server._err_text("所选路径不存在：…/Downloads/需转录视频，请点浏览重选")
+              == "所选路径不存在：…，请点浏览重选",
+              server._err_text("所选路径不存在：…/Downloads/需转录视频，请点浏览重选"))
+        check("9b 非路径文本原样保留",
+              server._err_text(OSError("file is not a database"))
+              == "file is not a database")
+        check("9b 纯路径文本回省略号而非类型名",
+              server._err_text("/a/b/c") == "…"
+              and server._err_text(OSError("/a/b/c")) == "OSError")
+
+        # ---- 9c browse/reveal 失败分支不回原文/不回真实路径（P2-4）
+        miss = os.path.join(root_b, "no", "such", "dir", "x")
+        code, res = server._handle_browse({"path": [miss]})
+        check("9c browse 缺目录 400 且不回完整路径",
+              code == 400 and root_b not in res.get("error", "")
+              and "…/" in res.get("error", ""), (code, res))
+        code, res = server._handle_browse({"path": ["relative/dir"]})
+        check("9c browse 相对路径 400 且不回 %r 原文",
+              code == 400 and "'relative/dir'" not in res.get("error", ""), (code, res))
+        code, res = server._handle_reveal_post(body({"path": miss}))
+        check("9c reveal 缺文件 400 且不回完整路径",
+              code == 400 and root_b not in res.get("error", "")
+              and "…/" in res.get("error", ""), (code, res))
+        code, res = server._handle_reveal_post(body({"path": "relative/x"}))
+        check("9c reveal 相对路径 400 且不回原文",
+              code == 400 and "'relative/x'" not in res.get("error", ""), (code, res))
+
+        # ---- 9d job 绑定摘要缺失/非法一律 409（item 5）
+        jobs_b = os.path.join(root_b, "data", "recovery_jobs")
+        os.makedirs(jobs_b, exist_ok=True)
+        digests = (("缺键", "__MISSING__"), ("null", None), ("空串", ""),
+                   ("15位", "0123456789abcde"), ("非hex", "zzzzzzzzzzzzzzzz"),
+                   ("大写hex", "ABCDEF0123456789"))
+        for label, value in digests:
+            payload = {"job_id": "rec-bad", "state": "SUCCEEDED",
+                       "results": [{"run_id": "leak-run"}]}
+            if value != "__MISSING__":
+                payload["data_root_digest"] = value
+            with open(os.path.join(jobs_b, "rec-bad.json"), "w",
+                      encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            code, res = server._handle_retry_batch_status(
+                {"data_root": [root_b], "job_id": ["rec-bad"]})
+            check("9d 摘要%s -> 409" % label, code == 409, (label, code, res))
+            check("9d 摘要%s 不回 results" % label, "results" not in res, res)
+        # 显式兼容白名单：本改动之前写下的 job（abspath 口径摘要）仍可取
+        legacy = server._recovery_root_digest_legacy(root_b)
+        real = server._recovery_root_digest(root_b)
+        with open(os.path.join(jobs_b, "rec-legacy.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"job_id": "rec-legacy", "state": "SUCCEEDED",
+                       "data_root_digest": legacy,
+                       "results": [{"run_id": "legacy-run"}]}, fh)
+        code, res = server._handle_retry_batch_status(
+            {"data_root": [root_b], "job_id": ["rec-legacy"]})
+        check("9d 旧 abspath 口径 job 仍可取（显式兼容白名单）",
+              code == 200 and res.get("job_id") == "rec-legacy"
+              and bool(res.get("results")), (code, res))
+        check("9d 两种口径摘要确实不同（兼容分支非恒真）", legacy != real,
+              (legacy, real))
+        check("9d 摘要校验是白名单式（非法=拒）",
+              server._recovery_digest_ok("0123456789abcdef") is True
+              and server._recovery_digest_ok("0123456789ABCDEF") is False
+              and server._recovery_digest_ok("") is False
+              and server._recovery_digest_ok(None) is False)
+
+        # ---- 9e 同一目录多种写法都能取到 job（realpath 口径，item 6）
+        plan = plan_token_for(server, root_a, ["run-reuse"])
+        code, job = server._handle_retry_batch_post(body({
+            "data_root": root_a, "confirm": True,
+            "plan_token": plan["plan_token"], "run_ids": ["run-reuse"]}))
+        check("9e 基线 202", code == 202 and job.get("job_id"), (code, job))
+        jid = str(job.get("job_id"))
+        variants = (("尾斜杠", root_a + "/"),
+                    ("含..", os.path.join(root_a, "data", "..")),
+                    ("末段双斜杠", root_a.replace("/", "//", 1)))
+        for label, variant in variants:
+            code, res = server._handle_retry_batch_status(
+                {"data_root": [variant], "job_id": [jid]})
+            check("9e %s 写法能取到 job" % label,
+                  code == 200 and res.get("job_id") == jid, (label, code, res))
+        if os.path.lexists(link):
+            os.remove(link)
+        os.symlink(root_a, link)
+        code, res = server._handle_retry_batch_status(
+            {"data_root": [link], "job_id": [jid]})
+        check("9e 符号链接指向同一目录能取到 job",
+              code == 200 and res.get("job_id") == jid, (code, res))
+        # 对照（证明上面的断言不是恒真）：换回旧 abspath 口径 → 符号链接必被误拒
+        orig_digest = server._recovery_root_digest
+        try:
+            server._recovery_root_digest = server._recovery_root_digest_legacy
+            code, res = server._handle_retry_batch_status(
+                {"data_root": [link], "job_id": [jid]})
+            check("9e 对照：旧 abspath 口径下符号链接确会被 409 误拒（证明修复有牙）",
+                  code == 409 and "results" not in res, (code, res))
+        finally:
+            server._recovery_root_digest = orig_digest
+        code, res = server._handle_retry_batch_status(
+            {"data_root": [link], "job_id": [jid]})
+        check("9e 复原 realpath 口径后符号链接恢复可取", code == 200, (code, res))
+        # 大小写变体：realpath 不归一大小写 → 已知边界，但必须 fail-closed 不泄漏
+        upper = os.path.join(os.path.dirname(root_a),
+                             os.path.basename(root_a).upper())
+        case_insensitive = os.path.exists(upper)
+        code, res = server._handle_retry_batch_status(
+            {"data_root": [upper], "job_id": [jid]})
+        check("9e 大小写变体 fail-closed（不回 results）",
+              code in (404, 409) and "results" not in res,
+              ("本机卷大小写不敏感=%s" % case_insensitive, code, res))
+
+        # ---- 9e2 预览用符号链接路径建、提交用真路径确认（同一目录不得误判）
+        plan_link = plan_token_for(server, link, ["run-publish"])
+        code, job2 = server._handle_retry_batch_post(body({
+            "data_root": root_a, "confirm": True,
+            "plan_token": plan_link["plan_token"], "run_ids": ["run-publish"]}))
+        check("9e 预览走符号链接、确认走真路径 -> 202（同目录不误判）",
+              code == 202 and job2.get("ok"), (code, job2))
+        code, back = server._handle_retry_batch_status(
+            {"data_root": [link], "job_id": [str(job2.get("job_id"))]})
+        check("9e 该 job 反过来用符号链接也能取到",
+              code == 200 and back.get("job_id") == job2.get("job_id"),
+              (code, back))
+
+        # ---- 9f 候选清单缺失：哨兵版本不可过锁（item 8）
+        code, got_get = server._handle_vocab_candidates_get({"data_root": [noroot]})
+        check("9f 无清单时版本为哨兵值（不是可用锁）",
+              code == 200
+              and got_get.get("candidates_revision") == server.RECOVERY_CANDIDATES_ABSENT,
+              got_get)
+        job_snapshot = server._vocab_apply_job
+        before = tree_snapshot(noroot)
+        forged = server.RECOVERY_CANDIDATES_ABSENT
+        code, res = server._handle_vocab_candidates_apply(body({
+            "data_root": noroot, "indices": [0], "rerun_old": False,
+            "candidates_revision": forged}))
+        check("9f 伪造 absent 过锁 -> 409", code == 409, (code, res))
+        check("9f 伪造 absent 人话可读",
+              "没有待审清单" in res.get("error", ""), res)
+        check("9f 伪造 absent 零执行零写盘",
+              server._vocab_apply_job is job_snapshot
+              and tree_snapshot(noroot) == before
+              and not os.path.exists(os.path.join(noroot, "vocab-user.json"))
+              and not os.path.isdir(os.path.join(noroot, "data", "recovery_jobs")))
+        code, res = server._run_vocab_candidates_apply({
+            "data_root": noroot, "indices": [0], "rerun_old": False,
+            "candidates_revision": "deadbeefdeadbeef"})
+        check("9f（同步入口）无清单 -> 409", code == 409, (code, res))
+
+        # ---- 9g P2-新1：申请侧必须显式带 data_root（与查询侧对称，杜绝“提交成功但查不到”）
+        cand_root = make_data_root(server, "CAND", [RETRY_SPEC])
+        assert_tmp(cand_root, "part9.cand")
+        try:
+            write_candidates(cand_root, [
+                {"wrong": "对称错词", "right": "对称正词", "confidence": "high"}])
+            rev = server._vocab_candidates_revision(cand_root)
+            # 前端解析“生效目录”所依赖的两个真源必须在位
+            code, got_c = server._handle_vocab_candidates_get(
+                {"data_root": [cand_root]})
+            check("9g 候选 GET 回 data_root（前端据此解析生效目录）",
+                  code == 200 and got_c.get("data_root") == cand_root, got_c)
+            snap = server._listener_snapshot()
+            check("9g /api/start 快照带 default_data_root（前端兜底真源）",
+                  isinstance(snap.get("default_data_root"), str)
+                  and bool(snap.get("default_data_root")),
+                  snap.get("default_data_root"))
+            check("9g 显式传默认测试目录仍被接受（框留空场景合法）",
+                  server._take_required_data_root(
+                      {"data_root": server.DEFAULT_DATA_ROOT})
+                  == server.DEFAULT_DATA_ROOT)
+            check("9g 默认测试目录也在系统 tmp 下（不碰真实目录）",
+                  os.path.realpath(server.DEFAULT_DATA_ROOT).startswith(TMP_ROOT))
+            job_snap = server._vocab_apply_job
+            before = tree_snapshot(cand_root)
+            for label, payload in (
+                    ("缺键", {"indices": [0], "rerun_old": False,
+                              "candidates_revision": rev}),
+                    ("空串", {"data_root": "", "indices": [0], "rerun_old": False,
+                              "candidates_revision": rev})):
+                code, res = server._handle_vocab_candidates_apply(body(payload))
+                check("9g 异步入口 data_root %s -> 400" % label, code == 400,
+                      (code, res))
+                check("9g data_root %s 人话可读" % label,
+                      "数据目录" in res.get("error", ""), res)
+                code2, res2 = server._run_vocab_candidates_apply(payload)
+                check("9g 同步入口 data_root %s -> 400" % label, code2 == 400,
+                      (code2, res2))
+            check("9g 缺/空 data_root 零执行零写盘",
+                  server._vocab_apply_job is job_snap
+                  and tree_snapshot(cand_root) == before
+                  and not os.path.exists(os.path.join(cand_root, "vocab-user.json")))
+
+            # 正向：显式带目录可提交，且同一目录一定能查到该 job（对称性）
+            code, ok = server._handle_vocab_candidates_apply(body({
+                "data_root": cand_root, "indices": [0], "rerun_old": False,
+                "candidates_revision": rev}))
+            check("9g 显式带 data_root 可提交（202）",
+                  code == 202 and ok.get("job_id"), (code, ok))
+            vjob_id = str(ok.get("job_id"))
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                with server._state_lock:
+                    st = (server._vocab_apply_job or {}).get("state")
+                if st and st != "running":
+                    break
+                time.sleep(0.2)
+            code, got = server._handle_vocab_apply_status(
+                {"data_root": [cand_root], "job_id": [vjob_id]})
+            check("9g 提交成功 ⇒ 同目录一定能查到（对称，绝无 job:null）",
+                  code == 200 and (got.get("job") or {}).get("job_id") == vjob_id,
+                  (code, got))
+            # P2-三2：不断言结局的断言会给假信心——这里必须钉终态
+            job_term = got.get("job") or {}
+            check("9g 不带笔记库键的任务真的跑成功（终态 done、imported>=1）",
+                  job_term.get("state") == "done"
+                  and int(job_term.get("imported") or 0) >= 1, job_term)
+            check("9g 终态文案里没有 ob_vault_root 开发者口吻",
+                  "ob_vault_root" not in json.dumps(job_term, ensure_ascii=False),
+                  job_term.get("message"))
+            check("9g 词库确实落到该 tmp 数据目录",
+                  os.path.isfile(os.path.join(cand_root, "vocab-user.json")))
+            code, bare_still = server._handle_vocab_apply_status({})
+            check("9g 查询侧严格性未被放宽（无参仍 job:null）",
+                  code == 200 and bare_still.get("job") is None, (code, bare_still))
+            code, other = server._handle_vocab_apply_status(
+                {"data_root": [noroot], "job_id": [vjob_id]})
+            check("9g 换目录查仍 409 不回明细",
+                  code == 409 and other.get("job") is None, (code, other))
+            # 复验口径②：坏类型仍 400（不得因本次改法放宽 D-6 契约）
+            for label, bad_vault in (("null", None), ("整数", 1), ("布尔", True),
+                                    ("数组", ["x"]), ("对象", {}), ("小数", 1.5)):
+                for ename, call in (
+                        ("异步", lambda p: server._handle_vocab_candidates_apply(body(p))),
+                        ("同步", lambda p: server._run_vocab_candidates_apply(p))):
+                    c2, r2 = call({"data_root": cand_root, "indices": [0],
+                                   "rerun_old": False, "candidates_revision": rev,
+                                   "ob_vault_root": bad_vault})
+                    check("9h %s入口 ob_vault_root=%s -> 400（未放宽）" % (ename, label),
+                          c2 == 400, (ename, label, c2, r2))
+                    check("9h %s入口 ob_vault_root=%s 人话含字段名" % (ename, label),
+                          "ob_vault_root" in r2.get("error", ""), r2)
+
+            # 正对照：显式给笔记库字符串同样能成功（不因修法误伤该路径）
+            # 先换一条未导入的候选（9g 已把上一条标记 imported，否则只会“已导入”拒收）
+            write_candidates(cand_root, [
+                {"wrong": "带库错词", "right": "带库正词", "confidence": "high"}])
+            c3, r3 = server._run_vocab_candidates_apply({
+                "data_root": cand_root, "indices": [0], "rerun_old": False,
+                "candidates_revision": server._vocab_candidates_revision(cand_root),
+                "ob_vault_root": os.path.join(cand_root, "vault")})
+            check("9h 显式给笔记库字符串同样成功（正对照）",
+                  c3 == 200 and r3.get("ok"), (c3, r3))
+            check("9h 正对照确实导入≥1条", int(r3.get("imported") or 0) >= 1, r3)
+
+            # 修复前对照：旧形态（把可选键 None 写回 params）确实 400 → 任务必 failed
+            c5, r5 = server._run_vocab_candidates_apply({
+                "data_root": cand_root, "indices": [0], "rerun_old": False,
+                "candidates_revision": server._vocab_candidates_revision(cand_root),
+                "ob_vault_root": None})
+            check("9h 对照：旧形态（写回 None）确实 400 开发者文案（=修复前必失败）",
+                  c5 == 400 and "ob_vault_root" in r5.get("error", ""), (c5, r5))
+
+            # P1-三1 根因守卫（源头式）：可选键只许在“有值”时补，不许写回 None
+            src = _server_source()
+            check("9h 源码不再把可选键以 None 写回参数（P1-三1 根因）",
+                  '"ob_vault_root": vault_s' not in src, None)
+            guarded = True
+            for _m in re.finditer(r'\["ob_vault_root"\] = vault_s', src):
+                if "if vault_s" not in src[max(0, _m.start() - 90):_m.start()]:
+                    guarded = False
+            check("9h 每次写 vault_s 都有 if vault_s 守卫（同类扫查结果）",
+                  guarded, None)
+        finally:
+            shutil.rmtree(cand_root, ignore_errors=True)
+    finally:
+        try:
+            if os.path.lexists(link):
+                os.remove(link)
+        except OSError:
+            pass
+        shutil.rmtree(root_a, ignore_errors=True)
+        shutil.rmtree(root_b, ignore_errors=True)
+        shutil.rmtree(noroot, ignore_errors=True)
+
+
+def main():
+    print("tmp 根：%s" % TMP_ROOT)
+    server = load_server()
+    part1_strict_types(server)
+    part2_binding(server)
+    part3_field_consistency(server)
+    part4_candidate_lock(server)
+    part5_partial_update(server)
+    part6_error_redaction(server)
+    part7_regression(server)
+    part8_http_contract(server)
+    part9_rework_guards(server)
+    if FAILS:
+        print("\nSELFTEST FAIL %d/%d：%s" % (len(FAILS), CHECKS[0], FAILS))
+        return 1
+    print("\nSELFTEST ALL PASS（%d 项断言）" % CHECKS[0])
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        traceback.print_exc()
+        raise SystemExit(1)

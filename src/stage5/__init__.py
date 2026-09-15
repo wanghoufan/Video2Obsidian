@@ -3,7 +3,9 @@
 Implements STAGE5-PLAN S5-T01..S5-T05 (V1.8 Stage 5):
   - watcher (S5-T01): real watchdog Observer, delivery-only entries.
   - scan (S5-T02): full补扫 behind the Watcher Ready gate.
-  - reconcile (S5-T03): initial + periodic対账 over ``reconcile_*``.
+  - reconcile (S5-T03): initial + periodic対账 over ``reconcile_*``, plus the
+    ``PeriodicReconciler`` host thread that actually runs the periodic pass
+    (P1-1 fix; started in ``run_startup``, stopped in ``shutdown``).
   - startup (S5-T04): 11-step assembly to RUNNING + delivery workers.
   - This package (S5-T05): assembly exports + thread-safety复核 helper
     (``triple_race_deliver`` fires the three routes concurrently against
@@ -27,7 +29,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from stage2 import runs as _runs  # noqa: E402
 from stage2.candidate import discover as _default_deliver  # noqa: E402
 
-from stage5.reconcile import initial_reconcile, periodic_reconcile  # noqa: E402
+from stage5.reconcile import (  # noqa: E402
+    RECONCILE_INTERVAL_S,
+    STOP_TIMEOUT_S,
+    PeriodicReconciler,
+    initial_reconcile,
+    periodic_reconcile,
+)
 from stage5.scan import startup_scan  # noqa: E402
 from stage5.startup import (  # noqa: E402
     STARTUP_ORDER,
@@ -36,7 +44,11 @@ from stage5.startup import (  # noqa: E402
     shutdown,
 )
 from stage5.watcher import (  # noqa: E402
+    BUSY_CHECK,
     DEBOUNCE_S,
+    FLUSH_TICK_S,
+    STABLE_PROBE_S,
+    STABLE_ROUNDS,
     VIDEO_SUFFIXES,
     Watcher,
     WatcherNotReadyError,
@@ -110,10 +122,17 @@ def triple_race_deliver(
 
 
 __all__ = [
+    "BUSY_CHECK",
     "DEBOUNCE_S",
+    "FLUSH_TICK_S",
+    "RECONCILE_INTERVAL_S",
+    "STABLE_PROBE_S",
+    "STABLE_ROUNDS",
     "STARTUP_ORDER",
+    "STOP_TIMEOUT_S",
     "VIDEO_SUFFIXES",
     "DeliveryWorkers",
+    "PeriodicReconciler",
     "Watcher",
     "WatcherNotReadyError",
     "canonical",

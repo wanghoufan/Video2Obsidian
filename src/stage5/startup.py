@@ -9,11 +9,15 @@ Implements STAGE5-PLAN S5-T04 only:
     -> Initial Reconciliation -> Start Workers -> RUNNING.
     The returned ``order`` array holds all 11 step names verbatim; any
     inversion or skip is a FAIL by plan.
+  - The same "Start Workers" step also starts the periodic reconciliation
+    host (P1-1 fix): a 30–60s补漏扫描 so a dropped/coalesced FS event can no
+    longer strand a finished file. It shares ``initial_reconcile``'s口径.
   - ``DeliveryWorkers`` are delivery-only: bounded queue-fed threads whose
     only DB entry is the ``discover`` call per submitted path. They hold no
     other capability by construction (this module's only DB entries are
     ``discover`` and the ``reconcile_*`` calls inside ``reconcile.py``).
-  - ``shutdown`` stops workers then the watcher; it is idempotent.
+  - ``shutdown`` stops the periodic reconciler, then workers, then the
+    watcher; it is idempotent.
   - A Ready timeout never leaves a half start: the watcher is stopped and a
     RuntimeError is raised instead of reporting RUNNING.
 
@@ -34,7 +38,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from stage2 import instance as _instance  # noqa: E402
 from stage2.candidate import discover as _default_deliver  # noqa: E402
 
-from stage5.reconcile import initial_reconcile  # noqa: E402
+from stage5.reconcile import PeriodicReconciler, initial_reconcile  # noqa: E402
 from stage5.scan import startup_scan  # noqa: E402
 from stage5.watcher import Watcher, canonical, start_watch  # noqa: E402
 
@@ -132,7 +136,16 @@ class DeliveryWorkers:
         return self._stop.is_set()
 
 
-def _fail_closed(watcher: Watcher | None, workers: DeliveryWorkers | None) -> None:
+def _fail_closed(
+    watcher: Watcher | None,
+    workers: DeliveryWorkers | None,
+    reconciler: "PeriodicReconciler | None" = None,
+) -> None:
+    if reconciler is not None:
+        try:
+            reconciler.stop()
+        except Exception:
+            pass
     if workers is not None:
         try:
             workers.stop()
@@ -160,6 +173,7 @@ def run_startup(
     order = list(first["order"])
     watcher: Watcher | None = None
     workers: DeliveryWorkers | None = None
+    reconciler: PeriodicReconciler | None = None
     try:
         # Step 6.
         watcher = start_watch(input_abs, data_abs, asr_profile_hash)
@@ -192,19 +206,24 @@ def run_startup(
         # Step 10.
         workers = DeliveryWorkers(data_abs, asr_profile_hash,
                                   count=worker_count).start()
+        # 同一段内起周期兜底对账（P1-1）：FS 事件被合并/丢弃时靠它补回，
+        # 扫描口径与 initial_reconcile 完全一致（幂等由 discover 保证）。
+        reconciler = PeriodicReconciler(input_abs, data_abs,
+                                        asr_profile_hash).start()
         order.append("Start Workers")
         # Step 11.
         order.append("RUNNING")
         if order != STARTUP_ORDER:
             raise AssertionError("startup order drift: %r" % (order,))
     except Exception:
-        _fail_closed(watcher, workers)
+        _fail_closed(watcher, workers, reconciler)
         raise
     return {
         "order": order,
         "running": True,
         "watcher": watcher,
         "workers": workers,
+        "reconciler": reconciler,
         "scan": scan_out,
         "initial_reconciliation": rec_out,
         "instance": first,
@@ -214,10 +233,17 @@ def run_startup(
 
 
 def shutdown(handle: dict | None) -> dict:
-    """Stop workers then the watcher. Idempotent; tolerates partial handles."""
+    """Stop reconciler, workers then the watcher. Idempotent; tolerates partial handles."""
     workers_stopped = True
     watcher_stopped = True
+    reconciler_stopped = True
     if handle:
+        reconciler = handle.get("reconciler")
+        if reconciler is not None:
+            try:
+                reconciler.stop()
+            except Exception:
+                reconciler_stopped = False
         workers = handle.get("workers")
         if workers is not None:
             try:
@@ -234,4 +260,5 @@ def shutdown(handle: dict | None) -> dict:
         "running": False,
         "workers_stopped": workers_stopped,
         "watcher_stopped": watcher_stopped,
+        "reconciler_stopped": reconciler_stopped,
     }

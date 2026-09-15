@@ -72,6 +72,11 @@ DEFAULT_PROFILE_HASH = "local-console-v1"
 
 CODE_MLX_MISSING = "PRECHECK_MLX_MISSING"
 
+# P1-FIX-1：发布门复核「源文件此刻是否仍在变」的采样间隔（秒）。
+# 静默窗+多轮采样挡不住「写方停顿超过投递门」的文件，这一道在处理/发布前再核
+# 一次 size/mtime；只有 mtime 变了才多等这一个间隔做第二采样，正常路径零成本。
+STALE_SOURCE_PROBE_S = 2.0
+
 _state_lock = threading.Lock()
 _listener = {
     "running": False,
@@ -4615,6 +4620,46 @@ def _transcribe_audio(job_asr_dir: str, src_path: str,
             "engine_calls": int(out.get("asr_calls") or 1)}
 
 
+def _stale_source_reason(src: dict, src_real: str,
+                         probe_s: float = STALE_SOURCE_PROBE_S) -> str | None:
+    """源文件在「入队 → 此刻」之间又变了？变了返回原因，没变返回 None。
+
+    P1-FIX-1（半截不得发布）：`discover` 落库时把当时的 size/mtime 记进
+    `sources`（`source_size`/`source_mtime_ns`）。这条 run 的身份就是那份快照；
+    真正开跑/发布之前再核一次，任何一项对不上都说明「文件还在写，或已被换掉」，
+    此时转写只能得到截断内容 → 调用方**不得进入转写/发布链路**。
+
+    判定口径（宁可严，但不得误杀静止的真文件）：
+      - size 与快照不一致 → 变（半截被追加完 / 被替换）：拦；
+      - size 一致但 mtime 变了 → 再看一眼是否**此刻仍在变**（相隔 probe_s 采样）：
+        仍在变 → 拦；已静止 → 放行（用户 touch / 元数据变动不该把任务判死）。
+    快照缺失或 0/-1（旧行）→ 无从比对，不拦。
+    """
+    try:
+        want_size = int(src.get("source_size"))
+        want_mtime = int(src.get("source_mtime_ns"))
+    except (TypeError, ValueError):
+        return None
+    if want_size <= 0 or want_mtime <= 0:
+        return None
+    try:
+        first = os.stat(src_real)
+    except OSError:
+        return None      # 取不到 → 交给上面的「找不到」分支，不重复判定
+    if first.st_size != want_size:
+        return ("这个视频在排队期间还在变（大小 %d→%d）"
+                % (want_size, first.st_size))
+    if first.st_mtime_ns != want_mtime:
+        time.sleep(probe_s)
+        try:
+            second = os.stat(src_real)
+        except OSError:
+            return "这个视频在排队期间还在变（现在读不到了）"
+        if (second.st_size, second.st_mtime_ns) != (first.st_size, first.st_mtime_ns):
+            return "这个视频在排队期间还在变（尺寸/时间戳仍在动）"
+    return None
+
+
 def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
                      run_id: str, profile_hash: str) -> dict:
     """单个 QUEUED AUTO run 端到端：转写→Norm/Render→Publish（vault 为空则停 Render）。"""
@@ -4666,6 +4711,16 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
     if not _is_under_root(src_real, input_real):
         return {"run_id": run_id, "state": "SKIP",
                 "verdict": "源不在当前视频文件夹内，已忽略"}
+    # P1-FIX-1 第一道发布门（转写前）：源快照对不上就别开跑，省下整段算力，
+    # 也避免把半截内容送进 raw/render/publish 链路。
+    stale = _stale_source_reason(src, src_real)
+    if stale:
+        out = {"run_id": run_id, "state": "FAIL", "source_filename": _src_fn,
+               "verdict": "%s→这一条已跳过，不会写进笔记库；等文件写完后它会自动"
+                          "按最新内容重新排队，不用手动重试" % (stale,)}
+        _worker_record(out)
+        _worker_clear_current()
+        return out
 
     filename = os.path.basename(src_real) or run_id
     _worker_set_current(run_id, filename, STAGE_DISCOVER)
@@ -4858,6 +4913,22 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
         return out
 
     _worker_set_current(run_id, filename, STAGE_PUBLISHING)
+    # P1-FIX-1 第二道发布门（写笔记库前）：转写这几分钟里源文件又变了（半截被
+    # 追加完/被替换）→ 现在写的笔记就是截断内容，宁可晚跑重跑也不落盘。
+    stale = _stale_source_reason(src, src_real)
+    if stale:
+        out = {"run_id": run_id, "state": "FAIL", "source_filename": _src_fn,
+               "verdict": "%s→这条没有写进笔记库（避免留下截断的稿子）；"
+                          "它会在文件写完后按最新内容重新排队，不用手动重试"
+                          % (stale,)}
+        try:
+            _receipt("STALE_SOURCE_SKIPPED", out["verdict"],
+                     {"whisper_calls": engine_calls})
+        except Exception:
+            pass
+        _worker_record(out)
+        _worker_clear_current()
+        return out
     try:
         from stage4.publish import initial_publish  # noqa: E402  (只读复用)
         pub = initial_publish(con, job_dir, rend["render_revision_id"],

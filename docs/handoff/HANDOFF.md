@@ -1,16 +1,16 @@
-# HANDOFF｜P1-6＋P1-8 已收口推送 main（2026-09-15 19:20）：P0 全清＋P1-2/3/4/5/6/7/8 全 PASS，只剩 P1-1，恢复先读我
+# HANDOFF｜P1 全部收口＋冻结（2026-09-15 22:10）：P0 全清＋P1-1…P1-8 全 PASS（P1-1 链修掉监听漏发现 P1），下一步 Windows 迁移（另仓），恢复先读我
 
 > 旧版字段（governance-state / Evidence / Human Gate / Promotion / Dispatch ID）已废弃，不填。
 > 本文件即恢复入口。「一/二/三」三节为本轮梳理版（2026-09-15 14:10 重写，旧版细节压缩进各链报告与 git 历史）；**Phase1 全过程记录**（用户四条反馈原文、九项 HD 决策、16 条真相、迁移决策、额度事件）与**迁移前项目交接原文**见本文件后段各节，逐字未动。
 
-- Captured at（YYYY-MM-DD HH:MM）：**2026-09-15 19:20（TM 收口更新）**；原始暂停快照 14:10（用户指令「开发先到这里暂时结束」）；**P1-6＋P1-8 两条链已收口推送 `main`；下一步只剩 P1-1**
+- Captured at（YYYY-MM-DD HH:MM）：**2026-09-15 22:10（TM 收口 + 冻结）**；本阶段 P1 全部收口并推送 `main`，随后**冻结版本**（tag）；下一步＝**Windows 11 迁移**（另建独立仓库，方案已由 planner 产出：`docs/pm/WINDOWS-MIGRATION-PLAN.md`，**只出计划不施工**）
 - PROJECT_PHASE：**DEVELOP**（Phase2 未关闭）
 - PLAN_VERSION：`PRODUCT_PLAN_V1.3`（正文最新；文末「Readiness Score / 本轮真实验证记录」两段仍为 V1.2 旧文本，见 `docs/pm/PRODUCT_PLAN.md` 顶部收尾注记）
 - PLAN_READINESS_SCORE：**未达 90**（planner 自评 89；Research Reviewer 独立 83；用户已知并决定开工）
 - PLAN_GATE：**APPROVED**（用户明确进 DEVELOP；不是 Readiness 达标通过）
 - DEV_BASELINE：`PRODUCT_PLAN_V1.3`（禁随意改 Plan；变更只走 Change C）
 - CHANGE_REQUEST：**B**（用户 2026-09-15 授权「继续推进」「按分工表为准」「commit/push 默认 main 不再逐次问」）
-- Stage ID（本阶段叫什么）：**DEVELOP-P1-8 收口**（默认端口 8765→**8899**＋`V2O_PORT` 覆盖，四角色链全 PASS，已推 `main`）；P1-6 亦已于 18:50 收口
+- Stage ID（本阶段叫什么）：**DEVELOP-P1-1 收口（P1 收官）**：监听漏发现修复（P1-1-FIX）＋真实规模/真机验证闭环，四角色链全 PASS，已推 `main` 并冻结
 ---
 
 ## 一、当前的工作进展
@@ -26,10 +26,12 @@
 | P1-5 | 词库与候选易用性修整（5 派） | `7bc8cec` | PASS 0/2 |
 | P1-7 | 产品改名「懒得笔记」（7 派＋supervisor） | `da0f572` | PASS 0/2（QA-P17-001 判 CLOSED） |
 | P1-6 | 布局与历史分页（FR-10/11/12/15＋D-15，4 派） | `4d26865`＋收口 `f611824` | PASS 0/2（qa 的 HTTP 段环境限制由本窗口补位跑通） |
-| P1-8 | 默认端口去硬编码 8765→**8899**＋`V2O_PORT` 覆盖（5 派，清历史 P2-4/P2-5） | `（本轮推送，见 git log HEAD）` | PASS 0/2（qa 的 HTTP／新牙口环境限制由本窗口补位跑通） |
+| P1-8 | 默认端口去硬编码 8765→**8899**＋`V2O_PORT` 覆盖（5 派，清历史 P2-4/P2-5） | `7b97aaa` | PASS 0/2（qa 的 HTTP／新牙口环境限制由本窗口补位跑通） |
+| P1-1 | 真实规模/真机验证（9 条真实视频＋布局＋分页交互；4 派） | 证据见 §一.3 | qa 首轮 **FAIL**：独立复现 **BUG-P11-1**（监听漏发现，P1）→ 转入 P1-1-FIX |
+| P1-1-FIX | 监听可靠性修复（cp 大文件漏发现；6 派含返工） | `（本轮推送）` | PASS 0/2（reviewer 首轮**打回** → builder 返工 → 返工复核 **PASS**；qa 判 BUG **CLOSED**；supervisor **PASS** 放行） |
 
 - 各链遗留 P3/P2 均记 backlog（见下「待排期」），无未收口 P0/P1。
-- P1 顺序（TM 定）：P1-2✅ → P1-3✅ → P1-4✅ → P1-5✅ → P1-7✅ → P1-6✅（18:50） → **P1-8✅（19:20，用户新加）** → **P1-1（最后一项：真实规模/长视频/61 篇基准重验证；并入 P1-5 链 P3-1「真 16 条诊断墙钟」实测）**。
+- P1 顺序（TM 定）：P1-2✅ → P1-3✅ → P1-4✅ → P1-5✅ → P1-7✅ → P1-6✅（18:50） → P1-8✅（19:20） → **P1-1＋P1-1-FIX（2026-09-15 晚，P1 收官批）** → **冻结版本** → Windows 迁移（另仓）。
 
 ### 2. P1-6 链状态（**已收口**，证据在此备查）
 
@@ -45,15 +47,25 @@
 - **暂停收尾（neat-freak 2026-09-15 本轮，PASS）**：P1-7 review 加行号勘误注记（:370→:364）、P1-6 review 加 numstat 口径注记；删仓根 `.DS_Store`；`__pycache__` 全仓零命中；业务文件零触碰。
 - **环境事件（如实记）**：auto mode 安全分类器 11:50–13:00 限流（glm 端点 429，16:55 重置）拦 Bash 命令，用户拍板在 settings 配 `subagents.agents.autoModeClassifier.model=hy3`（x0.00 credits 档）恢复；hy3 对长复合命令仍偶发判不动 → 对策＝简单命令/任务书落文件让 codex 自读/文件编辑通道写账本，连续失败挂定时重试。
 - **环境事件 2（2026-09-15 18:35–18:45，TM）**：hy3 恶化——对 `codex exec` 派工命令**持续**返回 `Max turns (1) exceeded`（同轮连拦 5 次：长提示词／短提示词／`bash 脚本`／`cp` 全部被拦，仅 `codex --version` 等极短命令过），P1-6 派 qa 因此卡住。**用户拍板换分类器**，实走两步：① `hy3` → `glm-5.3-flash`（热加载生效但**同样** `Max turns (1) exceeded`，证明瓶颈是**分类器单轮预算**而非模型档位）② `glm-5.3-flash` → **`deepseek-v4.1-flash`**（**通过**，派工命令放行）。现网值＝`deepseek-v4.1-flash`；改动前原件备份 `/tmp/settings.json.bak-20260915`。**配置热加载生效（无需重启会话）**；不改默认权限模式（仍 `auto`）。
-- **环境事件 3（端口，TM 18:30 实测 → 19:20 已解）**：**8765 被另一个无关项目占用**（`/Users/zzymima0000/Downloads/视频笔记 ob/葫芦军师/红利打新底仓计算器_V1.2正式长期版/server.py`，PID 6586，11:41 启动）。**已由 P1-8 解决**：本项目默认端口改 **8899**，可用 `V2O_PORT` 覆盖；**仍禁 bind/kill 8765 与 PID 6586**。真机目检走 8899（注意 localStorage 按 origin 隔离，旧 8765 origin 的隐藏/主题偏好不会自动带过来）。
+- **环境事件 3（端口，TM 18:30 实测 → 19:20 已解）**：**8765 被另一个无关项目占用**（`/Users/zzymima0000/Downloads/视频笔记 ob/葫芦军师/红利打新底仓计算器_V1.2正式长期版/server.py`，PID 6586，11:41 启动）。**已由 P1-8 解决**：本项目默认端口改 **8899**，可用 `V2O_PORT` 覆盖；**仍禁 bind/kill 8765 与 PID 6586**。真机目检走 8899（注意 localStorage 按 origin 隔离，旧 8765  origin 的隐藏/主题偏好不会自动带过来）。
+
+### 3. P1-1 ＋ P1-1-FIX 链状态（**已收口**，P1 收官批）
+
+- **P1-1（真实规模／真机验证，TM 本窗口执行）已完成**：真实 whisper 通路打通（9 条真实视频全成功：8 条 47–223MB 单条 86–214 秒＋**462MB 长视频 122 秒**；vault 出真实中文正文）；真机布局核验（`.flowbar` 高 39px／`position:static`、1280px 两列 `913px 300px`、960/900/720px 单列、无横向滚动、浅色）；完成列表交互真机（默认 20 条＋失败 16 可见 → 展开 20/40/60/61 无重复无遗漏 → 隐藏可逆）。**真机手段：本窗口 venv＋真实视频＋headless Chrome/CDP**（codex 沙箱禁 bind，真机类历来由本窗口补）。
+- **过程中发现并修复 BUG-P11-1（监听漏发现，P1）**：`cp` 大文件偶发不被发现（`watcher.py` 首事件即投递＋0.25s 丢事件；`periodic_reconcile` 是死代码）。qa 独立复现（投递时 size=1024／最终 8192／无重投）→ **P1-1-FIX**：稳定判定改「静默 3.0s＋采样 2.0s×3 轮（最小年龄 7s）＋独占占用检测」＋**接入周期 reconcile（45s 兜底）**＋**半截不发布两道门**（源 size/mtime 与入库快照不一致则不转写／不建 job／不写 vault）；6 文件（含 `app/server.py` +71，reviewer 判必要不误伤）＋新增 36 断言。
+- **四角色链**：builder 首版 → **code-reviewer 打回**（慢写误判致半截投递）→ builder 返工 → **reviewer 返工复核 PASS** → qa 返工复验（**BUG-P11-1 CLOSED**；任务级 FAIL 仅因沙箱禁 bind）→ **supervisor PASS**（三套 **571/167/58 rc=0**；BUG CLOSED 复核成立；边界实测 **6.5s 安全／7.0s 起投半截**；正常发布端到端不误伤）。
+- **TM 补位证据**：`contract 571 rc=0`（本窗口）；e2e（实例 8892＋新 tmp）系统 `cp` **未 touch** → **5 秒自动发现 → 90 秒完成 → vault 出正常笔记（19,453B，`-r--r--r--`）**。
+- **已知限制（supervisor 要求必须落字，已写入 README 中英「已知限制」节）**：拷贝/下载中若**长时间停顿（>约 7 秒）**再续写，可能先按当时内容出一份**不完整稿**，完整稿因 No-Clobber 被挡（实测停 40s：半截稿 402B 落 vault、完整稿 `PUBLISH_BLOCKED`）→ 处理办法：删除该 md 后重新放入视频。**这是 P1-1-FIX 的已知残留（原 P2-a／P2-b 合并）**，非静默。
+- **backlog（挂账，非阻塞）**：① 上述「长停顿→半截稿」根治需结构级 Change B（发布前最终校验＋失败标记语义）；② **P2-c 幽灵行**（被门拦下的 run 在 `run_summary` 显示成「排队中」，撞用户历史投诉，supervisor 建议修）；③ **P3-e**（`shutdown` 谎报 `reconciler_stopped`）；④ **P3**（`contract` 的 M4 最小年龄门差分不可观测）；⑤ 项目**至今无依赖声明文件**（缺 `watchdog` 这类会在新机器踩坑）；⑥ 「源文件不在原位」专门文案未用真实形状夹具复验（P1-1 未覆盖项）。
 
 ## 二、下一步的任务
 
 - **下一步（Next Single Action，按序）**：
   0. **（已完成 18:50）P1-6 收口**：qa PASS → supervisor PASS → 两账本 → 推送 `main`（`4d26865`＋`f611824`）。
   1. **（已完成 19:20）P1-8 默认端口去硬编码**：builder（首版＋补两条）→ code-reviewer（首轮 P2×2 → 返工复核 PASS）→ qa（BUG=0）→ supervisor（PASS，HTTP／新牙口由本窗口补位）。默认 **8899**＋`V2O_PORT` 覆盖、`start.sh` 端口单点；残留 P3×6 进 backlog。
-  2. **（当前项）P1-1**（最后一个 P1：真实规模/长视频/61 篇基准重验证；并入 P1-5 链 P3-1「真 16 条诊断墙钟」实测；需真实 whisper 与长耗时，用户知情）。
-  3. 收尾：experience-recorder ＋ neat-freak 各一次（每阶段只派一次）。
+  2. **（已完成）P1-1 ＋ P1-1-FIX 收口**：supervisor PASS（放行三条件已办：TASK 账本补行／README 落已知限制／P2 定级措辞更正）→ 推送 `main`；细节见 §一.3。
+  3. **（当前项·用户 2026-09-15 指令）冻结 → Windows 迁移**：① 推送存档后**冻结版本**（打 tag）② Mac 端仓库改名加 **Mac** 后缀（`Video2Obsidian-Mac`）③ Windows 端另建独立仓库 `Video2Obsidian-Windows`，按 `docs/pm/WINDOWS-MIGRATION-PLAN.md` 施工——**用户已明确：本轮只出计划，暂不施工** ④ 两边仓库隔离、互不覆盖。
+  4. 收尾：experience-recorder ＋ neat-freak 各一次（每阶段只派一次）。
 - **人要拍什么板（只问大事）**：
   1. **词库三铁律机械保证**（仍挂，不阻塞任何 P1）：「长 wrong 排前」「正词含 wrong 即删条」代码无机械保证。选项：① 只补口径文档（TM 建议）；② 补代码保证（须同改 `_user_rules_revision` 规范化，否则同内容异序被打进死路——见 P1-5 复检节技术约束）；③ 补断言钉现状。
   2. 是否换主用模型：以分工表为准，用户给精确 ID 才改表。
@@ -72,7 +84,7 @@
 - **红线**：commit/push 默认走 `main` 不再逐次问（用户授权）；**不碰 secrets**；不改 V1.10/V2.0 封存；`docs/sop/` 仅模板示例；`.codebuddy/` 会话产物不提交不删除。
 - **数据安全**：测试只用**外置 tmp＋合成数据**；真实视频目录与 Obsidian 库**禁写**；凡调 handler 的测试首行断言 `data_root` 在 tmp 下；只读真实库先拷 tmp、用完即删。
 - **No-Clobber**：已发布笔记永不覆盖；缺失 vault 不重建；user-edited＝一切字节差异。
-- **服务**：`stage0bench venv python` 跑 `app/server.py`，**默认端口 8899（P1-8 起；`V2O_PORT=<端口>` 可覆盖）**，或直接用 `app/start.sh` 一键起（端口自动透传＋开浏览器）；**改 `app/` 或 `src/` 后必须重启再验**；8765 属另一无关项目（PID 6586），**禁 bind、禁 kill**。
+- **服务／环境（2026-09-15 P1-1 期间重建，**历史 HANDOFF 写的 `stage0bench venv` 已不存在**）**：本机现有 venv ＝仓库根 **`.venv`**（`uv venv --python 3.12` 建的 CPython 3.12.13，已被 `.gitignore` 忽略，且 `app/start.sh` 的查找顺序里就有它）＋ 依赖 **`mlx-whisper`＋`watchdog`**（后者 `src/stage5/watcher.py:33` 需要；**项目至今无依赖声明文件，属欠账**）。起服务：`.venv/bin/python app/server.py`（默认端口 **8899**，`V2O_PORT=<端口>` 可覆盖），或用 `app/start.sh` 一键起（自动透传＋开浏览器）。whisper 模型本地缓存：`~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo`（1.5G）。**改 `app/` 或 `src/` 后必须重启再验**；8765 属另一无关项目（PID 6586），**禁 bind、禁 kill**。
 - **主题**：默认必须**浅色**（`data-theme="light"`）；自动化**禁点真机主题开关**，用「抽源码＋node 桩」验。
 - **词库三铁律**：wrong ≥ 2 字；正确文本含 wrong 即删条；长 wrong 排前；上限 500（①③有机械保证，②③「删条/排前」暂无——见待拍板项）。
 - **产品名**：**「懒得笔记」** 已全量落地（P1-7）；GitHub 仓库名与内部 `v2o-*` 标识不动。

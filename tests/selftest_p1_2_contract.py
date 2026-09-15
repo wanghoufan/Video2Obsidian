@@ -2354,6 +2354,576 @@ def part14_p16_completed_cursor(server):
         shutil.rmtree(root, ignore_errors=True)
 
 
+# --------------------------------------------- 15 P1-1 监听可靠性（事件竞态）
+#
+# 牙口（对应 DEVELOP-P1-1-FIX 首版 + 返工 P1-FIX-1）：
+#   A 大文件分批写（cp 形状）：created + 多次 modified + 静默 →
+#     **恰好投递 1 次**，且投递瞬间 size == 最终 size（不投半截文件）；
+#   B 事件全丢：不投任何 fs 事件，只让文件出现在目录里 →
+#     **≤1 个 reconcile 周期**内被周期兜底建出任务行；
+#   C 幂等：同文件先被事件投递、再被周期扫到 → **仍只 1 个 run**（不重复转写）。
+#   F 生产默认档钉值：静默窗/采样间隔/采样轮数/占用检测开关（改小即红，对 M4/M5）；
+#   G 慢写停顿（< 投递门）不得投半截：中段停顿不投、只 1 次且 size==final；
+#   H 占用检测：文件被别的写方持锁 → 不投递；释放后投完整件；
+#   I 半截不发布：源快照对不上 → 不转写、不写 vault、不建 job 目录（app 发布门）；
+#   J 周期路身份未变不重投（P2-1 成本修）：第二遍 skipped=True 且 run 不增；
+#   K PeriodicReconciler.stop() 不谎报（P2-2）：收不掉就返回 False 且仍算在跑。
+# 另钉 /api/status 顶层与任务行的字段集（本修复不得新增/缺失字段）。
+
+P15_STATUS_KEYS = [
+    "collected_at", "completed_limit", "completed_page", "completed_total",
+    "counts_by_state", "error_count", "filtered", "input_root", "next_cursor",
+    "ok", "recent_runs", "run_summary",
+]
+P15_RUN_ROW_KEYS = [
+    "created_at", "run_id", "source_dir", "source_dir_tail",
+    "source_filename", "source_id", "source_path", "status", "updated_at",
+]
+P15_RECONCILE_INTERVAL_S = 0.5      # 测试用短周期；线上默认 45s
+# 生产投递门钉值（P1-FIX-1；改小即红——首版 1.0/0.5 双采样正是被停顿 2.5s 击穿）
+P15_QUIET_S = 3.0
+P15_PROBE_S = 2.0
+P15_ROUNDS = 3
+
+
+def _p15_make_root(tag):
+    """建「真监听」夹具根：input 目录 + 已持锁的 data_root（确保在 tmp 下）。
+
+    与 part14 的纯 SQLite 夹具不同：这条链要真跑 discover（require_lock），
+    所以必须走 instance.acquire + init_db 建真库。
+    """
+    from stage2 import instance as _instance
+    from stage2 import store
+
+    root = tempfile.mkdtemp(prefix="p15_watch_%s_" % tag)
+    assert_tmp(root, "part15_p11_watch_reliability")
+    inp = os.path.join(root, "input")
+    data = os.path.join(root, "data")
+    os.makedirs(inp)
+    _instance.acquire(data)
+    store.init_db(data)
+    return root, inp, data
+
+
+def _p15_drop_root(root, data):
+    from stage2 import instance as _instance
+
+    try:
+        _instance.release(data)
+    except Exception:
+        pass
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _p15_wait(pred, timeout, tick=0.05):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(tick)
+    return pred()
+
+
+def _p15_count(data, sql):
+    from stage2 import store
+
+    con = sqlite3.connect(store.central_db_path(data))
+    try:
+        return con.execute(sql).fetchone()[0]
+    finally:
+        con.close()
+
+
+def _p15_rows(data, sql):
+    from stage2 import store
+
+    con = sqlite3.connect(store.central_db_path(data))
+    try:
+        return con.execute(sql).fetchall()
+    finally:
+        con.close()
+
+
+def part15_p11_watch_reliability(server):
+    """P1-1：往监听目录 cp/下载的大文件必须被自动发现（三项修法牙口）。"""
+    from stage5.reconcile import PeriodicReconciler
+    from stage5.watcher import Watcher
+
+    # ---------------- A：大文件分批写 → 恰好投递 1 次且投的是完整文件
+    root, inp, data = _p15_make_root("a")
+    try:
+        calls = []
+        calls_lock = threading.Lock()
+
+        def _recorder(path, dr, h):
+            size = os.path.getsize(path) if os.path.exists(path) else None
+            with calls_lock:
+                calls.append((time.time(), size))
+            return {"status": "recorder", "size": size}
+
+        w = Watcher(inp, data, "profhash", on_deliver=_recorder,
+                    debounce_s=0.2, stable_s=0.2)
+        path = os.path.join(inp, "big.mp4")
+        with open(path, "wb") as fh:
+            fh.write(b"A" * 65536)          # cp 的 on_created 时刻：文件刚建
+        w._on_fs_event(path, False)
+        for _ in range(5):
+            time.sleep(0.1)
+            with open(path, "ab") as fh:    # cp 持续写
+                fh.write(b"A" * 65536)
+            w._on_fs_event(path, False)
+        final = os.path.getsize(path)
+        write_done = time.time()
+        _p15_wait(lambda: len(calls) >= 1, 15.0)
+        time.sleep(1.5)                     # 静默期：不得再补投
+        w.stop()
+        check("15a 大文件分批写：恰好投递 1 次", len(calls) == 1, len(calls))
+        check("15a 投递瞬间 size == 最终 size（投的是完整文件）",
+              bool(calls) and calls[0][1] == final, (calls[:1], final))
+        check("15a 不是首事件即投递（投递晚于写完）",
+              bool(calls) and calls[0][0] > write_done, calls[:1])
+    finally:
+        _p15_drop_root(root, data)
+
+    # ---------------- B：零 fs 事件 → 周期兜底 ≤1 周期内建任务
+    root2, inp2, data2 = _p15_make_root("b")
+    rec2 = None
+    try:
+        silent = os.path.join(inp2, "silent.mp4")
+        with open(silent, "wb") as fh:
+            fh.write(b"fake-video-silent-b")   # 只落文件，不投任何事件
+        t0 = time.time()
+        rec2 = PeriodicReconciler(inp2, data2, "profhash",
+                                  interval_s=P15_RECONCILE_INTERVAL_S).start()
+        built = _p15_wait(
+            lambda: _p15_count(data2, "SELECT COUNT(*) FROM processing_runs") >= 1,
+            P15_RECONCILE_INTERVAL_S + 2.0)
+        elapsed = time.time() - t0
+        rec2.stop()
+        check("15b 零事件：≤1 个 reconcile 周期（含容差）内建出任务",
+              built and elapsed <= P15_RECONCILE_INTERVAL_S + 2.0,
+              (built, round(elapsed, 2)))
+        check("15b 周期线程确实跑过补漏 pass", rec2.passes() >= 1, rec2.passes())
+        check("15b 周期 pass 无异常（兜底没静默哑火）",
+              rec2.last_error() is None, rec2.last_error())
+        code, snap = server._handle_status(
+            {"data_root": [data2], "input_root": [inp2]})
+        rs = snap.get("run_summary") or {}
+        check("15b /api/status 看得见该任务行（total=1/pending=1）",
+              code == 200 and rs.get("total") == 1 and rs.get("pending") == 1,
+              (code, rs))
+    finally:
+        if rec2 is not None:
+            rec2.stop()
+        _p15_drop_root(root2, data2)
+
+    # ---------------- C：事件路径∪周期路径 → 只 1 个 run（幂等）
+    root3, inp3, data3 = _p15_make_root("c")
+    rec3 = None
+    w3 = None
+    try:
+        idem = os.path.join(inp3, "idem.mp4")
+        with open(idem, "wb") as fh:
+            fh.write(b"fake-video-idem-c")
+        w3 = Watcher(inp3, data3, "profhash", debounce_s=0.2, stable_s=0.2)
+        w3._on_fs_event(idem, False)
+        _p15_wait(lambda: bool(w3.deliveries()), 15.0)
+        check("15c 事件路径先建出 1 个 run",
+              _p15_count(data3, "SELECT COUNT(*) FROM processing_runs") == 1,
+              _p15_count(data3, "SELECT COUNT(*) FROM processing_runs"))
+        w3.stop()
+        rec3 = PeriodicReconciler(inp3, data3, "profhash",
+                                  interval_s=P15_RECONCILE_INTERVAL_S).start()
+        _p15_wait(lambda: rec3.passes() >= 2, 4 * P15_RECONCILE_INTERVAL_S + 2.0)
+        rec3.stop()
+        check("15c 周期 reconcile 之后仍只 1 个 run（不重复转写）",
+              _p15_count(data3, "SELECT COUNT(*) FROM processing_runs") == 1,
+              _p15_count(data3, "SELECT COUNT(*) FROM processing_runs"))
+        check("15c source 也只 1 个（不重复建源）",
+              _p15_count(data3, "SELECT COUNT(*) FROM sources") == 1,
+              _p15_count(data3, "SELECT COUNT(*) FROM sources"))
+        from stage2 import store
+
+        con = sqlite3.connect(store.central_db_path(data3))
+        try:
+            cand = dict(con.execute(
+                "SELECT status, COUNT(*) FROM discovery_candidates"
+                " GROUP BY status").fetchall())
+        finally:
+            con.close()
+        check("15c 二次发现折叠为 MERGED（候选层幂等：PROMOTED=1）",
+              cand.get("PROMOTED") == 1, cand)
+
+        code3, snap3 = server._handle_status(
+            {"data_root": [data3], "input_root": [inp3]})
+        check("15d /api/status 顶层字段集未变（不得新增/缺失）",
+              sorted(snap3.keys()) == P15_STATUS_KEYS, sorted(snap3.keys()))
+        rows = snap3.get("recent_runs") or []
+        check("15d 任务行字段集未变（不得新增/缺失）",
+              bool(rows) and sorted(rows[0].keys()) == P15_RUN_ROW_KEYS,
+              sorted(rows[0].keys()) if rows else None)
+        check("15d 新发现任务在 status 可见（total=1）",
+              (snap3.get("run_summary") or {}).get("total") == 1,
+              snap3.get("run_summary"))
+    finally:
+        if rec3 is not None:
+            rec3.stop()
+        if w3 is not None:
+            w3.stop()
+        _p15_drop_root(root3, data3)
+
+    # ---------------- E：启动链接线（周期兜底必须真被 run_startup 起、被 shutdown 停）
+    from stage2 import instance as _instance
+    from stage5.startup import STARTUP_ORDER, run_startup, shutdown
+
+    root4 = tempfile.mkdtemp(prefix="p15_watch_e_")
+    assert_tmp(root4, "part15_p11_watch_reliability")
+    inp4 = os.path.join(root4, "input")
+    data4 = os.path.join(root4, "data")
+    os.makedirs(inp4)
+    handle = None
+    try:
+        handle = run_startup(data4, inp4, "profhash", ready_timeout=15)
+        check("15e 启动链 11 步顺序未变（不因本修复漂移）",
+              handle.get("order") == STARTUP_ORDER, handle.get("order"))
+        rec4 = handle.get("reconciler")
+        check("15e run_startup 真起了周期兜底线程",
+              rec4 is not None and rec4.is_running(), type(rec4).__name__)
+        check("15e 周期间隔在 30–60s 之间（线上默认档）",
+              rec4 is not None and 30.0 <= rec4.interval_s <= 60.0,
+              getattr(rec4, "interval_s", None))
+        out = shutdown(handle)
+        handle = None
+        check("15e shutdown 停掉周期兜底（不留悬挂线程）",
+              out.get("reconciler_stopped") is True
+              and rec4 is not None and not rec4.is_running(),
+              (out, getattr(rec4, "is_running", lambda: None)()))
+    finally:
+        if handle is not None:
+            try:
+                shutdown(handle)
+            except Exception:
+                pass
+        try:
+            _instance.release(data4)
+        except Exception:
+            pass
+        shutil.rmtree(root4, ignore_errors=True)
+
+    # ---------------- F：生产默认档钉值（M4/M5 咬口：改小/退化成单采样即红）
+    import stage5.watcher as _w
+
+    check("15f 生产静默窗 DEBOUNCE_S=3.0（首版 1.0 被停顿 2.5s 击穿）",
+          _w.DEBOUNCE_S == P15_QUIET_S, _w.DEBOUNCE_S)
+    check("15f 生产采样间隔 STABLE_PROBE_S=2.0",
+          _w.STABLE_PROBE_S == P15_PROBE_S, _w.STABLE_PROBE_S)
+    check("15f 生产采样轮数 STABLE_ROUNDS=3（单采样即红）",
+          _w.STABLE_ROUNDS == P15_ROUNDS, _w.STABLE_ROUNDS)
+    check("15f 占用检测默认开 BUSY_CHECK is True", _w.BUSY_CHECK is True,
+          _w.BUSY_CHECK)
+    check("15f 最小文件年龄＝静默窗＋(轮数-1)×采样间隔＝7.0s",
+          abs((P15_QUIET_S + (P15_ROUNDS - 1) * P15_PROBE_S) - 7.0) < 1e-9)
+    check("15f 发布门采样间隔 STALE_SOURCE_PROBE_S=2.0",
+          server.STALE_SOURCE_PROBE_S == P15_PROBE_S,
+          server.STALE_SOURCE_PROBE_S)
+    check("15f start_watch 默认档＝钉值（生产调用方不传参也拿到同一门）",
+          _w.start_watch.__defaults__ == (None, P15_QUIET_S, P15_PROBE_S,
+                                          P15_ROUNDS, True),
+          _w.start_watch.__defaults__)
+
+    # ---------------- G：慢写中途停顿（< 投递门）不得投半截
+    root5, inp5, data5 = _p15_make_root("g")
+    try:
+        # 短参数版投递门：0.5 静默 + 0.5×2 采样 = 1.5s（生产档 7s，同形状）
+        g_quiet, g_probe = 0.5, 0.5
+        gate_s = g_quiet + (_w.STABLE_ROUNDS - 1) * g_probe
+        calls5 = []
+        lock5 = threading.Lock()
+
+        def _rec5(path, dr, h):
+            size = os.path.getsize(path) if os.path.exists(path) else None
+            with lock5:
+                calls5.append((time.time(), size))
+            return {"status": "recorder", "size": size}
+
+        w5 = Watcher(inp5, data5, "profhash", on_deliver=_rec5,
+                     debounce_s=g_quiet, stable_s=g_probe)
+        path5 = os.path.join(inp5, "slow.mp4")
+        mark = []
+        with open(path5, "wb") as fh:
+            fh.write(b"S" * 65536)
+        w5._on_fs_event(path5, False)
+        for _ in range(2):
+            time.sleep(0.8)          # 停顿 0.8s < 投递门 1.5s
+            mid = len(calls5)
+            check("15g 停顿（<投递门）期间零投递", mid == 0, (mid, calls5[:2]))
+            with open(path5, "ab") as fh:
+                fh.write(b"S" * 65536)
+            w5._on_fs_event(path5, False)
+        final5 = os.path.getsize(path5)
+        last_write = time.time()
+        mark.append(last_write)
+        _p15_wait(lambda: len(calls5) >= 1, gate_s + 6.0)
+        time.sleep(gate_s + 1.0)     # 静默：不得再补投
+        w5.stop()
+        check("15g 慢写停顿：最终恰好投递 1 次", len(calls5) == 1, len(calls5))
+        check("15g 投递的是完整文件（size==final，半截不进发布链路）",
+              bool(calls5) and calls5[0][1] == final5, (calls5[:2], final5))
+        check("15g 投递晚于最后一块写完", bool(calls5) and calls5[0][0] > last_write,
+              calls5[:1])
+    finally:
+        _p15_drop_root(root5, data5)
+
+    # ---------------- H：占用检测（别的写方持锁 → 不投递）
+    import fcntl as _fcntl
+
+    root6, inp6, data6 = _p15_make_root("h")
+    try:
+        calls6 = []
+        lock6 = threading.Lock()
+
+        def _rec6(path, dr, h):
+            with lock6:
+                calls6.append((time.time(), os.path.getsize(path)))
+            return {"status": "recorder"}
+
+        w6 = Watcher(inp6, data6, "profhash", on_deliver=_rec6,
+                     debounce_s=0.3, stable_s=0.3)
+        path6 = os.path.join(inp6, "locked.mp4")
+        with open(path6, "wb") as fh:
+            fh.write(b"L" * 65536)
+        time.sleep(1.2)              # 先过最小年龄门槛（0.3+2×0.3=0.9s），让占用检测成为唯一否定项
+        holder = open(path6, "a+b")
+        _fcntl.flock(holder.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        try:
+            check("15h 被别的写方占着 → 判定 busy（仍在写）",
+                  w6.stability(path6) == "busy", w6.stability(path6))
+            w6._on_fs_event(path6, False)
+            time.sleep(2.0)          # 静默窗+采样窗都过了，只因占用不投
+            check("15h 占用期间零投递", len(calls6) == 0, calls6[:2])
+        finally:
+            _fcntl.flock(holder.fileno(), _fcntl.LOCK_UN)
+            holder.close()
+        check("15h 释放占用后判定可投", w6.stability(path6) == "stable",
+              w6.stability(path6))
+        _p15_wait(lambda: bool(calls6), 6.0)
+        w6.stop()
+        check("15h 释放后投递完整件（size==final）",
+              bool(calls6) and calls6[0][1] == os.path.getsize(path6),
+              calls6[:2])
+    finally:
+        _p15_drop_root(root6, data6)
+
+    # ---------------- I：半截不发布（app 发布门：源快照对不上就不转写/不发布）
+    from stage5.watcher import canonical as _canon15
+
+    root7, inp7, data7 = _p15_make_root("i")
+    vault7 = os.path.join(root7, "vault")
+    os.makedirs(vault7)
+    w7 = None
+    try:
+        path7 = os.path.join(inp7, "half.mp4")
+        with open(path7, "wb") as fh:
+            fh.write(b"H" * 65536)      # 假装半截件
+        w7 = Watcher(inp7, data7, "profhash", debounce_s=0.2, stable_s=0.2)
+        w7._on_fs_event(path7, False)
+        _p15_wait(lambda: bool(w7.deliveries()), 15.0)
+        w7.stop()
+        rows = _p15_rows(data7, "SELECT run_id, source_id FROM processing_runs")
+        check("15i 半截件先被登记成 run（模拟首版投递半截的后果）",
+              len(rows) == 1, rows)
+        run_id7 = rows[0][0]
+        con7 = sqlite3.connect(os.path.join(data7, "data", "state.db"))
+        try:
+            con7.row_factory = sqlite3.Row
+            src_row = dict(con7.execute("SELECT * FROM sources").fetchone())
+        finally:
+            con7.close()
+        check("15i 快照此刻对得上 → 发布门放行（不误杀正常文件）",
+              server._stale_source_reason(src_row, path7) is None,
+              src_row.get("source_size"))
+        with open(path7, "ab") as fh:
+            fh.write(b"H" * 65536)      # 写方续写：快照过期
+        stale_reason = server._stale_source_reason(src_row, path7)
+        check("15i 源文件续写后 → 发布门判为过期（拦住）",
+              isinstance(stale_reason, str) and stale_reason, stale_reason)
+        res = server._process_one_run(data7, inp7, vault7, run_id7, "profhash")
+        check("15i 过期 run 不进转写链路（state=FAIL，whisper 零调用）",
+              isinstance(res, dict) and res.get("state") == "FAIL"
+              and res.get("whisper_calls") is None, res)
+        check("15i 笔记库零写入（没发布截断内容）",
+              os.listdir(vault7) == [], os.listdir(vault7))
+        check("15i 连 job 目录都没建（没进 raw/render 链路）",
+              not os.path.exists(os.path.join(data7, "data", "jobs", run_id7)))
+    finally:
+        if w7 is not None:
+            w7.stop()
+        _p15_drop_root(root7, data7)
+    # 发布门第二处（写 vault 之前）必须在位：源码级钉住调用顺序与次数
+    srv_src = open(os.path.join(ROOT, "app", "server.py"), encoding="utf-8").read()
+    body_p1 = srv_src.split("def _process_one_run(", 1)[1]
+    pos_pub = body_p1.find("initial_publish(")
+    gate_at = []
+    cursor = 0
+    while True:
+        hit = body_p1.find("_stale_source_reason(src, src_real)", cursor)
+        if hit == -1:
+            break
+        gate_at.append(hit)
+        cursor = hit + 1
+    check("15i 两道发布门都在位（转写前 + 写库前各一次，且都早于 initial_publish）",
+          len(gate_at) >= 2 and pos_pub != -1 and gate_at[-1] < pos_pub,
+          (len(gate_at), pos_pub))
+
+    # ---------------- J：周期路身份未变不重投（P2-1 成本修的量）
+    from stage5.reconcile import PeriodicReconciler as _PR15
+
+    root8, inp8, data8 = _p15_make_root("j")
+    rec8 = None
+    try:
+        path8 = os.path.join(inp8, "quiet.mp4")
+        with open(path8, "wb") as fh:
+            fh.write(b"Q" * 4096)
+        rec8 = _PR15(inp8, data8, "profhash", interval_s=30.0)
+        first = rec8.run_once()
+        check("15j 第一遍（新文件）走完整投递：skipped=False 且 delivered 非空",
+              len(first) == 1 and first[0]["skipped"] is False
+              and isinstance(first[0]["delivered"], dict),
+              first[:1])
+        second = rec8.run_once()
+        check("15j 第二遍（身份未变）不重投：skipped=True、delivered=None",
+              len(second) == 1 and second[0]["skipped"] is True
+              and second[0]["delivered"] is None, second[:1])
+        check("15j 两遍之后仍只 1 个 run（不重复转写）",
+              _p15_count(data8, "SELECT COUNT(*) FROM processing_runs") == 1,
+              _p15_count(data8, "SELECT COUNT(*) FROM processing_runs"))
+        with open(path8, "ab") as fh:
+            fh.write(b"QQ")
+        third = rec8.run_once()
+        check("15j 文件变了之后重新走投递（不能把变化漏掉）",
+              len(third) == 1 and third[0]["skipped"] is False, third[:1])
+    finally:
+        if rec8 is not None:
+            rec8.stop()
+        _p15_drop_root(root8, data8)
+
+    # ---------------- K：PeriodicReconciler.stop() 不谎报（P2-2）
+    root9, inp9, data9 = _p15_make_root("k")
+    rec9 = None
+    try:
+        with open(os.path.join(inp9, "k.mp4"), "wb") as fh:
+            fh.write(b"K" * 1024)
+
+        def _slow_deliver(path, dr, h):
+            time.sleep(1.5)          # 模拟「一遍比 join 上界还久」
+            return {"status": "slow", "source_id": None}
+
+        rec9 = _PR15(inp9, data9, "profhash", interval_s=0.3,
+                     on_deliver=_slow_deliver).start()
+        _p15_wait(lambda: rec9.passes() >= 1, 3.0)
+        time.sleep(0.3)              # 确保正卡在 pass 里
+        rec9.stop_timeout_s = 0.0
+        ok = rec9.stop()
+        check("15k 收不掉时 stop() 如实返回 False",
+              ok is False, ok)
+        check("15k 收不掉时 is_running() 仍为 True（不谎报已停）",
+              rec9.is_running() is True, rec9.is_running())
+        time.sleep(2.0)              # 等这一遍跑完
+        rec9.stop_timeout_s = 5.0
+        check("15k 一遍跑完后 stop() 返回 True 且 is_running() 转 False",
+              rec9.stop() is True and rec9.is_running() is False,
+              (rec9.is_running(),))
+    finally:
+        if rec9 is not None:
+            try:
+                rec9.stop()
+            except Exception:
+                pass
+        _p15_drop_root(root9, data9)
+
+
+    # ---------------- L：采样窗内文件还在变 → 必须判 unstable（M4 咬口）
+    # 用被包装的采样器精确在「第 1 次采样之后」写入，确定性触发「采样窗内变化」：
+    # 单采样实现此时会直接判 stable（M4 全绿），三轮采样必须判 unstable。
+    root10, inp10, data10 = _p15_make_root("l")
+    try:
+        calls10 = []
+
+        def _rec10(path, dr, h):
+            calls10.append((time.time(), os.path.getsize(path)))
+            return {"status": "recorder"}
+
+        w10 = Watcher(inp10, data10, "profhash", on_deliver=_rec10,
+                      debounce_s=0.5, stable_s=0.5)   # 门=1.5s，采样窗=1.0s
+        path10 = os.path.join(inp10, "growing.mp4")
+        with open(path10, "wb") as fh:
+            fh.write(b"G" * 65536)
+        time.sleep(1.7)          # 先让年龄过门；否则只会判 too-new，测不到采样窗
+        orig_sample = w10._sample_once
+        hits10 = []
+
+        def _hooked(paths):
+            out = orig_sample(paths)
+            hits10.append(out[0][0] if out and out[0] else None)
+            if len(hits10) == 1:          # 第一次采样后立刻写入
+                with open(path10, "ab") as fh:
+                    fh.write(b"G" * 4096)
+            return out
+
+        w10._sample_once = _hooked
+        try:
+            verdict10 = w10.stability(path10)
+        finally:
+            w10._sample_once = orig_sample
+        check("15l 采样窗内发生变化 → 判 unstable（单采样会漏判，M4 咬口）",
+              verdict10 == "unstable", (verdict10, hits10))
+        check("15l 稳定判定取满 3 轮采样（退化成单采样即红）",
+              len(hits10) == P15_ROUNDS, hits10)
+        check("15l 采样窗内变化期间零投递", calls10 == [], calls10[:2])
+        w10.stop()
+    finally:
+        _p15_drop_root(root10, data10)
+
+
+    # ---------------- M：一批一起裁决（P2-3：flusher 不再每文件各等一窗）
+    root11, inp11, data11 = _p15_make_root("m")
+    try:
+        calls11 = []
+        lock11 = threading.Lock()
+
+        def _rec11(path, dr, h):
+            with lock11:
+                calls11.append((time.time(), os.path.basename(path),
+                                os.path.getsize(path)))
+            return {"status": "recorder"}
+
+        w11 = Watcher(inp11, data11, "profhash", on_deliver=_rec11,
+                      debounce_s=0.3, stable_s=0.4)
+        paths11 = []
+        for idx in range(6):
+            p = os.path.join(inp11, "batch%d.mp4" % idx)
+            with open(p, "wb") as fh:
+                fh.write(b"B" * 65536)
+            paths11.append(p)
+        t_arm = time.time()
+        for p in paths11:                # 六个文件同时到达（批量落盘的形状）
+            w11._on_fs_event(p, False)
+        _p15_wait(lambda: len(calls11) >= 6, 12.0)
+        last_t = max((t for t, _, _ in calls11), default=0.0)
+        latency11 = (last_t - t_arm) if calls11 else 99.0
+        spread = (max(t for t, _, _ in calls11) - min(t for t, _, _ in calls11)
+                  if len(calls11) >= 2 else 9.9)
+        w11.stop()
+        check("15m 一批 6 个文件全投递且都是完整件",
+              len(calls11) == 6 and all(sz == 65536 for _, _, sz in calls11),
+              calls11)
+        check("15m 同批投递扎堆（共享一次裁决）", spread < 0.5, round(spread, 3))
+        check("15m 同批总延迟 ≤2.5s（每文件各等一窗≈5s 即红）",
+              latency11 <= 2.5, round(latency11, 3))
+    finally:
+        _p15_drop_root(root11, data11)
+
+
 def main():
     print("tmp 根：%s" % TMP_ROOT)
     server = load_server()
@@ -2371,6 +2941,7 @@ def main():
     part12_p14_alt_branch(server)
     part13_p15_vocab_display(server)
     part14_p16_completed_cursor(server)
+    part15_p11_watch_reliability(server)
     if FAILS:
         print("\nSELFTEST FAIL %d/%d：%s" % (len(FAILS), CHECKS[0], FAILS))
         return 1

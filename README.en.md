@@ -110,9 +110,10 @@ For full behavior see [Usage](./docs/usage.md); for errors see [Troubleshooting]
 ## Known limitations
 
 - The target device is Apple Silicon Mac. Other platforms are not verified in this repository.
-- Without `mlx_whisper` or `ffmpeg`, transcription is unavailable; the console reports it explicitly.
+- Without `mlx_whisper` or `ffmpeg`, transcription is unavailable; the console reports it explicitly. Besides `mlx-whisper`, `watchdog` is also required (this repository ships no dependency manifest).
 - Watch state is lost on restart; press start again in the page after the service restarts.
 - Long real-world videos are still under acceptance testing. The pipeline guarantees it keeps running, not word-level accuracy.
+- **A video dropped into the watched folder is only picked up after it stops changing (about 7 seconds of quiet writes).** If a copy/download pauses for longer than ~7 seconds and then continues, a partial transcript may be produced first, while the complete version is blocked by No-Clobber protection (existing notes are never overwritten). In that case, delete the partial `.md` and drop the video again.
 - There is no License file in the repository. Treat it as all rights reserved until a license is added.
 
 ## License

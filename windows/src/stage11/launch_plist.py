@@ -24,6 +24,11 @@ Hard gates (TM decided):
   - Zero transcription: every result carries asr_calls == 0 and
     whisper_calls == 0. Zero central-DB writes from this module.
 
+Windows（本批改造）：launchd/LaunchAgents 在 Windows 11 上不存在。
+模块**照常可 import**（plistlib 是标准库），但所有入口在非 macOS 上返回
+``{"skipped": True, ...}`` 并附人话说明，**不抛异常、不假装自启成功**。
+MVP 不做开机自启（方案 §2「启动／自启」行）。
+
 Additive-only: stdlib only + read-only path facts. No stage1-10 file
 is amended; no new table or column is created here.
 """
@@ -34,8 +39,28 @@ import os
 import plistlib
 import subprocess
 
+import platform_win  # noqa: E402  (Windows/POSIX 平台适配单点)
+
 LABEL_PREFIX = "com.video2obsidian.test."
 THROTTLE_DEFAULT = 10
+
+LAUNCHD_SUPPORTED = not platform_win.is_windows()
+SKIP_REASON = (
+    "Windows 11 没有 launchd / LaunchAgents，开机自启在 Windows 端不可用；"
+    "MVP 不做自启（方案 §2「启动／自启」行）。"
+    "看状态请用：python -m stage12.status_cli status --data-root <data_root>"
+)
+
+
+def skipped(platform: str | None = None) -> dict:
+    """Windows 上的优雅跳过：显式说明 + 零副作用，不抛异常。"""
+    return {
+        "skipped": True,
+        "platform": platform_win.current_platform(platform),
+        "reason": SKIP_REASON,
+        "asr_calls": 0,
+        "whisper_calls": 0,
+    }
 
 _REAL_AGENT_DIRS = (
     os.path.abspath(os.path.expanduser("~/Library/LaunchAgents")),
@@ -86,6 +111,8 @@ def build_plist(
     throttle_interval: int = THROTTLE_DEFAULT,
 ) -> dict:
     """Assemble the plist dict. All paths recorded are absolute."""
+    if not LAUNCHD_SUPPORTED:
+        return skipped()
     if not label or not label.startswith(LABEL_PREFIX):
         raise ValueError(
             "label must start with %r (got %r)" % (LABEL_PREFIX, label)
@@ -141,6 +168,8 @@ def plist_path_for(test_agent_dir: str, label: str) -> str:
 
 def write_plist(plist: dict, test_agent_dir: str, label: str) -> dict:
     """Write the plist inside the test agent dir (prefix gate held)."""
+    if not LAUNCHD_SUPPORTED:
+        return skipped()
     agent_abs = _abs(test_agent_dir)
     _refuse_real_dir(agent_abs)
     dest = plist_path_for(agent_abs, label)
@@ -169,6 +198,8 @@ def validate_plist(
     expect_data_root: str | None = None,
 ) -> dict:
     """plutil -lint + read-back absolute-path and field checks."""
+    if not LAUNCHD_SUPPORTED:
+        return skipped()
     path_abs = _abs(plist_path)
     _refuse_real_dir(path_abs)
     proc = subprocess.run(
@@ -246,6 +277,8 @@ def _label_for_plist(plist_path: str) -> str:
 
 def load_test_plist(plist_path: str, test_agent_dir: str) -> dict:
     """launchctl load the test plist (test dir only)."""
+    if not LAUNCHD_SUPPORTED:
+        return skipped()
     path_abs = _abs(plist_path)
     agent_abs = _abs(test_agent_dir)
     _refuse_real_dir(path_abs)
@@ -274,6 +307,8 @@ def load_test_plist(plist_path: str, test_agent_dir: str) -> dict:
 
 def unload_test_plist(plist_path: str, test_agent_dir: str) -> dict:
     """launchctl unload the test plist; no resident entry may remain."""
+    if not LAUNCHD_SUPPORTED:
+        return skipped()
     path_abs = _abs(plist_path)
     agent_abs = _abs(test_agent_dir)
     _refuse_real_dir(path_abs)

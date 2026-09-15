@@ -16,8 +16,10 @@ Implements STAGE5-PLAN S5-T01 only (V1.8 Stage 5, Watch First):
          are all identical (a single-sample "looks frozen" is not enough),
       ③ the file's mtime is at least ``DEBOUNCE_S + (STABLE_ROUNDS-1) *
          STABLE_PROBE_S`` old (a just-written file is never "finished"), and
-      ④ the file is not held by another writer (``BUSY_CHECK``: exclusive
-         ``flock`` probe) — a busy file is treated as still being written.
+      ④ the file is not held by another writer (``BUSY_CHECK``: POSIX 用
+         独占 ``flock`` 探测，**Windows 用 CreateFileW 共享模式探测**，
+         见 ``platform_win.file_is_busy``) — a busy file is treated as
+         still being written.
     The verdict is then re-checked once more right before the delivery call
     (TOCTOU) and the delivery is dropped/re-armed if anything moved.
     Known limit (honest): a writer that pauses longer than the whole gate
@@ -39,13 +41,14 @@ files and never invokes any later-stage execution.
 
 from __future__ import annotations
 
-import fcntl
 import os
 import sys
 import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import platform_win  # noqa: E402  (Windows/POSIX 平台适配单点)
 
 from stage2 import store  # noqa: E402  (read-only reuse, S5 additive rule)
 from stage2.candidate import discover as _default_deliver  # noqa: E402
@@ -377,19 +380,15 @@ class Watcher:
         except OSError:
             return None
         try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            if platform_win.file_is_busy(path):
                 return "locked"
-        finally:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        except platform_win.PlatformCapabilityMissing:
+            # fail-closed：占用探测不可用时不许当作「未占用」，判 busy 不投递。
+            return "probe-unavailable"
         return None
 
     def _changed_since(self, path: str, snap) -> bool:

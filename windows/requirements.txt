@@ -1,0 +1,25 @@
+# 懒得笔记｜Windows 11 依赖锁（Python 3.12，官方 64-bit）
+#
+# 用法（在仓库根）：
+#   py -3.12 -m venv .venv
+#   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# 说明：
+#   - 版本**全部锁死**（==）。升级必须走变更流程，不许在真机上临时放宽。
+#   - Mac 端专属的 mlx-whisper / mlx 已移除（Windows 端 ASR 为
+#     faster-whisper + CTranslate2，见 docs/pm/WINDOWS-MIGRATION-PLAN.md §1）。
+#   - 哈希字段（--hash=）已按包预留，Stage 3 冻结时用下面命令取真值回填，
+#     再打开注释并以 `pip install --require-hashes -r requirements.txt` 安装：
+#       .\.venv\Scripts\python.exe -m pip download -r requirements.txt -d wheels --no-deps
+#       .\.venv\Scripts\python.exe -m pip hash wheels\faster_whisper-*.whl
+#     （每个包取其 wheel 的 sha256 填到下面对应行）
+#   - 哈希未回填前请勿启用 --require-hashes，否则 pip 会直接失败（这是有意的）。
+
+faster-whisper==1.1.0
+# --hash=sha256:REPLACE_WITH_REAL_DIGEST_faster_whisper
+
+ctranslate2==4.5.0
+# --hash=sha256:REPLACE_WITH_REAL_DIGEST_ctranslate2
+
+watchdog==6.0.0
+# --hash=sha256:REPLACE_WITH_REAL_DIGEST_watchdog

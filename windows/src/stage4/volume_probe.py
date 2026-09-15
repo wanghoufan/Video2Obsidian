@@ -8,7 +8,10 @@ Implements STAGE4-PLAN S4-T01 only (V1.8 ``# 54`` / ``# 55`` + ``# 3.14``)::
 ``probe_volume`` measures, never invents:
 
 * ``filesystem_type`` — macOS ``stat -f %T`` of the covering dir,
-  ``"unknown"`` when the probe cannot run (still non-empty).
+  **Windows 走 ``platform_win.volume_info``（GetVolumeInformationW，
+  NTFS 判定）**；``"unknown"`` when the probe cannot run (still
+  non-empty). 探针不可用时不放行：``local_or_remote`` 落 unknown，
+  :func:`gate_output_root` 照 BLOCK。
 * ``volume_id`` — ``str(os.stat(dir).st_dev)`` of the covering dir.
 * ``local_or_remote`` — read-only reuse of ``stage1.probe_volume``
   (``"local"`` / ``"remote"`` / ``"unknown"``).
@@ -24,7 +27,10 @@ Implements STAGE4-PLAN S4-T01 only (V1.8 ``# 54`` / ``# 55`` + ``# 3.14``)::
 * ``supports_exclusive_create`` — ``O_CREAT | O_EXCL`` creates once,
   then fails with ``EEXIST`` on retry.
 * ``supports_hardlink`` — ``os.link`` round trip in the same dir.
-* ``supports_advisory_lock`` — ``fcntl.flock(LOCK_EX | LOCK_NB)``.
+* ``supports_advisory_lock`` — POSIX ``fcntl.flock(LOCK_EX | LOCK_NB)``；
+  **Windows 用 ``msvcrt`` 非阻塞 1-byte 锁**（``platform_win``
+  .lock_first_byte），能力不可用即 False（不假放行）。
+* ``free_bytes`` — Windows 用 GetDiskFreeSpaceExW 实测；其他平台 None。
 
 ``gate_output_root`` is the ``# 55`` + ``# 3.14`` door every publish
 entry point must pass *before* any byte is staged:
@@ -46,10 +52,11 @@ only writer. Every success dict carries ``whisper_calls == 0``.
 from __future__ import annotations
 
 import errno
-import fcntl
 import os
 import subprocess
 import uuid
+
+import platform_win  # noqa: E402  (Windows/POSIX 平台适配单点)
 
 # Path markers that always mean a non-local root (# 3.14, same set the
 # Stage1 ingest gate uses; read here for the Output side).
@@ -111,17 +118,30 @@ def _probe_name(tag: str) -> str:
 
 
 def _filesystem_type(covering_dir: str) -> str:
+    if platform_win.is_windows():
+        try:
+            info = platform_win.volume_info(covering_dir)
+        except platform_win.PlatformCapabilityMissing:
+            return "unknown"  # 判不出来 → 交 gate 按 unknown BLOCK
+        return str(info.get("filesystem_type") or "unknown")
     try:
-        out = subprocess.run(
-            ["stat", "-f", "%T", covering_dir],
-            capture_output=True, text=True, timeout=10,
-        )
+        out = platform_win.run_argv(["stat", "-f", "%T", covering_dir])
         fstype = (out.stdout or "").strip()
         if out.returncode == 0 and fstype:
             return fstype
     except (OSError, subprocess.SubprocessError):
         pass
     return "unknown"
+
+
+def _free_bytes(covering_dir: str):
+    """Windows 实测可用空间（GetDiskFreeSpaceExW）；其他平台 None。"""
+    if not platform_win.is_windows():
+        return None
+    try:
+        return platform_win.volume_info(covering_dir).get("free_bytes")
+    except platform_win.PlatformCapabilityMissing:
+        return None
 
 
 def _local_or_remote(covering_dir: str) -> str:
@@ -256,10 +276,11 @@ def _advisory_lock(covering_dir: str) -> bool:
             fh.write(b"s4-lock-probe")
         fh = open(target, "r+b")
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            platform_win.lock_first_byte(fh)
+            platform_win.unlock_first_byte(fh)
             return True
-        except (BlockingIOError, OSError):
+        except (BlockingIOError, OSError,
+                platform_win.PlatformCapabilityMissing):
             return False
         finally:
             fh.close()
@@ -280,6 +301,7 @@ def probe_volume(path: str) -> dict:
         "path": os.path.abspath(path),
         "covering_dir": covering,
         "filesystem_type": _filesystem_type(covering),
+        "free_bytes": _free_bytes(covering),
         "volume_id": str(st.st_dev),
         "local_or_remote": _local_or_remote(covering),
         "case_sensitive": _case_sensitive(covering),

@@ -12,6 +12,10 @@ Implements STAGE12-PLAN S12-T03 only:
   Without rumps: main() prints the stdlib CLI path and exits 0;
   this module fetches nothing and alters nothing.
 
+Windows（本批改造）：rumps 是 macOS 托盘库，**Windows 端永不 import 它**
+（import 期即短路，不会崩）。MVP 不做托盘（方案 §2「启动／自启」行 +
+§7①），main() 在 Windows 上打印人话说明并 exit 0，不假装托盘可用。
+
 Stdlib + optional rumps only. Additive-only: read-only reuse of
 status_snapshot.collect; never amends src/stage1-11; never writes
 the central DB.
@@ -22,15 +26,28 @@ from __future__ import annotations
 import os
 import sys
 
-try:
-    import rumps as _rumps
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-    RUMPS_AVAILABLE = True
-except ImportError:
+import platform_win  # noqa: E402  (Windows/POSIX 平台适配单点)
+
+# Windows 端永久不 import rumps（它是 macOS 托盘库），import 期即短路。
+IS_WINDOWS = platform_win.is_windows()
+MENU_BAR_SKIP_REASON = (
+    "Windows 端 MVP 不做托盘图标（rumps 是 macOS 专用库，方案 §2「启动／自启」"
+    "行 + §7①）。请用浏览器控制台或下面的 CLI 看状态。"
+)
+
+if IS_WINDOWS:
     _rumps = None
     RUMPS_AVAILABLE = False
+else:
+    try:
+        import rumps as _rumps
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        RUMPS_AVAILABLE = True
+    except ImportError:
+        _rumps = None
+        RUMPS_AVAILABLE = False
 
 from stage12.status_snapshot import collect  # noqa: E402
 
@@ -150,6 +167,13 @@ def main(argv=None) -> int:
         help="recent-run row cap",
     )
     args = ap.parse_args(list(argv) if argv is not None else None)
+    if IS_WINDOWS:
+        print(MENU_BAR_SKIP_REASON)
+        print(
+            "  python -m stage12.status_cli status --data-root %s --limit %d"
+            % (os.path.abspath(args.data_root), args.limit)
+        )
+        return 0
     if not RUMPS_AVAILABLE:
         print("menu bar is unavailable here; stdlib CLI path:")
         print(

@@ -48,6 +48,8 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(APP_DIR)
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
+import platform_win  # noqa: E402  (Windows/POSIX 平台适配单点)
+
 from stage12.status_snapshot import collect  # noqa: E402  (只读复用)
 from stage5.startup import run_startup  # noqa: E402  (后台启动复用)
 
@@ -67,7 +69,17 @@ if _env_port:
         raise SystemExit(2)
 del _env_port
 
-DEFAULT_DATA_ROOT = os.path.join(tempfile.gettempdir(), "v2o-console-data")
+# 正式 data root：Windows = %LOCALAPPDATA%\Video2Obsidian\data；
+# 拿不到 LOCALAPPDATA 就给人话报错退出（不静默回落到临时目录）。
+try:
+    DEFAULT_DATA_ROOT = platform_win.default_data_root()
+except platform_win.DataRootUnavailable:
+    # 人话：不猜目录、不改临时目录；异常体里那句同样的人话由 platform_win 持有。
+    sys.stderr.write(
+        "数据目录无法确定：Windows 上找不到环境变量 LOCALAPPDATA。\n"
+        "请确认以普通用户身份登录、重新打开终端后重试"
+        "（本程序不会猜测目录，也不会改用临时目录代替正式数据目录）。\n")
+    raise SystemExit(2)
 DEFAULT_PROFILE_HASH = "local-console-v1"
 
 CODE_MLX_MISSING = "PRECHECK_MLX_MISSING"
@@ -425,15 +437,56 @@ def _mlx_available() -> bool:
 
 
 def _is_under_root(src_path: str, input_root: str) -> bool:
-    """P0-1：realpath 后按前缀判定源是否在当前 input_root 内。"""
+    """P0-1：realpath 后判定源是否在当前 input_root 内。
+
+    Windows（Stage 2 接线）：判定统一走 ``platform_win.is_within`` 的
+    **normcase + commonpath**，于是大小写变体、盘符差异、UNC 都能正确判
+    「在不在目录内」；POSIX 分支语义与旧实现一致（仍含 realpath）。
+    已知限制：UNC 共享根作为 input_root 时判 False（fail-closed，见
+    platform_win.is_within 的 P2-2 注记；UNC 根在入口已 BLOCKED_UNC_ROOT）。
+    """
     try:
         if not src_path or not input_root:
             return False
         src_real = os.path.realpath(src_path)
         input_real = os.path.realpath(input_root)
-        return os.path.commonpath([input_real, src_real]) == input_real
+        return platform_win.is_within(input_real, src_real)
     except (ValueError, OSError):
         return False
+
+
+def _win_root_blockers(data_root: str, input_root: str,
+                       vault: str | None) -> list[str]:
+    """Windows 根目录接受前体检：data/input/vault 三个根，超限或 UNC 即拦。
+
+    非 Windows 恒回空（Mac 端行为零改动）。错误文案**不带真实绝对路径**
+    （沿用 P1-2 脱敏口径），只给类别、长度与人话指引。
+    """
+    problems: list[str] = []
+    for label, value in (("数据目录", data_root), ("视频文件夹", input_root),
+                         ("笔记库目录", vault)):
+        if not value:
+            continue
+        res = platform_win.validate_root(value, label)
+        if not res.get("ok"):
+            msg = res.get("message", "")
+            if res.get("guidance"):
+                msg = msg + "。" + res["guidance"]
+            problems.append(msg)
+    return problems
+
+
+def _win_path_too_long(items) -> str | None:
+    """实际会写入/读取的路径长路径闸（Whisper 之前的最早一道）。
+
+    ``items`` = [(人类说法, 路径或 None), ...]，命中第一条超限即回人话
+    reason（不带真实绝对路径）；非 Windows 恒回 None，行为零改动。
+    """
+    for label, path in items:
+        reason = platform_win.too_long_reason(path, label)
+        if reason:
+            return reason
+    return None
 
 
 # ------------------------------------------- P0-1 启动门按目录隔离（V2.2）
@@ -4830,9 +4883,23 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
     if not _is_under_root(src_real, input_real):
         return {"run_id": run_id, "state": "SKIP",
                 "verdict": "源不在当前视频文件夹内，已忽略"}
-    # job 目录路径先算出来（此处只算字符串，不落盘）：下面的第 0 道门要往它写一条
-    # 轻量 receipt，真正的 raw/asr 目录仍要过了两道门才建。
+    # Windows（Stage 2 接线）：这一条**真正会写入**的三条路径先过长路径闸
+    # （源视频 / 本条 job 目录 / 目标笔记落点），超限就在送 Whisper 之前
+    # 拦下——能早拦就早拦，不白跑一次听写，也不写任何半成品。
     job_dir = os.path.join(os.path.abspath(data_root), "data", "jobs", run_id)
+    _too_long = _win_path_too_long([
+        ("这个视频的路径", src_real),
+        ("这条任务的临时目录", job_dir),
+        ("目标笔记落点",
+         _vault_publish_target(input_real, vault_real, src_real)),
+    ])
+    if _too_long:
+        out = {"run_id": run_id, "state": "FAIL",
+               "source_filename": _src_fn,
+               "verdict": _too_long, "whisper_calls": 0}
+        _worker_record(out)
+        _worker_clear_current()
+        return out
     # DEVELOP-P1-9 第 0 道门（**送 engine 之前**）：这条视频的目标笔记在笔记库里
     # 已经存在 → 直接判 SKIPPED，whisper 一次都不跑，不写 vault、既有一字节不动
     # （No-Clobber 语义不变）。目标路径复用入库同一真源 `_app_resolve_canonical`，
@@ -5378,9 +5445,15 @@ def _handle_start_post(body: bytes) -> tuple[int, dict]:
         return 400, {"ok": False, "error": "请填写视频文件夹绝对路径"}
     if not os.path.isabs(input_root):
         return 400, {"ok": False, "error": "视频文件夹须为绝对路径：%s，请点浏览重选" % (input_root,)}
+    vault: str | None = ob_vault_root or None
+    # Windows（Stage 2 接线）：三个根在接受前先过长路径 + UNC 闸，
+    # 超限/网络盘直接 400 人话，零执行、零写盘（此处尚未 makedirs）。
+    _blk = _win_root_blockers(data_root, input_root, vault)
+    if _blk:
+        return 400, {"ok": False, "code": "BLOCKED_WIN_ROOT_PATH",
+                     "error": _blk[0]}
     if not os.path.isdir(input_root):
         return 400, {"ok": False, "error": "视频文件夹路径不存在：%s，请点浏览重选" % (input_root,)}
-    vault: str | None = ob_vault_root or None
     if vault is not None:
         if not os.path.isabs(vault):
             return 400, {"ok": False, "error": "笔记库目录须为绝对路径：%s，请点浏览重选" % (vault,)}
@@ -5807,10 +5880,13 @@ def _handle_clear_post(body: bytes) -> tuple[int, dict]:
 
 
 def _handle_reveal_post(body: bytes) -> tuple[int, dict]:
-    """V2.4 P0-1：在访达中定位（macOS open -R，后端直开）。
+    """V2.4 P0-1：在文件管理器中定位（后端直开）。
 
-    前端 file:// 导航会被浏览器静默拦截，故改后端直调 open -R。
-    normalize + 文件存在校验，失败人话 400。open 子进程仅此处使用。
+    Windows 11：``explorer.exe /select,<file>``（参数数组，不经 shell）；
+    macOS：``open -R``。命令构造统一走
+    ``platform_win.build_reveal_argv``（平台分支单点）。
+    前端 file:// 导航会被浏览器静默拦截，故改后端直调。
+    normalize + 文件存在校验，失败人话 400。子进程仅此处使用。
     """
     try:
         params = json.loads(body.decode("utf-8")) if body.strip() else {}
@@ -5829,20 +5905,24 @@ def _handle_reveal_post(body: bytes) -> tuple[int, dict]:
     real = os.path.realpath(path)
     if not os.path.exists(real):
         return 400, {"ok": False, "error": "文件找不到了：%s→检查文件是否被移动或删除" % (_diag_redact_path(real),)}
+    plan = platform_win.build_reveal_argv(real)
     try:
-        import subprocess  # noqa: E402  (open 子进程仅 reveal 一处)
+        import subprocess  # noqa: E402  (子进程仅 reveal 一处)
 
-        res = subprocess.run(["open", "-R", real],
-                             capture_output=True, text=True, timeout=10)
+        res = subprocess.run(plan["argv"],
+                             capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=10)
         if res.returncode != 0:
             err = (res.stderr or "").strip()
             return 400, {"ok": False,
-                         "error": "在访达中定位失败：%s→检查文件是否存在"
+                         "error": "在文件管理器中定位失败：%s→检查文件是否存在"
                                   % (_err_text(err or real),)}
-        return 200, {"ok": True, "path": real}
+        return 200, {"ok": True, "path": real, "reveal_mode": plan["mode"],
+                     "reveal_note": plan["note"]}
     except FileNotFoundError:
         return 400, {"ok": False,
-                     "error": "在访达中定位失败：系统 open 命令不可用→检查是否在 macOS 上运行"}
+                     "error": "在文件管理器中定位失败：系统命令不可用"
+                              "（Windows 需 explorer.exe／macOS 需 open）"}
     except Exception as exc:
         return 400, {"ok": False,
                      "error": "在访达中定位失败：%s→检查文件是否存在" % (_err_text(exc),)}

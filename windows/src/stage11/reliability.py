@@ -11,11 +11,14 @@ Implements STAGE11-PLAN S11-T03 only:
   assert_running(boot)       11-step order verbatim + RUNNING.
   assert_recovered(...)      RUNNING + Lost/Duplicate 0 + half-file is
                              not success + whisper increment 0.
-  kill9_child_relaunch(...)  TRUE SIGKILL path: child holds a synthetic
-                             job (sleep) while the parent sends
-                             os.kill(pid, SIGKILL), then relaunch +
-                             assert_recovered. Covers the job-window kill
-                             with a real kernel signal.
+  kill9_child_relaunch(...)  TRUE kill path: child holds a synthetic
+                             job (sleep) while the parent hard-kills it
+                             (POSIX: os.kill(pid, SIGKILL) + rc ==
+                             -SIGKILL；**Windows: proc.kill() →
+                             TerminateProcess，不假设负 returncode**，
+                             分派见 platform_win.kill_child), then
+                             relaunch + assert_recovered. Covers the
+                             job-window kill with a real kernel kill.
   power_loss_best_effort_note()
                              booked Best Effort row (flush/fsync +
                              PREPARED/Receipt landed in Stage1/10);
@@ -61,12 +64,13 @@ from __future__ import annotations
 
 import hashlib
 import os
-import signal
 import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import platform_win  # noqa: E402  (Windows/POSIX 平台适配单点)
 
 
 def snapshot(data_root: str) -> dict:
@@ -152,25 +156,12 @@ def kill9_child_relaunch(old_boot: dict | None, data_root: str,
     )
     pid = proc.pid
     time.sleep(0.2)
-    killed = False
-    try:
-        os.kill(pid, signal.SIGKILL)
-        killed = True
-    except ProcessLookupError:
-        killed = False
-    try:
-        proc.wait(timeout=10)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        try:
-            proc.wait(timeout=10)
-        except Exception:
-            pass
-    rc = proc.returncode
-    sigkilled = bool(killed and rc == -signal.SIGKILL)
+    # Windows：TerminateProcess（proc.kill），不假设负 returncode；
+    # POSIX：真 SIGKILL，rc == -SIGKILL 才算硬杀成功。分派在 platform_win。
+    kill = platform_win.kill_child(proc, timeout=10.0)
+    rc = kill.get("returncode")
+    sigkilled = bool(kill.get("hard_killed"))
+    killed = bool(kill.get("killed"))
     fresh = relaunch(old_boot, data_abs, input_abs, asr_profile_hash)
     # Keep the fresh handle observable for the caller (no leak: caller
     # owns shutdown of the returned boot).
@@ -187,6 +178,7 @@ def kill9_child_relaunch(old_boot: dict | None, data_root: str,
         "sigkilled": sigkilled,
         "child_returncode": rc,
         "kill_sent": killed,
+        "kill_semantics": kill.get("killed_by"),
         "recovered": recovered,
         "running": running,
         "boot": _boot_handle,

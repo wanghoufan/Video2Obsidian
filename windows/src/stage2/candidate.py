@@ -11,6 +11,9 @@ Implements STAGE2-PLAN S2-T02 only:
   - Repeat discovery of identical bytes folds to MERGED (active count stays
     1); Case 13 (same path+size+mtime, different bytes) is NOT swallowed —
     it proceeds through Strong Hash to a new Source (see stage2.source).
+  - Windows：「Windows 长路径闸」在 discover 入口（见下方 DISCOVER 中的
+    platform_win.check_path_length），超限落 BLOCKED_PATH_TOO_LONG 候选：
+    不建 Source、不建 Run，因此绝不进转写（能早拦就早拦）。非 Windows 无感。
   - Zero transcription-engine invocations in this module: the only hash used
     is the Strong SHA256 promotion hash (via stage2.source ->
     stage1.sha256_file). No later-stage (Stage3+) imports or invocations
@@ -29,6 +32,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import platform_win  # noqa: E402  (Windows/POSIX 平台适配单点)
 
 from stage2 import source as _source  # noqa: E402
 from stage2 import store  # noqa: E402
@@ -93,6 +98,42 @@ def _insert_merged(con, path_key, size, mtime_ns, device, inode, target_id, reas
     return cid
 
 
+def _blocked_candidate(con, path_key, reason, code):
+    """记录一条「已被径路闸拦下」的候选（size/mtime 记 -1，不给临时键让位）。
+
+    与 _missing_candidate 同形状：不进 Source、不建 Run，因此在 App 侧不会
+    被拿去转写（发现链路上最早的一道拦）。
+    """
+    now = store.utc_now_iso()
+    cid = store.new_id("cand")
+    con.execute(
+        "INSERT INTO discovery_candidates (candidate_id, path_identity_key, size,"
+        " mtime_ns, device, inode, status, content_identity, source_id,"
+        " merged_into, observed_at, updated_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (cid, path_key, -1, -1, None, None, "BLOCKED_PATH_TOO_LONG", None,
+         None, None, now, now),
+    )
+    store.record_event(con, "candidate", cid, None, "BLOCKED_PATH_TOO_LONG",
+                       reason)
+    con.commit()
+    row = con.execute(
+        "SELECT * FROM discovery_candidates WHERE candidate_id=?", (cid,)
+    ).fetchone()
+    return {
+        "candidate_id": cid,
+        "status": "BLOCKED_PATH_TOO_LONG",
+        "source_id": None,
+        "run_id": None,
+        "merged_into": None,
+        "content_identity": None,
+        "block_code": code,
+        "provisional": {"path_identity_key": path_key, "size": -1,
+                        "mtime_ns": -1},
+        "candidate": dict(row),
+    }
+
+
 def discover(path: str, data_root: str, asr_profile_hash: str | None = None) -> dict:
     """Direct-API discovery of one path. Returns a result dict.
 
@@ -103,6 +144,24 @@ def discover(path: str, data_root: str, asr_profile_hash: str | None = None) -> 
     """
     store.require_lock(data_root)
     path_key = os.path.abspath(path)  # verbatim (§23): no NFC/casefold/slugify
+
+    # Windows（Stage 2 接线）：路径闸进发现链路的最早一处 ——
+    # 长度超过 Win32 上限（且未开长路径策略）的源，连稳定门都不等，
+    # 直接落一条 BLOCKED_PATH_TOO_LONG 候选（不建 Source、不建 Run，
+    # 因此绝不会进转写）。非 Windows 平台此闸恒不触发，行为零改动。
+    _lp = platform_win.check_path_length(path_key)
+    if _lp["verdict"] == "BLOCK":
+        reason = platform_win.too_long_reason(path_key, "源视频") or "路径过长"
+
+        def _b():
+            con = store.open_db(data_root)
+            try:
+                return _blocked_candidate(con, path_key, reason,
+                                          _lp.get("code"))
+            finally:
+                con.close()
+
+        return _retry_locked(_b)
 
     try:
         s1 = os.stat(path_key)

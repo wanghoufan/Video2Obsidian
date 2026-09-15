@@ -25,3 +25,6 @@ venv/
 
 # 系统
 .DS_Store
+
+# 会话产物（保留在工作树，不进仓；AGENTS 规定不提交不删除）
+.codebuddy/

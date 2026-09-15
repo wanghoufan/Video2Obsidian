@@ -17,6 +17,11 @@ Manifest state is SCAFFOLD — never PREPARED/COMMITTED.
 Stdlib only. Never writes to the source video (read-only open).
 Writes only under the given data_root (test dir) plus its own
 JSON/SQLite outputs.
+
+Windows 分支（本批改造）：``probe_volume`` 在 Windows 上不再调用 Unix
+``mount``，改走 ``platform_win.volume_info``（GetDriveTypeW +
+GetVolumeInformationW）；UNC 一律判 remote。探针不可用则 BLOCK 并给人话，
+不静默放行。macOS 分支（``mount`` 表）原样保留。
 """
 
 from __future__ import annotations
@@ -31,6 +36,8 @@ import sqlite3
 import subprocess
 import sys
 import uuid
+
+import platform_win  # noqa: E402  (Windows/POSIX 平台适配单点)
 
 CHUNK_BYTES = 8 * 1024 * 1024
 
@@ -73,7 +80,11 @@ def _utc_now_iso() -> str:
 
 
 def _mount_table() -> list[tuple[str, str, list[str]]]:
-    """Parse macOS `mount` into (device, mountpoint, opts) rows."""
+    """Parse macOS `mount` into (device, mountpoint, opts) rows.
+
+    仅 macOS/POSIX 分支使用；Windows 上 ``probe_volume`` 走
+    ``_probe_volume_windows``，本函数不会被调用。
+    """
     out = subprocess.run(["mount"], capture_output=True, text=True, timeout=10)
     if out.returncode != 0:
         raise OSError(f"`mount` failed: {out.stderr.strip()}")
@@ -87,15 +98,62 @@ def _mount_table() -> list[tuple[str, str, list[str]]]:
     return rows
 
 
-def probe_volume(path: str) -> dict:
-    """Probe volume type for a path via the OS mount table.
+def _probe_volume_windows(abspath: str) -> dict:
+    """Windows 卷判定：GetDriveTypeW + GetVolumeInformationW（不调 Unix mount）。
 
-    ALLOW iff the covering mount carries the OS `local` flag (§61 Local
-    Filesystem Only; external local volumes allowed as Archive roots).
+    只有固定盘/内存盘判 local（BLOCK 网络盘 UNC、光驱、可移动盘未知项）。
+    探针不可用 → BLOCK + 人话，不静默放行。
+    """
+    block = "BLOCKED_UNSUPPORTED_ROOT_FOR_V1"
+    try:
+        info = platform_win.volume_info(abspath)
+    except platform_win.PlatformCapabilityMissing as exc:
+        return {
+            "path": abspath,
+            "fstype": "unknown",
+            "local_or_remote": "unknown",
+            "verdict": "BLOCK",
+            "reason": f"Windows 卷探针不可用，无法确认是否为本地盘：{exc}",
+            "code": block,
+        }
+    fstype = str(info.get("filesystem_type") or "unknown")
+    local = info.get("local_or_remote")
+    base = {
+        "path": abspath,
+        "fstype": fstype,
+        "drive_root": info.get("drive_root"),
+        "free_bytes": info.get("free_bytes"),
+    }
+    if local == "local":
+        base.update(
+            local_or_remote="local",
+            verdict="ALLOW",
+            reason=(f"Windows 本地盘 {info.get('drive_root')!r} "
+                    f"fstype {fstype!r}"),
+            code="OK",
+        )
+        return base
+    base.update(
+        local_or_remote=local or "unknown",
+        verdict="BLOCK",
+        reason=(f"非本地盘（{info.get('reason') or local!r}）："
+                f"{info.get('drive_root') or abspath!r}"),
+        code=block,
+    )
+    return base
+
+
+def probe_volume(path: str) -> dict:
+    """Probe volume type for a path.
+
+    Windows：``platform_win.volume_info``（见 ``_probe_volume_windows``）。
+    macOS/其他：OS mount table，ALLOW iff the covering mount carries the
+    OS `local` flag (§61 Local Filesystem Only; external local volumes
+    allowed as Archive roots).
     Anything else — iCloud markers, nfs/smbfs/afp fstypes, missing
     `local` flag, unparseable table — BLOCKs fail-closed (§3.13).
     """
-    abspath = os.path.abspath(path)
+    abspath = platform_win.abspath(path)
     for marker in REMOTE_PATH_MARKERS:
         if marker in abspath:
             return {
@@ -106,6 +164,8 @@ def probe_volume(path: str) -> dict:
                 "reason": f"path contains iCloud marker {marker!r}",
                 "code": "BLOCKED_UNSUPPORTED_ROOT_FOR_V1",
             }
+    if platform_win.is_windows():
+        return _probe_volume_windows(abspath)
     try:
         rows = _mount_table()
     except (OSError, subprocess.SubprocessError) as exc:

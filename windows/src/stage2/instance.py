@@ -1,7 +1,11 @@
 """S2-T06: Single Instance + Startup Ordering subset + Root gate.
 
 Implements STAGE2-PLAN S2-T06 only:
-  - fcntl.flock LOCK_EX|LOCK_NB on <data_root>/data/.lock (§64). A second
+  - Single Instance lock on <data_root>/data/.lock (§64): POSIX 走
+    fcntl.flock LOCK_EX|LOCK_NB；**Windows 走 platform_win.lock_first_byte
+    （msvcrt 非阻塞 1-byte 锁，句柄全程持有）**。平台分支只在
+    platform_win 一处判，本模块不再直接 import fcntl/msvcrt。
+    A second
     instance raises SecondInstanceError and the CLI exits 3 without touching
     the DB or writing anything (P0-7).
   - Startup subset in §62 order: Static Preflight -> Acquire Lock ->
@@ -21,12 +25,13 @@ Stage3+ writes, no real filesystem listening.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import platform_win  # noqa: E402  (Windows/POSIX 平台适配单点)
 
 from stage1 import probe_volume  # noqa: E402  (read-only reuse, S2加法约束)
 
@@ -85,7 +90,11 @@ def acquire(data_root: str) -> None:
     os.makedirs(data_dir, exist_ok=True)
     fh = open(os.path.join(key, store.LOCK_RELPATH), "a+b")
     try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Windows：msvcrt 非阻塞 1-byte 锁（句柄全程持有）；POSIX：flock。
+        platform_win.lock_first_byte(fh)
+    except platform_win.PlatformCapabilityMissing:
+        fh.close()
+        raise  # 不静默降级：能力缺失必须暴露给人，不许假装拿到锁
     except (BlockingIOError, OSError):
         fh.close()
         raise SecondInstanceError("second instance: lock held for %r" % (key,))
@@ -102,9 +111,9 @@ def release(data_root: str) -> None:
         store.mark_released(key)
         return
     try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+        platform_win.unlock_first_byte(fh)
     finally:
-        fh.close()  # type: ignore[attr-defined]
+        fh.close()  # type: ignore[attr-defined]  (Windows 上释锁即丢句柄)
         store.mark_released(key)
 
 

@@ -2077,6 +2077,259 @@ def part13_p15_vocab_display(server):
         shutil.rmtree(root, ignore_errors=True)
 
 
+# ------------------------------------------------- 14 P1-6 完成分页 cursor 与 D-15
+
+P16_COMPLETED_N = 61     # D-15 夹具：61 成功
+P16_FAILED_N = 16        # 16 缺源（登记路径无文件）
+P16_TS_NONE_N = 5        # 其中 5 条缺 completed_at（回退 updated_at）
+
+
+def _p16_make_root(server):
+    """D-15 夹具：77 条（61 成功＋16 缺源）。
+
+    成功=processing_runs 行＋jobs/<run_id>/manifest.json（receipts 末个
+    PUBLISHED，无输出路径 → 按 _scan_disk_states 口径计完成）；时间戳两两并列
+    （同分钟成对），run_id 决胜可验；5 条成功缺 completed_at（回退 updated_at，
+    且时间最老 → 稳定落在展开末页）；失败行无 manifest、源文件不落盘。
+    """
+    from stage2.store import DDL
+
+    root = tempfile.mkdtemp(prefix="p16_d15_")
+    assert_tmp(root, "part14_p16_completed_cursor")
+    src_dir = os.path.join(root, "_src")
+    os.makedirs(os.path.join(root, "data"))
+    os.makedirs(src_dir)
+    con = sqlite3.connect(os.path.join(root, "data", "state.db"))
+    con.executescript(DDL)
+    specs = []  # (run_id, status, completed_at, updated_at, completed?)
+    for i in range(P16_COMPLETED_N - P16_TS_NONE_N):
+        rid = "run-c-%03d" % i
+        minute = i // 2  # 两两并列：0/1 同分，2/3 同分……
+        ts = "2026-09-10T00:%02d:00Z" % minute
+        specs.append((rid, "QUEUED", ts, ts, True))
+    for i in range(P16_TS_NONE_N):
+        rid = "run-n-%d" % i
+        ts = "2026-09-08T00:0%d:00Z" % i
+        specs.append((rid, "QUEUED", None, ts, True))
+    for i in range(P16_FAILED_N):
+        rid = "run-f-%02d" % i
+        specs.append((rid, "FAILED_RETRYABLE", None,
+                      "2026-09-09T10:%02d:00Z" % i, False))
+    for rid, status, comp, upd, done in specs:
+        src = os.path.join(src_dir, rid + ".mp4")
+        if done:
+            with open(src, "wb") as fh:
+                fh.write(b"fake-media-" + rid.encode())
+        con.execute(
+            "INSERT INTO sources (source_id, path_identity_key,"
+            " content_identity, logical_source_identity, current_path,"
+            " current_location_type, source_size, source_mtime_ns, status,"
+            " first_seen_at, last_seen_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("src_" + rid, src, "x" * 40, "lsid_" + rid, src, "LOCAL",
+             1 if done else 0, 0, "ACTIVE", upd, upd))
+        con.execute(
+            "INSERT INTO processing_runs (run_id, source_id, creation_mode,"
+            " auto_run_identity, asr_profile_hash, status, created_at,"
+            " updated_at, completed_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (rid, "src_" + rid, "AUTO", "auto_" + rid, "profhash", status,
+             upd, upd, comp))
+        if done:
+            jd = os.path.join(root, "data", "jobs", rid)
+            os.makedirs(jd, exist_ok=True)
+            with open(os.path.join(jd, "manifest.json"), "w",
+                      encoding="utf-8") as fh:
+                json.dump({"receipts": [{"state": "PUBLISHED",
+                                         "verdict": "ok"}]}, fh)
+    con.commit()
+    con.close()
+    return root
+
+
+def _p16_expected_order():
+    """测试侧独立复算排序：eff=completed_at 缺省回退 updated_at，(eff,run_id) DESC。"""
+    rows = []
+    for i in range(P16_COMPLETED_N - P16_TS_NONE_N):
+        rid = "run-c-%03d" % i
+        ts = "2026-09-10T00:%02d:00Z" % (i // 2)
+        rows.append((rid, ts))
+    for i in range(P16_TS_NONE_N):
+        rows.append(("run-n-%d" % i, "2026-09-08T00:0%d:00Z" % i))
+    rows.sort(key=lambda t: (t[1], t[0]), reverse=True)
+    return [r[0] for r in rows], {r[0]: r[1] for r in rows}
+
+
+def part14_p16_completed_cursor(server):
+    """P1-6/FR-12/HD-6=A/D-15：完成列表分层、cursor 历史、完成统计。
+
+    77 条夹具（61 成功＋16 缺源）下：当前/失败始终全量可达；完成默认 20；
+    cursor（排序键+校验和，非 offset）展开全 61 无重复遗漏；并列时间戳由
+    run_id DESC 决胜；坏/被篡改游标 400；recent_runs 原样（只加 completed 标记）。
+    """
+    root = _p16_make_root(server)
+    expected, eff_of = _p16_expected_order()
+    try:
+        # 14a 默认页：完成 61、默认 20、失败/当前不受影响（recent_runs 全 77）
+        code, snap = server._handle_status({"data_root": [root],
+                                            "limit": ["200"]})
+        check("14a status 200 且 ok", code == 200 and snap.get("ok") is True,
+              (code, snap.get("ok")))
+        check("14a completed_total=61（HD-6=A 完成统计）",
+              snap.get("completed_total") == P16_COMPLETED_N,
+              snap.get("completed_total"))
+        check("14a completed_limit 默认 20",
+              snap.get("completed_limit") == 20, snap.get("completed_limit"))
+        page = snap.get("completed_page") or []
+        check("14a 完成首页默认 20 条", len(page) == 20, len(page))
+        check("14a next_cursor 存在（还有更早）",
+              isinstance(snap.get("next_cursor"), str) and snap["next_cursor"],
+              snap.get("next_cursor"))
+        runs = snap.get("recent_runs") or []
+        check("14a D-15 当前/失败全可达（recent_runs=77）",
+              len(runs) == P16_COMPLETED_N + P16_FAILED_N, len(runs))
+        flagged = [r["run_id"] for r in runs if r.get("completed") is True]
+        unflagged = [r["run_id"] for r in runs if "completed" not in r]
+        check("14a 完成行全打 completed 标记（61）", len(flagged) == 61,
+              len(flagged))
+        check("14a 失败行无 completed 键（非完成不受影响）",
+              len(unflagged) == 16 and all(r.startswith("run-f-")
+                                           for r in unflagged),
+              unflagged[:3])
+
+        # 14b D-15 完成统计与 run_summary 双口径一致
+        rs = snap.get("run_summary") or {}
+        check("14b run_summary done=61/failed=16/total=77",
+              rs.get("done") == 61 and rs.get("failed") == 16
+              and rs.get("total") == 77,
+              (rs.get("done"), rs.get("failed"), rs.get("total")))
+        check("14b completed_total 与 run_summary.done 一致",
+              snap.get("completed_total") == rs.get("done"),
+              (snap.get("completed_total"), rs.get("done")))
+
+        # 14c 首页顺序＝独立复算排序（含并列 run_id DESC 决胜；offset 实现必挂）
+        check("14c 首页顺序＝(eff,run_id) DESC 独立复算",
+              [r["run_id"] for r in page] == expected[:20],
+              [r["run_id"] for r in page])
+
+        # 14f 并列时间戳由 run_id DESC 决胜（并列对内大 run_id 在前）
+        tie_ok = True
+        for a, b in zip(page, page[1:]):
+            ra = next(x for x in page if x["run_id"] == a["run_id"])
+            rb = next(x for x in page if x["run_id"] == b["run_id"])
+            ea = ra["completed_at"] or ra["updated_at"]
+            eb = rb["completed_at"] or rb["updated_at"]
+            if ea == eb and ra["run_id"] < rb["run_id"]:
+                tie_ok = False
+        check("14f 并列对内 run_id DESC（run-c-001 先于 run-c-000）", tie_ok)
+        check("14f 首页确含并列对（夹具覆盖到位：minute=18 那对）",
+              "run-c-037" in [r["run_id"] for r in page]
+              and "run-c-036" in [r["run_id"] for r in page])
+
+        # 14d cursor 展开全 61：无重复无遗漏，页大小 20/20/20/1
+        got = [r["run_id"] for r in page]
+        cur = snap["next_cursor"]
+        page_sizes = [len(page)]
+        for _ in range(10):
+            code2, snap2 = server._handle_status(
+                {"data_root": [root], "limit": ["200"],
+                 "completed_cursor": [cur]})
+            check("14d cursor 页请求 200", code2 == 200 and snap2.get("ok"),
+                  (code2, snap2.get("error")))
+            p2 = snap2.get("completed_page") or []
+            page_sizes.append(len(p2))
+            got += [r["run_id"] for r in p2]
+            cur = snap2.get("next_cursor")
+            if not cur:
+                break
+        check("14d D-15 展开全 61 无重复遗漏（顺序＝独立复算全序）",
+              got == expected, (len(got), len(set(got))))
+        check("14d 页大小 20/20/20/1 且尽头上游 next_cursor=None",
+              page_sizes == [20, 20, 20, 1] and cur is None,
+              (page_sizes, cur))
+        check("14d 尾页含缺 completed_at 的回退行（updated_at 兜底）",
+              all(r["completed_at"] is None
+                  for r in (snap2.get("completed_page") or [])
+                  if r["run_id"].startswith("run-n-")),
+              [(r["run_id"], r["completed_at"])
+               for r in (snap2.get("completed_page") or [])])
+
+        # 14e completed_limit 自定义生效（5）
+        code3, snap3 = server._handle_status(
+            {"data_root": [root], "limit": ["200"], "completed_limit": ["5"]})
+        check("14e completed_limit=5 生期且顺序不变",
+              code3 == 200 and len(snap3.get("completed_page") or []) == 5
+              and [r["run_id"] for r in snap3["completed_page"]]
+              == expected[:5],
+              [r["run_id"] for r in snap3.get("completed_page") or []])
+
+        # 14g cursor=keyset 非 offset：伪造合法排序键（签名为真）→ 严格取更早
+        mid = expected[9]
+        forged = server._completed_cursor_encode(eff_of[mid], eff_of[mid], mid)
+        code4, snap4 = server._handle_status(
+            {"data_root": [root], "limit": ["200"],
+             "completed_cursor": [forged]})
+        check("14g 合法排序键 cursor 严格取其后一页（keyset 非 offset）",
+              code4 == 200
+              and [r["run_id"] for r in snap4.get("completed_page") or []]
+              == expected[10:30],
+              [r["run_id"] for r in snap4.get("completed_page") or []])
+
+        # 14h 反向证伪：篡改 payload／签名／格式坏 → 一律 400 人话，不静默错页
+        real_cur = snap["next_cursor"]
+        raw, sig = real_cur.rsplit(".", 1)
+        import base64 as _b64
+        pad = raw + "=" * (-len(raw) % 4)
+        payload = _b64.urlsafe_b64decode(pad.encode()).decode()
+        evil_payload = _b64.urlsafe_b64encode(
+            payload.replace("run", "ofn").encode()).decode("ascii").rstrip("=")
+        for tag, evil in [
+                ("14h 篡改 payload（改 run_id）",
+                 evil_payload + "." + sig),
+                ("14h 篡改签名", raw + "." + ("0" * 12)),
+                ("14h 无签名格式", raw),
+                ("14h 乱码游标", "garbage-cursor"),
+                ("14h 空串游标", "")]:
+            code5, obj5 = server._handle_status(
+                {"data_root": [root], "completed_cursor": [evil]})
+            ok400 = (code5 == 400 and obj5.get("ok") is False
+                     and "游标" in str(obj5.get("error") or ""))
+            if tag == "14h 空串游标":
+                ok400 = code5 == 200  # 空=未传，走默认首页，不算坏游标
+            check(tag + "（坏游标 400 人话）", ok400,
+                  (code5, str(obj5.get("error"))[:60]))
+
+        # 14i 范围过滤：input_root 换别处 → 完成统计归零；回本目录 → 全量回来
+        code6, snap6 = server._handle_status(
+            {"data_root": [root], "limit": ["200"],
+             "input_root": ["/tmp/p16-not-this-input"]})
+        check("14i input_root 别处：completed_total=0（范围过滤同口径）",
+              code6 == 200 and snap6.get("completed_total") == 0,
+              (code6, snap6.get("completed_total")))
+        code7, snap7 = server._handle_status(
+            {"data_root": [root], "limit": ["200"],
+             "input_root": [os.path.join(root, "_src")]})
+        check("14i input_root 本目录：completed_total=61（刷新/归档不丢）",
+              code7 == 200 and snap7.get("completed_total") == 61,
+              (code7, snap7.get("completed_total")))
+
+        # 14j 幂等：同一 cursor 两次请求结果一致（刷新/重试不漂移）
+        code8a, s8a = server._handle_status(
+            {"data_root": [root], "completed_cursor": [real_cur]})
+        code8b, s8b = server._handle_status(
+            {"data_root": [root], "completed_cursor": [real_cur]})
+        check("14j 同游标两次请求页一致（幂等）",
+              code8a == code8b == 200
+              and [r["run_id"] for r in s8a["completed_page"]]
+              == [r["run_id"] for r in s8b["completed_page"]])
+
+        # 14k 完成行带磁盘终态（state/verdict/输出路径），失败行不带
+        check("14k 完成行带 state=PUBLISHED 供详情/输出显示",
+              all(r.get("state") == "PUBLISHED" for r in page),
+              sorted({r.get("state") for r in page}))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     print("tmp 根：%s" % TMP_ROOT)
     server = load_server()
@@ -2093,6 +2346,7 @@ def main():
     part11_p14_digest(server)
     part12_p14_alt_branch(server)
     part13_p15_vocab_display(server)
+    part14_p16_completed_cursor(server)
     if FAILS:
         print("\nSELFTEST FAIL %d/%d：%s" % (len(FAILS), CHECKS[0], FAILS))
         return 1

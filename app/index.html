@@ -30,22 +30,21 @@ header.top .lock{margin-left:auto;font-family:var(--mono);font-size:12px;padding
 header.top .lock.on{color:var(--green);border-color:var(--green)}
 header.top .lock.off{color:var(--dim)}
 header.top .theme{font-family:var(--mono);font-size:12px;padding:4px 12px;border:1px solid var(--line);border-radius:20px;background:transparent;color:var(--text);cursor:pointer}
-main{display:grid;grid-template-columns:220px 1fr 300px;gap:12px;padding:12px 20px;max-width:1280px;margin:0 auto}
-@media (max-width:900px){main{grid-template-columns:1fr}}
-section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}
+/* FR-10/HD-9=A：普通文档流顶部横条（不 sticky、不可收起）；FR-11 两列栅格 */
+main{display:block;padding:12px 20px;max-width:1280px;margin:0 auto}
+.cols{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:12px;align-items:start}
+@media (max-width:960px){.cols{grid-template-columns:1fr}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0}
 section h2{font-size:13px;color:var(--dim);margin:0 0 10px;font-weight:600}
-.tape{background:var(--input-bg);border:1px solid var(--line);border-radius:6px;padding:10px 8px;position:relative}
-.tape::before{content:"懒得笔记 · 本机磁带";display:block;font-family:var(--mono);font-size:10px;color:var(--orange);letter-spacing:2px;margin-bottom:8px}
-.tape .leader{height:6px;background:var(--orange);border-radius:3px;margin-bottom:10px}
-.seg{margin:8px 0;padding:6px 8px;background:var(--panel2);border-left:3px solid var(--dim);border-radius:0 4px 4px 0}
+.flowbar{display:flex;align-items:center;gap:10px;padding:6px 12px;margin:0 0 12px}
+.flowbar::before{content:"懒得笔记 · 本机磁带";font-family:var(--mono);font-size:10px;color:var(--orange);letter-spacing:2px;flex:0 0 auto}
+#tape{display:flex;flex:1 1 auto;gap:6px;flex-wrap:wrap;align-items:center;min-width:0}
+.seg{display:inline-flex;align-items:baseline;gap:6px;margin:0;padding:3px 8px;background:var(--panel2);border:1px solid var(--dim);border-radius:4px}
 .seg .nm{font-size:12px}
-.seg .sub{font-size:11px;color:var(--dim)}
-.seg .holes{height:8px;margin-top:6px;border-radius:2px;
-  background-image:radial-gradient(circle, var(--input-bg) 2.2px, var(--dim) 2.4px, transparent 2.6px);
-  background-size:12px 8px;background-repeat:repeat-x;opacity:.7}
-.seg.ok{border-color:var(--green)} .seg.ok .nm{color:var(--green)}
-.seg.warn{border-color:var(--orange)} .seg.warn .nm{color:var(--orange)}
-.seg.err{border-color:var(--red)} .seg.err .nm{color:var(--red)}
+.seg .sttxt{font-size:11px;color:var(--dim)}
+.seg.ok{border-color:var(--green)} .seg.ok .nm,.seg.ok .sttxt{color:var(--green)}
+.seg.warn{border-color:var(--orange)} .seg.warn .nm,.seg.warn .sttxt{color:var(--orange)}
+.seg.err{border-color:var(--red)} .seg.err .nm,.seg.err .sttxt{color:var(--red)}
 label.flab{display:block;font-size:12px;color:var(--text);margin:8px 0 4px}
 label.flab .req{color:var(--orange)}
 .pathrow{display:flex;gap:6px;margin-bottom:2px}
@@ -130,6 +129,11 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
 .runsheadbtns{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}
 .runsheadbtns button{font-size:12px;padding:4px 10px;border-radius:4px;border:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}
 .runsheadbtns button.go{background:var(--orange);border:none;color:#fff;font-weight:700}
+/* FR-12 完成区计数/展开；FR-15 标题区隐藏开关（只改视图过滤，不删数据） */
+.hidetoggle{margin-left:8px;font-size:12px;font-weight:400;color:var(--text);cursor:pointer;white-space:nowrap}
+.hidetoggle input{vertical-align:-2px}
+#completedBar{margin:6px 0}
+#completedBar button{font-size:12px;padding:4px 10px;border-radius:4px;border:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}
 .notestatus{margin:6px 0;padding:6px 8px;border-radius:4px;font-size:12px;word-break:break-all;line-height:1.6}
 .notestatus.warn{background:rgba(217,164,65,.14);border:1px solid var(--yellow);color:var(--yellow)}
 .notestatus.ok{color:var(--dim)}
@@ -182,15 +186,12 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
   <button class="theme" id="btnTheme" title="切换深色/浅色">◐ 浅色</button>
 </header>
 <main>
-  <section>
-    <h2>流水线磁带</h2>
-    <div class="tape">
-      <div class="leader"></div>
-      <div id="tape"></div>
-    </div>
+  <section class="flowbar" aria-label="流程状态条">
+    <div id="tape"></div>
   </section>
+  <div class="cols">
   <section>
-    <h2>处理任务</h2>
+    <h2>处理任务<label class="hidetoggle" for="hideDoneChk" title="只隐藏本页完成列表的显示，不改任何业务数据；按数据目录分区记住，可随时取消恢复"><input type="checkbox" id="hideDoneChk"> 隐藏已完成</label></h2>
     <div id="liveBar"></div>
     <label class="flab" for="inInput">视频文件夹 <span class="req">（必填）</span></label>
     <div class="pathrow">
@@ -244,6 +245,7 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
       <thead><tr><th>任务</th><th>来源</th><th>状态</th><th>输出</th><th>更新时间</th><th>操作</th></tr></thead>
       <tbody id="runs"></tbody>
     </table></div>
+    <div id="completedBar" class="hint" style="display:none"></div>
     <div class="empty" id="empty" style="display:none"></div>
     <div id="vocabBox">
       <h3>词汇（错词→正词，新转写自动应用；错词至少2字，2-3字短词二次确认）</h3>
@@ -277,6 +279,7 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
     <h2>选中任务详情</h2>
     <div class="kv" id="lineage"><span class="k">点击左侧任意一行查看详情。</span></div>
   </section>
+  </div>
 </main>
 <div class="modal" id="modal"><div class="box">
   <h3>选择目录</h3>
@@ -326,6 +329,58 @@ var prevDone=-1, prevFailed=-1, notifAsked=false, longInInput=0;
 var LS_INPUT="v2o-input-root", LS_VAULT="v2o-vault-root", LS_DATA="v2o-data-root";
 function lsGet(k){try{return localStorage.getItem(k)||"";}catch(e){return "";}}
 function lsSet(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+// FR-15/HD-7=A：同步紧凑 SHA-256（仅作 data_root 不可逆摘要用；前端自测钉已知向量）
+function sha256Hex(str){
+  function isPrime(n){for(var f=2;f*f<=n;f++){if(n%f===0)return false;}return true;}
+  function frac(x){return x-Math.floor(x);}
+  var primes=[],n=2,i,j;
+  while(primes.length<64){if(isPrime(n))primes.push(n);n++;}
+  var H=[],K=[];
+  for(i=0;i<64;i++){
+    if(i<8)H.push(Math.floor(frac(Math.sqrt(primes[i]))*4294967296));
+    K.push(Math.floor(frac(Math.cbrt(primes[i]))*4294967296));
+  }
+  var utf8=unescape(encodeURIComponent(String(str)));
+  var bytes=[];
+  for(i=0;i<utf8.length;i++)bytes.push(utf8.charCodeAt(i)&255);
+  var bitLen=bytes.length*8;
+  bytes.push(128);
+  while(bytes.length%64!==56)bytes.push(0);
+  var hi=Math.floor(bitLen/4294967296),lo=bitLen-hi*4294967296;
+  [hi,lo].forEach(function(v){bytes.push((v>>>24)&255,(v>>>16)&255,(v>>>8)&255,v&255);});
+  for(i=0;i<bytes.length;i+=64){
+    var w=new Array(64);
+    for(j=0;j<16;j++)w[j]=(bytes[i+4*j]<<24)|(bytes[i+4*j+1]<<16)|(bytes[i+4*j+2]<<8)|bytes[i+4*j+3];
+    for(j=16;j<64;j++){
+      var s0=((w[j-15]>>>7)|(w[j-15]<<25))^((w[j-15]>>>18)|(w[j-15]<<14))^(w[j-15]>>>3);
+      var s1=((w[j-2]>>>17)|(w[j-2]<<15))^((w[j-2]>>>19)|(w[j-2]<<13))^(w[j-2]>>>10);
+      w[j]=(w[j-16]+s0+w[j-7]+s1)|0;
+    }
+    var a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+    for(j=0;j<64;j++){
+      var S1=((e>>>6)|(e<<26))^((e>>>11)|(e<<21))^((e>>>25)|(e<<7));
+      var ch=(e&f)^(~e&g);
+      var t1=(h+S1+ch+K[j]+w[j])|0;
+      var S0=((a>>>2)|(a<<30))^((a>>>13)|(a<<19))^((a>>>22)|(a<<10));
+      var mj=(a&b)^(a&c)^(b&c);
+      var t2=(S0+mj)|0;
+      h=g;g=f;f=e;e=(d+t1)|0;d=c;c=b;b=a;a=(t1+t2)|0;
+    }
+    H[0]=(H[0]+a)|0;H[1]=(H[1]+b)|0;H[2]=(H[2]+c)|0;H[3]=(H[3]+d)|0;
+    H[4]=(H[4]+e)|0;H[5]=(H[5]+f)|0;H[6]=(H[6]+g)|0;H[7]=(H[7]+h)|0;
+  }
+  var out="";
+  for(i=0;i<8;i++)out+=("00000000"+((H[i]>>>0).toString(16))).slice(-8);
+  return out;
+}
+// FR-15/HD-7=A：隐藏已完成只写 localStorage；键按 data_root 摘要（sha256 前 8 位）分区
+function hideDoneKey(){
+  var dr="";
+  try{dr=String(dataRoot()||"").trim()||String(effectiveDataRoot||"").trim();}catch(e){}
+  return "v2o-hide-done-"+sha256Hex(dr).slice(0,8);
+}
+function hideDoneGet(){return lsGet(hideDoneKey())==="1";}
+function hideDoneSet(v){lsSet(hideDoneKey(),v?"1":"0");}
 function savePaths(){
   try{
     var a=el("inInput").value.trim(), b=el("inVault").value.trim(), c=el("inData").value.trim();
@@ -369,6 +424,12 @@ function applyTheme(t){
 el("btnTheme").onclick=function(){
   var cur=document.documentElement.getAttribute("data-theme")||"light";
   applyTheme(cur==="light"?"dark":"light");
+};
+// FR-15：隐藏已完成开关（只写 localStorage、按 data_root 分区；只改视图过滤）
+try{el("hideDoneChk").checked=hideDoneGet();}catch(e){}
+el("hideDoneChk").onchange=function(){
+  hideDoneSet(el("hideDoneChk").checked);
+  if(lastSnap)renderRuns(lastSnap);
 };
 function dataRoot(){return el("inData").value.trim();}
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];});}
@@ -416,12 +477,19 @@ function segState(id,counts,err){
   if(id==="archive")return n("archive_commits")>0?"ok":"";
   return "";
 }
+// FR-10/HD-9=A：节点状态用文字表达（非颜色单一通道），颜色只是辅助
+function segStateText(st){
+  if(st==="ok")return "有记录";
+  if(st==="warn")return "待确认";
+  if(st==="err")return "有失败";
+  return "暂无";
+}
 function renderTape(snap){
   var counts=snap&&snap.counts_by_state||{}, err=(snap&&snap.error_count)||0;
   var h="";
   SEGS.forEach(function(s){
     var st=segState(s.id,counts,err);
-    h+='<div class="seg '+st+'" title="'+esc(s.sub)+'"><div class="nm">'+esc(s.nm)+'</div><div class="sub">'+esc(s.sub)+'</div><div class="holes"></div></div>';
+    h+='<div class="seg '+st+'" title="'+esc(s.sub)+'"><span class="nm">'+esc(s.nm)+'</span><span class="sttxt">'+esc(segStateText(st))+'</span></div>';
   });
   el("tape").innerHTML=h;
 }
@@ -612,14 +680,94 @@ function renderRunsHead(snap){
   var cb=el("btnCopyFailedReasons");if(cb)cb.onclick=copyAllFailedReasons;
   var eb=el("btnShowEvidence");if(eb)eb.onclick=showFailEvidence;
 }
+// FR-12/HD-6=A：完成区分层状态。首层来自快照 completed_page（默认 20 条），
+// 更早页按 next_cursor 追加加载；换 data_root 或手动刷新即重置（展开视图不跨目录串）。
+var completedExtra=[], completedNextCursor=null, completedRootSeen=null, completedLoading=false;
+function visibleCompletedRows(snap){
+  var rows=[], seen={};
+  ((snap&&snap.completed_page)||[]).concat(completedExtra).forEach(function(r){
+    if(r&&r.run_id&&!seen[r.run_id]){seen[r.run_id]=1;rows.push(r);}
+  });
+  return rows;
+}
+function loadOlderCompleted(){
+  if(completedLoading||!completedNextCursor)return;
+  completedLoading=true;
+  var qs=[];
+  if(dataRoot())qs.push("data_root="+encodeURIComponent(dataRoot()));
+  // 与 refresh 同口径：limit 必带 200（否则后端默认 20 会漏失败行）
+  qs.push("limit=200");
+  var irf=el("inInput").value.trim()||((lastLock&&lastLock.input_root)||"");
+  if(irf)qs.push("input_root="+encodeURIComponent(irf));
+  qs.push("completed_cursor="+encodeURIComponent(completedNextCursor));
+  fetch("/api/status?"+qs.join("&")).then(function(r){
+    return r.json().then(function(s){return{code:r.status,s:s};});
+  }).then(function(x){
+    completedLoading=false;
+    if(x.code!==200){say("已完成历史读取失败："+((x.s&&x.s.error)||x.code),"err");return;}
+    var s=x.s||{};
+    var seen={};
+    (s.completed_page||[]).forEach(function(r){
+      if(r&&r.run_id&&!seen[r.run_id]){seen[r.run_id]=1;completedExtra.push(r);}
+    });
+    completedNextCursor=s.next_cursor||null;
+    if(lastSnap)renderRuns(lastSnap);
+  }).catch(function(e){completedLoading=false;say("已完成历史读取失败："+e,"err");});
+}
+function renderCompletedBar(snap, completedRows){
+  var bar=el("completedBar");
+  if(!bar)return;
+  if(!snap||snap.completed_total==null){bar.style.display="none";bar.innerHTML="";return;}
+  var total=parseInt(snap.completed_total,10)||0;
+  var hideOn=false;
+  try{hideOn=hideDoneGet();}catch(e){}
+  var t="已完成 "+total+" 条";
+  if(hideOn)t+=" · 已隐藏（取消勾选标题区「隐藏已完成」即可恢复）";
+  var html='<span>'+esc(t)+'</span>';
+  if(!hideOn&&completedNextCursor&&total>completedRows.length){
+    html+=' <button id="btnMoreCompleted">展开更早（还有 '+(total-completedRows.length)+' 条）</button>';
+  }
+  bar.innerHTML=html;
+  bar.style.display="block";
+  var b=el("btnMoreCompleted");
+  if(b)b.onclick=function(){loadOlderCompleted();};
+}
 function renderRuns(snap){
   lastSnap=snap;
   var runs=(snap&&snap.recent_runs)||[];
-  cache.runs=runs;
   renderRunsHead(snap);
   var tb=el("runs");
   var cur=(lastLock&&lastLock.worker&&lastLock.worker.current)||null;
-  tb.innerHTML=runs.map(function(r,i){
+  // FR-12：分层——当前/排队/失败/受阻永远全量在前，不受 limit 影响；
+  // 完成区默认只画首页（completed_page），更早的收起，按「展开更早」cursor 追加。
+  // FR-15：隐藏开关只过滤本页视图，业务数据零删写。
+  var completedRows=[];
+  if(snap&&snap.completed_page){
+    var irNow=el("inInput").value.trim()||((lastLock&&lastLock.input_root)||"");
+    if(completedRootSeen===null||completedRootSeen!==dataRoot()+"|"+irNow){
+      completedRootSeen=dataRoot()+"|"+irNow;
+      completedExtra=[];
+      completedNextCursor=null;
+    }
+    if(completedNextCursor===null)completedNextCursor=snap.next_cursor||null;
+    completedRows=visibleCompletedRows(snap);
+    completedRows.forEach(function(r){
+      // 快照里的磁盘终态喂给详情/输出显示（worker 详情优先，不覆盖）
+      if(r&&r.run_id&&!detailsByRun[r.run_id]&&r.state){
+        detailsByRun[r.run_id]={state:r.state,verdict:r.verdict||"",
+          rendered_path:r.rendered_path||null,
+          canonical_output_path:r.canonical_output_path||null};
+      }
+    });
+    var cset={};
+    completedRows.forEach(function(r){cset[r.run_id]=1;});
+    runs=runs.filter(function(r){return !(r&&(r.completed===true||cset[r.run_id]));});
+  }
+  var hideOn=false;
+  try{el("hideDoneChk").checked=hideDoneGet();hideOn=hideDoneGet();}catch(e){}
+  var rowsAll=runs.concat(hideOn?[]:completedRows);
+  cache.runs=rowsAll;
+  tb.innerHTML=rowsAll.map(function(r,i){
     var cn=statusCN(r,cur);
     var outCell=outCellFor(r.run_id);
     var d=detailsByRun[r.run_id];
@@ -642,7 +790,8 @@ function renderRuns(snap){
     // UX2-P1-7/P1-5：来源列显“文件夹尾段＋文件名”，裸哈希只进 title
     return '<tr data-i="'+i+'" class="'+(selected===i?"sel":"")+'"><td title="'+esc(r.run_id)+'">'+taskCell+'</td><td title="'+esc(r.source_id||"")+'">'+esc(sourceLabelForRun(r))+'</td><td class="'+stClass(cn)+'">'+esc(cn)+'</td><td>'+outCell+'</td><td>'+esc(r.updated_at)+'</td><td>'+op+'</td></tr>';
   }).join("");
-  var showEmpty=!snap||snap.ok===false||runs.length===0;
+  renderCompletedBar(snap, completedRows);
+  var showEmpty=!snap||snap.ok===false||(rowsAll.length===0&&completedRows.length===0);
   el("empty").style.display=showEmpty?"block":"none";
   el("runsWrap").style.display=showEmpty?"none":"block";
   if(showEmpty){
@@ -2047,6 +2196,9 @@ function refresh(autoPoll){
     var s=x.s;
     // 后端按 data_root 只回本目录的数据；400 时如实说明原因，不静默忽略
     if(x.code!==200){say("状态读取失败："+((s&&s.error)||x.code),"err");return;}
+    // FR-12：每张新快照把续接游标对齐到「首页尾之后」——监听中新完成项把
+    // 边界行挤出首页时，下一次「展开更早」从首页尾接起、按 run_id 去重，不留缝
+    if(s&&s.completed_page)completedNextCursor=s.next_cursor||null;
     renderTape(s);renderRuns(s);
     if(s&&s.ok===false)say("状态库尚不存在，填入视频文件夹后点击「开始监听」。");
   }).catch(function(e){say("状态读取失败："+e,"err");});
@@ -2059,6 +2211,7 @@ function refresh(autoPoll){
   }).catch(function(){});
   if(!autoPoll){
     dropDiagCache();   // P1-4：手动刷新＝用户要看最新本地证据，旧诊断快照不再复用
+    completedExtra=[];completedNextCursor=null;completedRootSeen=null;   // FR-12：手动刷新重置完成区展开视图
     try{loadVocab();}catch(e){}
     try{loadPresets();}catch(e){}
     try{loadVocabCandidates();}catch(e){}

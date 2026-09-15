@@ -48,13 +48,17 @@ FUNCS = [
     "copyText", "openLongPanel", "failPartsForRun", "filenameForRun", "shortId",
     # P1-5 词库列表展示层：分组判定（trim/大小写）与整块渲染（来源标签/空态/筛选计数）
     "vocabGroupFor", "renderVocabList",
+    # P1-6/FR-15：data_root 摘要与隐藏键（sha256 紧凑实现＋localStorage 键分区）
+    "sha256Hex", "hideDoneKey", "hideDoneGet", "hideDoneSet", "lsGet", "lsSet",
 ]
 
-# P1-4：模块常量/模块变量也照抄真源码，不手写——常量改了测试跟着改，不会漂移
+# P1-4：模块常量/模块变量也照抄真源码，不手抄——常量改了测试跟着改，不会漂移
 DECLS = ["FAIL_DIGEST_FIELDS", "REDACT_STOP_CHARS", "NO_EVIDENCE", "diagCache",
          "effectiveDataRoot", "lastLongText",
          # P1-5：词库分组标签表与当前词条表，照抄真源码
-         "vocabGroupLabels", "loadedVocabEntries"]
+         "vocabGroupLabels", "loadedVocabEntries",
+         # P1-6/FR-12：完成区分层状态（一行声明含四个变量，照抄整行）
+         "completedExtra"]
 
 
 def extract(src, name):
@@ -1380,9 +1384,48 @@ async function s11(){
        return g.getAttribute("data-candidate-group") + ":" + g.checked; }));
 }
 
+// ------------------------------------------------------------------ S12 P1-6 sha256 向量与隐藏键分区
+async function s12(){
+  reset();
+  // 已知向量（Python hashlib 独立算出钉死；写错位运算/常量即挂）
+  ck("S12 sha256 向量：abc",
+     sha256Hex("abc") === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+     sha256Hex("abc"));
+  ck("S12 sha256 向量：空串",
+     sha256Hex("") === "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     sha256Hex(""));
+  ck("S12 sha256 向量：中文 UTF-8",
+     sha256Hex("懒得笔记") === "c67e59a03b97fa1a6a165e31d3cc459ed1379c9bcfee97386d85da8dff931034",
+     sha256Hex("懒得笔记"));
+
+  // FR-15/HD-7=A：键按 data_root 不可逆摘要分区（sha256 前 8 位），不落原始路径
+  el("inData").value = "/tmp/p12-fake-rootA"; effectiveDataRoot = "";
+  var kA = hideDoneKey();
+  ck("S12 键格式 v2o-hide-done-<8hex>（v2o- 风格一致）",
+     /^v2o-hide-done-[0-9a-f]{8}$/.test(kA), kA);
+  ck("S12 键＝sha256(data_root) 前 8 位（hashlib 对账）",
+     kA === "v2o-hide-done-e6e99aca", kA);
+  hideDoneSet(true);
+  ck("S12 开关写读一致", hideDoneGet() === true, hideDoneGet());
+  el("inData").value = "/tmp/p16-other-root";
+  ck("S12 不同 data_root 键不同、状态隔离（反向证伪：串味即挂）",
+     hideDoneKey() === "v2o-hide-done-591dad02" && hideDoneGet() === false,
+     hideDoneKey());
+  el("inData").value = "/tmp/p12-fake-rootA";
+  ck("S12 切回原目录状态保留（跨刷新持久语义）", hideDoneGet() === true);
+  hideDoneSet(false);
+  ck("S12 可逆（取消隐藏即恢复）", hideDoneGet() === false);
+  el("inData").value = "";
+  effectiveDataRoot = "/tmp/p16-other-root";
+  ck("S12 输入框为空时按生效目录（effectiveDataRoot）取键",
+     hideDoneKey() === "v2o-hide-done-591dad02", hideDoneKey());
+  el("inData").value = "/tmp/p12-fake-rootA"; effectiveDataRoot = "";
+  reset();
+}
+
 (async function(){
   await s1(); await s2(); await s3(); await s4(); await s5(); await s6(); await s7();
-  await s8(); await s9(); await s10(); await s11();
+  await s8(); await s9(); await s10(); await s11(); await s12();
   if(FAILS.length){ console.log("FRONT FAIL " + FAILS.length + ": " + FAILS.join(" | "));
                     process.exit(1); }
   console.log("FRONT ALL PASS");
@@ -1406,9 +1449,98 @@ def brand_checks():
     assert not sc_left, "status_cli.py 可见文案 V2O 残留（非 V2OApp 类名）: %s" % sc_left
 
 
+def layout_checks():
+    """P1-6 布局与零回退静态守卫（改坏即 rc=1）。
+
+    FR-10：顶部普通文档流横条（不 sticky/不可收起、旧 220px 列已删、节点有
+    文字状态）；FR-11：两列栅格＋窄屏单列断点；FR-12/15：完成区与隐藏开关
+    骨架；FR-9：既有功能 DOM/处理入口一个不少；P0-3：批量重跑入口仍唯一。
+    """
+    src = open(HTML, encoding="utf-8").read()
+    bad = []
+
+    def ck(name, cond, extra=""):
+        if not cond:
+            bad.append("%s  << %s" % (name, extra))
+
+    # ---- FR-10 顶部横条（HD-9=A：普通文档流，滚动自然离开）
+    ck("L1 横条 section 存在（flowbar）", 'class="flowbar"' in src)
+    ck("L1 磁带容器保留（#tape 由 JS 渲染）", '<div id="tape"></div>' in src)
+    ck("L1 不 sticky（反向证伪：加回 sticky 即挂）",
+       "position:sticky" not in src and "position: sticky" not in src)
+    ck("L1 旧 220px 全高流程列已删（grid-template-columns:220px 不得回来）",
+       "grid-template-columns:220px" not in src and ".tape{" not in src
+       and 'class="tape"' not in src and "class=\"leader\"" not in src)
+    ck("L1 节点带非颜色文字状态（segStateText/.sttxt）",
+       "function segStateText(" in src and ".sttxt" in src)
+    ck("L1 品牌标签保留在横条（本机磁带）",
+       'content:"懒得笔记 · 本机磁带"' in src)
+
+    # ---- FR-11 响应式两列（320px/960px 基线）
+    ck("L2 桌面两列栅格（minmax(0,1fr) 300px）",
+       "grid-template-columns:minmax(0,1fr) 300px" in src)
+    ck("L2 窄屏 960px 折单列", "@media (max-width:960px)" in src)
+    ck("L2 单列无横向溢出：栅格子项 min-width:0",
+       "section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0}" in src)
+    i_bar = src.find('aria-label="流程状态条"')
+    i_task = src.find('id="hideDoneChk"')
+    i_detail = src.find("选中任务详情")
+    ck("L2 DOM 顺序：横条 → 主任务区 → 详情（窄屏单列主操作不落后）",
+       0 <= i_bar < i_task < i_detail, (i_bar, i_task, i_detail))
+
+    # ---- FR-12/FR-15 完成区与隐藏开关骨架
+    ck("L3 完成区计数条存在（#completedBar）", 'id="completedBar"' in src)
+    ck("L3 「展开更早」cursor 追加加载（loadOlderCompleted）",
+       "function loadOlderCompleted(" in src
+       and "completed_cursor=" in src)
+    ck("L3 已完成计数文案（已完成 N 条）", '"已完成 "+total+" 条"' in src)
+    ck("L3 隐藏开关在标题区（#hideDoneChk）", i_task > 0)
+    ck("L3 隐藏键按 data_root 摘要分区（v2o-hide-done-）",
+       '"v2o-hide-done-"+sha256Hex' in src)
+    ck("L3 隐藏只改视图过滤（hideOn 滤完成行，零删写）",
+       "runs.concat(hideOn?[]:completedRows)" in src)
+
+    # ---- FR-9 零回退：既有功能 DOM 与处理入口一个不少
+    for frag, name in [
+            ('id="recoverBox"', "恢复与重试区 #recoverBox"),
+            ('id="btnRecTranscribe"', "重新转写全部失败按钮"),
+            ('id="btnRecReuse"', "从已有文字重新成稿按钮"),
+            ('id="btnRecPublish"', "仅重新入库按钮"),
+            ('id="btnStart"', "开始监听"), ('id="btnStop"', "停止"),
+            ('id="btnRefresh"', "刷新"), ('id="btnClear"', "清空本目录任务"),
+            ('id="vocabBox"', "词库区"), ('id="candidateBox"', "候选区"),
+            ('复制脱敏摘要', "脱敏摘要复制入口"),
+            ('data-retry-publish=', "单条重试入库"), ('data-retry=', "单条重试"),
+            ('data-reapply=', "应用新词库重跑"),
+            ('function retryRun(', "retryRun"), ('function reapplyOne(', "reapplyOne"),
+            ('function publishOnlyRetry(', "publishOnlyRetry"),
+            ('function renderVocabList(', "renderVocabList"),
+            ('function loadVocabCandidates(', "loadVocabCandidates")]:
+        ck("L4 FR-9 保留：%s" % name, frag in src, frag)
+    ck("L4 目录浏览 3 个入口（输入/笔记库/数据目录）",
+       src.count('class="req"') >= 1 and src.count("data-browse=") == 3,
+       src.count("data-browse="))
+    # P0-3：全文不得出现第二个批量重跑入口（按钮本体唯一，且无别批量 data-* 挂点）
+    ck("L4 P0-3 批量重跑入口唯一（btnRecTranscribe 仅 1 处）",
+       src.count('id="btnRecTranscribe"') == 1, src.count('id="btnRecTranscribe"'))
+    ck("L4 P0-3 无第二个批量重跑挂点（data-retry-all/btnRetryAll 类）",
+       "data-retry-all" not in src and 'id="btnRetryAll"' not in src
+       and "data-rerun-all" not in src)
+
+    # ---- 主题默认浅色不动（约束 4）
+    ck("L5 默认浅色首帧（data-theme=light）",
+       '<html lang="zh-CN" data-theme="light">' in src)
+    ck("L5 主题兜底逻辑一字不改",
+       'var use=(t==="dark")?"dark":"light";' in src)
+
+    assert not bad, "布局/零回退静态守卫 %d 项失败：%s" % (len(bad), bad)
+
+
 def main():
     brand_checks()
     print("BRAND SELFTEST PASS")
+    layout_checks()
+    print("LAYOUT SELFTEST PASS")
     src = open(HTML, encoding="utf-8").read()
     parts = []
     for name in DECLS:

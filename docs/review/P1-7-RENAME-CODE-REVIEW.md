@@ -189,3 +189,7 @@ grep 该文件可见文案 V2O 零残留（仅剩 V2OApp 类名 3 处）。
 ## 复核结论
 
 P1-7 返工（Change B）**PASS**：净增量 7 文件 34+/16− 与申报精确一致、上轮已 PASS 文件（index.html/两 README）sha256 零触碰、menu_bar 4 改 3 留逐处判定正确、status_cli/start.sh 精确单点、禁改清单 7 项全原样、brand_checks 六处断言牙经两条变异实证 rc=1（/tmp 还原零损）、三套自测 rc=0、DoD 六项全 PASS。可进 QA/supervisor 链。
+
+---
+
+> 勘误注记（2026-09-15，加注人 neat-freak）：复核二中「主题兜底」引用行号 `:370` 系笔误，实际为 `:364`（supervisor 复检发现）。仅行号更正，复核结论不变。

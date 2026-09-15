@@ -13,7 +13,9 @@
 
 API：
   GET  /              -> index.html
-  GET  /api/status?data_root=&limit= -> collect() 原样
+  GET  /api/status?data_root=&limit=&completed_limit=&completed_cursor=
+                      -> collect() 原样＋FR-12 完成列表分页
+                      （completed_total/completed_page/next_cursor；游标坏/被篡改 400）
   POST /api/start     -> 后台 run_startup（data_root/input_root/ob_vault_root），已在跑则 409
   GET  /api/start     -> 本进程监听状态（running/data_root/input_root/ob_vault_root/worker/error）
   GET  /api/browse?path= -> {path, parent, dirs[]}（只列目录，按名排序）
@@ -28,8 +30,10 @@ ob_vault_root 默认空：为空则 worker 只跑到 Render，不 Publish。
 from __future__ import annotations
 
 import json
+import base64
 import datetime
 import hashlib
+import hmac
 import os
 import shutil
 import sqlite3
@@ -2846,6 +2850,172 @@ def _scoped_runs_summary(data_root: str, input_root: str) -> dict:
                 pass
 
 
+# ------------------------------------------ FR-12/HD-6=A 完成列表分层与 cursor 历史
+
+COMPLETED_DEFAULT_LIMIT = 20
+COMPLETED_MAX_LIMIT = 200
+_CURSOR_SIG_PREFIX = "v2o-cursor:"
+
+
+def _completed_cursor_encode(finished_at: str, updated_at: str,
+                             run_id: str) -> str:
+    """FR-12：cursor 编码排序键（finished_at|updated_at + run_id），带校验和。
+
+    不用易漂移 offset；payload 校验和不匹配即视为被篡改（decode 侧 400）。
+    """
+    payload = json.dumps(
+        {"f": str(finished_at or ""), "u": str(updated_at or ""),
+         "r": str(run_id or "")},
+        ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    raw = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+    sig = hashlib.sha256((_CURSOR_SIG_PREFIX + raw).encode("utf-8")).hexdigest()[:12]
+    return raw + "." + sig
+
+
+def _completed_cursor_decode(token: str) -> tuple:
+    """校验并解出 cursor 排序键（finished_at, updated_at, run_id）；坏/篡改 400。"""
+    text = str(token or "")
+    if "." not in text:
+        raise ParamError("完成列表游标格式不正确，请回列表点「展开更早」重新加载")
+    raw, sig = text.rsplit(".", 1)
+    expect = hashlib.sha256(
+        (_CURSOR_SIG_PREFIX + raw).encode("utf-8")).hexdigest()[:12]
+    if not hmac.compare_digest(str(sig), expect):
+        raise ParamError("完成列表游标校验失败（可能被改动），请回列表点「展开更早」重新加载")
+    try:
+        payload = json.loads(
+            base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8"))
+        f = str(payload.get("f") or "")
+        u = str(payload.get("u") or "")
+        r = str(payload.get("r") or "")
+    except Exception:
+        raise ParamError("完成列表游标解析失败，请回列表点「展开更早」重新加载")
+    if not r:
+        raise ParamError("完成列表游标缺少排序键，请回列表点「展开更早」重新加载")
+    return f, u, r
+
+
+def _completed_runs_view(data_root: str, input_root: str) -> list:
+    """FR-12：全量完成项视图（不受 limit 限制），按 (eff_ts, run_id) DESC 排。
+
+    完成=磁盘终态 PUBLISHED/RENDER_ONLY（与 _scoped_runs_summary 的 done
+    分桶同口径，DONE_STATES）；finished_at 取库列 completed_at，缺了回退
+    updated_at；并列时间戳由 run_id 决胜。范围过滤同口径：孤儿（映射缺失）
+    可见，不静默丢。只读，fail-open（库打不开回空列表）。
+    """
+    con = _open_ro(data_root)
+    if con is None:
+        return []
+    try:
+        rows = con.execute(
+            "SELECT run_id, source_id, status, created_at, updated_at,"
+            " completed_at FROM processing_runs"
+        ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+    try:
+        disk = _scan_disk_states(data_root)
+    except Exception:
+        disk = {}
+    try:
+        mapping = _run_source_path_map(data_root)
+    except Exception:
+        mapping = {}
+    allow_all = not input_root
+    out: list = []
+    for r in rows:
+        try:
+            rid = str(r[0])
+        except Exception:
+            continue
+        d = disk.get(rid)
+        if not (isinstance(d, dict) and str(d.get("state") or "") in DONE_STATES):
+            continue
+        path = mapping.get(rid) if mapping else None
+        if (not allow_all and path is not None
+                and not _is_under_root(str(path or ""), input_root)):
+            continue
+        finished_at = str(r[5] or "")
+        updated_at = str(r[4] or "")
+        out.append({
+            "run_id": rid, "source_id": r[1], "status": r[2],
+            "created_at": r[3], "updated_at": updated_at,
+            "completed_at": finished_at or None,
+            "finished_at": finished_at,
+            "state": str(d.get("state") or ""),
+            "verdict": str(d.get("verdict") or ""),
+            "rendered_path": d.get("rendered_path"),
+            "canonical_output_path": d.get("canonical_output_path"),
+            "source_path": path,
+            "_eff": finished_at or updated_at,
+        })
+    out.sort(key=lambda e: (e["_eff"], e["run_id"]), reverse=True)
+    return out
+
+
+def _attach_completed_view(snap: dict, data_root: str, input_root: str,
+                           query: dict) -> dict:
+    """FR-12/D-15：完成项单独分页＋recent_runs 完成行打标。
+
+    recent_runs 原样返回（当前/排队/失败/受阻始终全量可见，不受 limit 影响），
+    只给完成行补 completed:true 标记供前端分层；分页字段
+    completed_total/completed_limit/completed_page/next_cursor 挂在返回 dict。
+    坏/被篡改 completed_cursor 抛 ParamError（do_GET 统一回 400，不静默）。
+    completed_limit 非整数同样 400；越界按既有 limit 口径钳制（1..200）。
+    """
+    limit = _query_int(query, "completed_limit", COMPLETED_DEFAULT_LIMIT)
+    limit = max(1, min(limit, COMPLETED_MAX_LIMIT))
+    cursor_token = _query_str(query, "completed_cursor").strip()
+    entries = _completed_runs_view(data_root, input_root)
+    total = len(entries)
+    done_ids = {e["run_id"] for e in entries}
+    try:
+        runs = snap.get("recent_runs")
+        if isinstance(runs, list):
+            for r in runs:
+                if isinstance(r, dict) and str(r.get("run_id") or "") in done_ids:
+                    r["completed"] = True
+    except Exception:
+        pass
+    if cursor_token:
+        f, u, rid = _completed_cursor_decode(cursor_token)
+        cur_eff = f or u
+        after = [e for e in entries if (e["_eff"], e["run_id"]) < (cur_eff, rid)]
+    else:
+        after = entries
+    page = after[:limit]
+    next_cursor = None
+    if page and len(after) > len(page):
+        last = page[-1]
+        next_cursor = _completed_cursor_encode(
+            last["finished_at"], last["updated_at"], last["run_id"])
+    page_rows = []
+    for e in page:
+        row = {k: e[k] for k in ("run_id", "source_id", "status",
+                                 "created_at", "updated_at", "completed_at",
+                                 "state", "verdict", "rendered_path",
+                                 "canonical_output_path")}
+        row["completed"] = True
+        sp = e.get("source_path")
+        if isinstance(sp, str) and sp.strip():
+            sp = sp.strip()
+            d = os.path.dirname(sp)
+            row["source_path"] = sp
+            row["source_dir"] = d
+            row["source_dir_tail"] = _dir_tail(d)
+            row["source_filename"] = os.path.basename(sp) or "未知文件"
+        else:
+            row["source_filename"] = "未知文件"
+        page_rows.append(row)
+    return {"completed_total": total, "completed_limit": limit,
+            "completed_page": page_rows, "next_cursor": next_cursor}
+
+
 def _finder_url(abs_path: str) -> str:
     """P0-4：在访达中打开（file:// + 全编码，复制路径兜底由前端做）。"""
     return "file://" + urllib.parse.quote(os.path.abspath(abs_path), safe="/:")
@@ -4241,6 +4411,13 @@ def _handle_status(query: dict) -> tuple[int, dict]:
             snap["run_summary"] = summary
     except Exception:
         pass
+    # FR-12/HD-6=A：完成列表分层分页（completed_limit 默认 20，keyset cursor
+    # 编码排序键；坏/被篡改游标回 400 人话，不静默）
+    if isinstance(snap, dict) and snap.get("ok"):
+        try:
+            snap.update(_attach_completed_view(snap, data_root, eff, query))
+        except ParamError as exc:
+            return 400, {"ok": False, "error": str(exc)}
     return 200, snap
 
 

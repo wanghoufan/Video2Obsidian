@@ -324,7 +324,7 @@ var SEGS=[
 var selected=null, cache={runs:[]};
 var browseTarget=null, browsePath="";
 var detailsByRun={}, lastSnap=null, lastFetchAt=0, lastStageAt=0, lastStageKey="";
-var prevDone=-1, prevFailed=-1, notifAsked=false, longInInput=0;
+var prevDone=-1, prevFailed=-1, prevSkipped=-1, notifAsked=false, longInInput=0;
 // P0-1 三路径 localStorage 持久化（清空则回默认，不崩）
 var LS_INPUT="v2o-input-root", LS_VAULT="v2o-vault-root", LS_DATA="v2o-data-root";
 function lsGet(k){try{return localStorage.getItem(k)||"";}catch(e){return "";}}
@@ -454,6 +454,8 @@ function statusCN(r, cur){
   if(ws==="RENDER_ONLY")return "已成稿未入库";
   if(ws==="FAIL")return "失败";
   if(ws==="PUBLISH_BLOCKED")return "入库受阻";
+  // DEVELOP-P1-9：库里已有同名笔记 → 没转写（没做，不算失败）
+  if(ws==="SKIPPED")return "已跳过（笔记已存在）";
   var s=String(r.status||"");
   if(s==="FAILED_RETRYABLE")return "失败可重试";
   if(s==="NO_SPEECH_DETECTED")return "未检测到语音";
@@ -545,7 +547,7 @@ function failPartsForRun(r){
   var v=d?String(d.verdict||""):"";
   var parts=v.split("→");
   var reason=(parts[0]||(blocked?"初稿已保留，入库未完成":"转写没成功")).trim()||"转写没成功";
-  var next=(parts[1]||(blocked?"检查笔记库权限后点重试入库":"点重试再试一次")).trim()||"点重试再试一次";
+  var next=(parts[1]||(blocked?"看本地证据确认原因后点重试入库":"点重试再试一次")).trim()||"点重试再试一次";
   return {reason:reason,next:next,blocked:blocked};
 }
 function failedRuns(){
@@ -775,10 +777,13 @@ function renderRuns(snap){
     // 详情缺失时以库状态兜底判失败（67合成只有库行时也能逐行重试）
     var hasDetail=!!(d&&d.state);
     var failed=hasDetail?(d.state==="FAIL"||d.state==="PUBLISH_BLOCKED"):dbFail;
+    // DEVELOP-P1-9：已跳过（库里已有同名笔记）不算失败，但用户删掉那篇笔记后
+    // 要能一键重跑这一条（whisper 会跑），所以也给出重试入口。
+    var skippedRow=!!(hasDetail&&d.state==="SKIPPED");
     // UX2-P1-3/FR-14：行内只留一个主按钮（入库受阻→重试入库；其余失败→重试），范围＝本任务并注明 whisper 成本；
     // 批量重跑一律走首屏「恢复与重试」区，详情只留当前任务的「应用新词库重跑」。
     var ops=[];
-    if(failed){
+    if(failed||skippedRow){
       var pubBlocked=!!(hasDetail&&d.state==="PUBLISH_BLOCKED");
       var mainLabel=pubBlocked?"重试入库（范围：本任务；whisper 0次）":"重试（范围：本任务；whisper 会跑）";
       ops.push('<button class="mini go" '+(pubBlocked?('data-retry-publish="'+esc(r.run_id)+'"'):('data-retry="'+esc(r.run_id)+'"'))+' data-retryfn="'+esc(filenameForRun(r))+'" title="范围：本任务；'+(pubBlocked?"只重新入库，whisper 0次":"会重新转写，whisper 会跑")+'">'+mainLabel+'</button>');
@@ -876,13 +881,22 @@ function renderLineage(){
     }else{
       h+='<div><span class="k">输出：</span><span class="v">未产出</span></div>';
     }
-    var parts=String(d.verdict||(pb?"初稿已保留，入库未完成→检查笔记库权限后点重试":"转写没成功")).split("→");
+    var parts=String(d.verdict||(pb?"初稿已保留，入库未完成→看本地证据确认原因后点重试入库":"转写没成功")).split("→");
     var reason=(parts[0]||"转写没成功").trim()||"转写没成功";
     var next=(parts[1]||"点重试再试一次").trim()||"点重试再试一次";
     // UX2-P1-3/FR-14：入库受阻→“重试入库”；其余失败→“重试这个视频”。行内只此一个主按钮，范围＝本任务并注明 whisper 成本。
     h+='<div class="failbox"><div class="r">原因：'+esc(reason)+'</div><div class="n">下一步：'+esc(next)+'</div><div style="margin-top:6px"><button class="go" '+(pb?('data-retry-publish="'+esc(r.run_id)+'"'):('data-retry="'+esc(r.run_id)+'"'))+' title="范围：当前选中任务；'+(pb?"只重新入库，whisper 0次":"会重新转写，whisper 会跑")+'">'+(pb?"重试入库（范围：当前任务；whisper 0次）":"重试这个视频（范围：当前任务；whisper 会跑）")+'</button></div></div>';
     // P1-4/FR-3：逐条本地证据在页面上可见（只读、已脱敏），不等用户去翻复制结果
     h+='<div class="evbox"><div class="evh">本地证据（逐条，只读；已脱敏）</div><pre class="ev" id="diagEvidence">本地证据加载中…</pre></div>';
+  }else if(d&&d.state==="SKIPPED"){
+    // DEVELOP-P1-9：库里已有同名笔记 → 这条根本没转写（没做，不算失败）。
+    // 文案照实说「已存在/未覆盖」，不写「检查笔记库权限」那种误导；
+    // 要重跑得先删掉或改名库里那篇，再点重试（那次才会跑 whisper）。
+    var p3=String(d.canonical_output_path||"").trim();
+    h+='<div><span class="k">结论：</span><span class="v">笔记库里已有同名笔记，未覆盖；这条已跳过转写（whisper 没跑）</span></div>';
+    h+='<div><span class="k">库里已有：</span><span class="v">'+esc(p3||"见数据目录记录")+'</span>'+(p3?' <button class="mini copybtn" data-copy="'+esc(p3)+'">复制</button>':"")+'</div>';
+    h+='<div class="notestatus ok">原因：笔记库里已有同名笔记（不覆盖你改过的内容）。下一步：要重新转写这条，先删除或改名库里那篇笔记，再点下面的重试（whisper 会跑）。</div>';
+    h+='<div class="btnrow"><button class="mini" data-retry="'+esc(r.run_id)+'" title="范围：当前选中任务；会重新转写，whisper 会跑">重试这个视频（范围：当前任务；whisper 会跑）</button></div>';
   }else{
     if(cur&&cur.run_id===r.run_id){
       h+='<div><span class="k">结论：</span><span class="v">正在处理：'+esc(cur.stage)+'</span></div>';
@@ -1142,25 +1156,32 @@ function renderLock(o){
   if(w){
     var q=w.queue||{pending:0,done:0,failed:0};
     // toast：成功/失败数变化（V2.3 P0-1：用人话文件名，不暴露裸run_id）
-    if(prevDone>=0&&(q.done!==prevDone||q.failed!==prevFailed)){
+    if(prevDone>=0&&(q.done!==prevDone||q.failed!==prevFailed||q.skipped!==prevSkipped)){
       if(q.done>prevDone||q.failed>prevFailed){
         var last=w.processed&&w.processed.length?w.processed[w.processed.length-1]:null;
         var nm=last?((last.source_filename||filenameForRunId(last.run_id)||"未知文件")+" / "+cnOfState(last.state)):"有新结果";
         if(q.failed>prevFailed)toast("转写失败："+nm+"，点行查看原因","err");
         else toast("转写完成："+nm+"，点行查看路径","ok");
+      }else if(q.skipped>prevSkipped){
+        // DEVELOP-P1-9：库里已有同名笔记 → 跳过转写（whisper 0 次），单给一句，不叫失败
+        var lastS=w.processed&&w.processed.length?w.processed[w.processed.length-1]:null;
+        var nmS=lastS?((lastS.source_filename||filenameForRunId(lastS.run_id)||"未知文件")):"有任务";
+        toast("已跳过转写："+nmS+"（库里已有同名笔记，未覆盖）","ok");
       }
     }
-    prevDone=q.done;prevFailed=q.failed;
+    prevDone=q.done;prevFailed=q.failed;prevSkipped=q.skipped;
     // P0-3：队列信息移到进度区，右侧让给笔记预览
+    // DEVELOP-P1-9：已跳过（库里已有同名笔记，没转写）单列显示，不计入成功/失败
+    var skipTxt=(q.skipped||0)>0?(" / 跳过 "+(q.skipped||0)):"";
     var qtxt="";
     if(w.processed_n>0){
       var last2=w.processed[w.processed.length-1];
       var last2fn=last2?((last2.source_filename||filenameForRunId(last2.run_id)||"未知文件")+" / "+cnOfState(last2.state)):"—";
-      qtxt="队列：排队 "+(q.pending||0)+" / 成功 "+(q.done||0)+" / 失败 "+(q.failed||0)+"，末个 "+last2fn;
+      qtxt="队列：排队 "+(q.pending||0)+" / 成功 "+(q.done||0)+" / 失败 "+(q.failed||0)+skipTxt+"，末个 "+last2fn;
     }else if(w.running){
       qtxt="队列：排队 "+(q.pending||0)+"，处理线程运行中，等待新任务…";
-    }else if((q.done||0)>0||(q.failed||0)>0||(q.pending||0)>0){
-      qtxt="队列：排队 "+(q.pending||0)+" / 成功 "+(q.done||0)+" / 失败 "+(q.failed||0);
+    }else if((q.done||0)>0||(q.failed||0)>0||(q.pending||0)>0||(q.skipped||0)>0){
+      qtxt="队列：排队 "+(q.pending||0)+" / 成功 "+(q.done||0)+" / 失败 "+(q.failed||0)+skipTxt;
     }
     el("queueLine").textContent=qtxt;
     el("worker").textContent="";
@@ -1181,6 +1202,7 @@ function cnOfState(s){
   if(s==="RENDER_ONLY")return "已成稿未入库";
   if(s==="FAIL")return "失败";
   if(s==="PUBLISH_BLOCKED")return "入库受阻";
+  if(s==="SKIPPED")return "已跳过（笔记已存在）";
   return String(s||"");
 }
 var sayTimer=null, lastLongText="", lastLongTitle="", lastFocus=null;

@@ -51,6 +51,8 @@ FUNCS = [
     "vocabGroupFor", "renderVocabList",
     # P1-6/FR-15：data_root 摘要与隐藏键（sha256 紧凑实现＋localStorage 键分区）
     "sha256Hex", "hideDoneKey", "hideDoneGet", "hideDoneSet", "lsGet", "lsSet",
+    # DEVELOP-P1-9：库里已有同名笔记 → 显示「已跳过（笔记已存在）」（不是排队中、不是失败）
+    "statusCN", "cnOfState", "stClass",
 ]
 
 # P1-4：模块常量/模块变量也照抄真源码，不手抄——常量改了测试跟着改，不会漂移
@@ -1424,9 +1426,38 @@ async function s12(){
   reset();
 }
 
+async function s13(){
+  // DEVELOP-P1-9：库里已有同名笔记 → 「已跳过（笔记已存在）」，不叫失败、不显示排队中
+  reset();
+  ck("S13 cnOfState(SKIPPED) 是人话「已跳过（笔记已存在）」",
+     cnOfState("SKIPPED") === "已跳过（笔记已存在）", cnOfState("SKIPPED"));
+  detailsByRun["r-skip"] = {state: "SKIPPED",
+    verdict: "笔记已存在（未覆盖），已跳过转写：/tmp/vault/x.md",
+    rendered_path: null, canonical_output_path: "/tmp/vault/x.md"};
+  var cnSkip = statusCN({run_id: "r-skip", status: "QUEUED"}, null);
+  ck("S13 列表状态＝已跳过（不是排队中）",
+     cnSkip === "已跳过（笔记已存在）", cnSkip);
+  ck("S13 已跳过不画成失败红（stClass 非 st-bad）",
+     stClass(cnSkip) !== "st-bad", stClass(cnSkip));
+  ck("S13 已跳过不被判成失败行（批量重试不会带上它）",
+     isFailedRun({run_id: "r-skip", status: "QUEUED"}) === false,
+     isFailedRun({run_id: "r-skip", status: "QUEUED"}));
+  ck("S13 监听脱钩：未监听/监听中同一快照文案一致（FR-13）",
+     statusCN({run_id: "r-skip", status: "QUEUED"}, null)
+     === statusCN({run_id: "r-skip", status: "QUEUED"},
+                  {run_id: "other-run", stage: "听写中"}),
+     statusCN({run_id: "r-skip", status: "QUEUED"}, null));
+  ck("S13 反向证伪：状态不是 SKIPPED 时仍显示排队中（判定真读了 state）",
+     statusCN({run_id: "r-skip", status: "QUEUED"}, null) !== "排队中"
+     && (delete detailsByRun["r-skip"],
+         statusCN({run_id: "r-skip", status: "QUEUED"}, null) === "排队中"),
+     statusCN({run_id: "r-skip", status: "QUEUED"}, null));
+  reset();
+}
+
 (async function(){
   await s1(); await s2(); await s3(); await s4(); await s5(); await s6(); await s7();
-  await s8(); await s9(); await s10(); await s11(); await s12();
+  await s8(); await s9(); await s10(); await s11(); await s12(); await s13();
   if(FAILS.length){ console.log("FRONT FAIL " + FAILS.length + ": " + FAILS.join(" | "));
                     process.exit(1); }
   console.log("FRONT ALL PASS");
@@ -1539,6 +1570,24 @@ def layout_checks():
        '<html lang="zh-CN" data-theme="light">' in src)
     ck("L5 主题兜底逻辑一字不改",
        'var use=(t==="dark")?"dark":"light";' in src)
+
+    # ---- DEVELOP-P1-9：库里已有同名笔记 → 跳过转写（显示层四处接线，改坏即红）
+    ck("L6 statusCN 认 SKIPPED（已跳过（笔记已存在））",
+       'if(ws==="SKIPPED")return "已跳过（笔记已存在）";' in src)
+    ck("L6 cnOfState 认 SKIPPED",
+       'if(s==="SKIPPED")return "已跳过（笔记已存在）";' in src)
+    ck("L6 队列文案单列「跳过」（不计入成功/失败）",
+       'var skipTxt=(q.skipped||0)>0?(" / 跳过 "+(q.skipped||0)):"";' in src
+       and '(q.skipped||0)>0' in src)
+    ck("L6 跳过行也给出重试入口（删掉库里笔记后可重跑）",
+       'var skippedRow=!!(hasDetail&&d.state==="SKIPPED");' in src
+       and 'if(failed||skippedRow){' in src)
+    ck("L6 详情区有 SKIPPED 专支（不落「排队等待处理」）",
+       'else if(d&&d.state==="SKIPPED"){' in src
+       and "已跳过转写（whisper 没跑）" in src)
+    ck("L6 入库受阻兜底文案不再指向「检查笔记库权限」",
+       "检查笔记库权限后点重试入库" not in src
+       and "初稿已保留，入库未完成→检查笔记库权限后点重试" not in src)
 
     assert not bad, "布局/零回退静态守卫 %d 项失败：%s" % (len(bad), bad)
 

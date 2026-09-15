@@ -951,6 +951,7 @@ def _scan_disk_states(data_root: str) -> dict:
     """P1-2：读磁盘 jobs/*/manifest.json 得已完成终态（重启不丢）。
 
     成功=末个 RENDER_ONLY/PUBLISHED 且输出文件仍存在；
+    跳过=末个 SKIPPED（DEVELOP-P1-9：笔记库已有同名笔记，没转写，落 skipped 桶）；
     失败=末个 TRANSCRIBE_FAILED/RAW_FAILED/MIRROR_FAILED/NORM_RENDER_FAILED/
     PUBLISH_BLOCKED（含 FAIL 语义）。只读，不落盘。
     返回 {run_id: {state, verdict, rendered_path, canonical_output_path}}。
@@ -1000,6 +1001,12 @@ def _scan_disk_states(data_root: str) -> dict:
                         out[run_id] = {"state": st, "verdict": verdict,
                                        "rendered_path": rp,
                                        "canonical_output_path": cp}
+                elif st == "SKIPPED":
+                    # DEVELOP-P1-9：入库前就发现同名笔记 → 没转写（没做，不算失败）；
+                    # 重启后仍如实显示「已跳过」，不回落成「排队中」。
+                    out[run_id] = {"state": "SKIPPED", "verdict": verdict,
+                                   "rendered_path": rp,
+                                   "canonical_output_path": cp}
                 elif st in ("PUBLISH_BLOCKED", "TRANSCRIBE_FAILED", "RAW_FAILED",
                             "MIRROR_FAILED", "NORM_RENDER_FAILED"):
                     mapped = "PUBLISH_BLOCKED" if st == "PUBLISH_BLOCKED" else "FAIL"
@@ -1061,6 +1068,60 @@ def _app_resolve_canonical(input_root: str, vault_root: str,
         return out
     except Exception:
         return m
+
+
+def _vault_publish_target(input_root: str, vault_root: str | None,
+                          src_abs: str) -> str | None:
+    """DEVELOP-P1-9：这条视频在笔记库里的目标落点（只算路径，不落盘）。
+
+    命名**单一真源**＝`_app_resolve_canonical`（入库那一步用的同一个函数，
+    底座 stage6.mirror.resolve_canonical＋app 侧单扩展名包装），此处不另造
+    第二套命名规则。取不到回 None。
+    """
+    try:
+        if not vault_root or not src_abs:
+            return None
+        m = _app_resolve_canonical(os.path.abspath(input_root),
+                                   os.path.abspath(vault_root),
+                                   os.path.abspath(src_abs))
+        return str(m.get("canonical_output_path") or "") or None
+    except Exception:
+        return None
+
+
+def _vault_note_already_there(input_root: str, vault_root: str | None,
+                              src_abs: str) -> str | None:
+    """DEVELOP-P1-9：目标笔记已存在则回该 md 路径，否则回 None（只读）。
+
+    判据＝`_vault_publish_target` 指到的那一个文件在不在（os.path.isfile），
+    与入库门 `initial_publish` 的 canonical 判据同一个目标，不另判一套。
+    """
+    cand = _vault_publish_target(input_root, vault_root, src_abs)
+    if not cand:
+        return None
+    try:
+        return cand if os.path.isfile(cand) else None
+    except OSError:
+        return None
+
+
+# DEVELOP-P1-9：入库门「目标笔记已存在」状态码家族（No-Clobber 拦下，
+# 真因是文件已存在，不是权限问题）。只收 stage4 真会回的那三个
+# （`BLOCKED_OUTPUT_EXISTS`/`BLOCKED_OUTPUT_CONFLICT`/`CANONICAL_OUTPUT_EXISTS`）；
+# 真权限/路径问题（BLOCKED_OUTPUT_FS/ROOT）与在途占位（PENDING_PUBLISH）
+# 不在此列，仍走原来那支，不许被这句「已有同名笔记」冒充。
+_PUB_TARGET_EXISTS_STATUSES = (
+    "CANONICAL_OUTPUT_EXISTS", "BLOCKED_OUTPUT_EXISTS",
+    "BLOCKED_OUTPUT_CONFLICT",
+)
+
+
+def _pub_target_exists(status) -> bool:
+    """状态码判定（不看文案）：「库里已有同名笔记」这一族。"""
+    try:
+        return str(status or "").strip().upper() in _PUB_TARGET_EXISTS_STATUSES
+    except Exception:
+        return False
 
 
 def _dir_tail(path: str) -> str:
@@ -1287,6 +1348,10 @@ def _listener_snapshot() -> dict:
                  if isinstance(v, dict) and v.get("state") in DONE_STATES)
     failed_n = sum(1 for v in merged.values()
                    if isinstance(v, dict) and v.get("state") in FAIL_STATES)
+    # DEVELOP-P1-9：已跳过（库里已有同名笔记，没转写）单列计数——不算成功也不算失败，
+    # 不计入 total（进度条口径不变），只供列表/队列文案显示。
+    skipped_n = sum(1 for v in merged.values()
+                    if isinstance(v, dict) and v.get("state") == "SKIPPED")
     # 干掉 SKIP：SKIP 不进 merged（_worker_record 从不记 SKIP，磁盘也不记）
     total = 0
     pending = 0
@@ -1362,14 +1427,15 @@ def _listener_snapshot() -> dict:
     except Exception:
         preview = ""
     worker = {"running": running,
-              "processed_n": done_n + failed_n,
+              "processed_n": done_n + failed_n + skipped_n,
               "processed": processed,
               "details_by_run": details,
               "last_error": last_error,
               "current": current,
               "preview": preview,
               "queue": {"pending": pending, "done": done_n,
-                        "failed": failed_n, "total": total}}
+                        "failed": failed_n, "skipped": skipped_n,
+                        "total": total}}
     snap["worker"] = worker
     # V2.3 P0-2：回显vault注册布尔（未配/无.obsidian均为False）
     try:
@@ -1439,6 +1505,7 @@ DIAGNOSIS_VERSION = "v1.3-failure-taxonomy-1"
 DIAGNOSIS_ACTIONS = (
     "SOURCE_LOCATION_REVIEW", "PRECONDITION_BLOCKED", "INPUT_MEDIA_INVALID",
     "RETRYABLE_TRANSCRIPTION", "REUSABLE_DERIVED_FAILURE", "PUBLISH_BLOCKED",
+    "SKIPPED",
     "UNKNOWN",
 )
 
@@ -1571,14 +1638,45 @@ def _diag_alternate_paths(recorded: str, data_root: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+def _manifest_last_receipt(manifest: dict | None) -> dict:
+    """manifest 里末个带 state 的 receipt（与 `_scan_disk_states` 同一取法）。
+
+    DEVELOP-P1-9：诊断要看得见「入库那一步到底怎么被拦的」——DB 的
+    processing_runs.status 按 P0-4 架构恒为 QUEUED，拦人理由只落在 receipt 上。
+    """
+    try:
+        receipts = (manifest or {}).get("receipts") or []
+        for r in reversed(receipts):
+            if isinstance(r, dict) and r.get("state"):
+                return r
+    except Exception:
+        pass
+    return {}
+
+
 def _diag_action(row: dict, source: dict, manifest: dict | None, recorded_exists: bool,
                  identity: str) -> tuple[str, str, str, str, str, bool, str]:
     text = " ".join(str(row.get(k) or "") for k in ("status", "raw_error_code", "reason"))
     low = text.lower()
+    last = _manifest_last_receipt(manifest)
+    # 入库拦人理由在 receipt 上（state/publish_status），DB 行里恒是 QUEUED
     if not recorded_exists and identity == "MATCH":
         return ("SOURCE_LOCATION_REVIEW", "SOURCE_NOT_AT_RECORDED_PATH+IDENTITY_MATCH_AT_ALTERNATE_PATH",
                 "DISCOVERY", "CONFIRM_ALTERNATE_THEN_REDIAGNOSE", "NEEDS_HUMAN", False,
                 "确认替代路径后重新诊断")
+    # DEVELOP-P1-9：入库前就发现同名笔记 → 这条 run 根本没转写。归明确的
+    # SKIPPED 类（「没做，不算失败」，与 STATE_BUCKET 的 SKIPPED 同一口径），
+    # 不再落 UNKNOWN/UNVERIFIED。
+    if str(last.get("state") or "").strip().upper() == "SKIPPED":
+        return ("SKIPPED", "NOTE_ALREADY_EXISTS", "PUBLISH", "PUBLISH_ONLY",
+                "NEEDS_HUMAN", False,
+                "笔记库里已有同名笔记，未覆盖；如需更新请先删除或改名那篇笔记，再点重试")
+    # DEVELOP-P1-9：入库门判「目标已存在」（No-Clobber 拦下）——真因是文件已在，
+    # 不是权限问题；文案必须说清「已存在/未覆盖」，不许再指向「检查笔记库权限」。
+    if _pub_target_exists(last.get("publish_status")) or _pub_target_exists(last.get("state")):
+        return ("PUBLISH_BLOCKED", "PUBLISH_TARGET_EXISTS", "PUBLISH", "PUBLISH_ONLY",
+                "NEEDS_HUMAN", False,
+                "笔记库里已有同名笔记，未覆盖；如需更新请先删除或改名那篇笔记，再点重试")
     if any(x in low for x in ("publish", "canonical", "no_clobber", "exists")):
         root = "PUBLISH_NO_CLOBBER_CONFLICT" if "clobber" in low or "exists" in low else "PUBLISH_PERMISSION"
         return ("PUBLISH_BLOCKED", root, "PUBLISH", "PUBLISH_ONLY", "AUTO_PUBLISH", False,
@@ -1622,7 +1720,15 @@ def _diagnosis_item(row: dict, source: dict, data_root: str, persisted_at: str) 
         pass
     action, root, stage, policy, eligibility, whisper, next_action = _diag_action(
         row, source, manifest, recorded_exists, identity)
-    display = "SUCCEEDED" if action == "UNKNOWN" and str(row.get("status")) == "SUCCEEDED" else "FAIL"
+    # DEVELOP-P1-9：目标笔记已存在（含入库前就跳过、入库时被 No-Clobber 拦下）不是
+    # 「失败」——展示态归 SKIPPED（「没做，不算失败」），与 STATE_BUCKET 同口径。
+    _NOTE_EXISTS_ROOTS = ("NOTE_ALREADY_EXISTS", "PUBLISH_TARGET_EXISTS")
+    if action == "SKIPPED" or str(root) in _NOTE_EXISTS_ROOTS:
+        display = "SKIPPED"
+    elif action == "UNKNOWN" and str(row.get("status")) == "SUCCEEDED":
+        display = "SUCCEEDED"
+    else:
+        display = "FAIL"
     event_at = row.get("state_event_at") or "UNKNOWN"
     persisted_state = str(row.get("status") or "UNKNOWN")
     aligned = bool(event_at != "UNKNOWN" and str(event_at) == str(row.get("updated_at") or ""))
@@ -1638,6 +1744,10 @@ def _diagnosis_item(row: dict, source: dict, data_root: str, persisted_at: str) 
         mismatch = bool(persisted_state not in _FAIL_SEMANTICS)
     elif display == "SUCCEEDED":
         mismatch = bool(persisted_state != "SUCCEEDED")
+    elif display == "SKIPPED":
+        # 跳过＝没做（DB 侧按 P0-4 恒为 QUEUED，不该因此被当成「展示与记录不一致」）；
+        # 只有持久态真带失败语义时才算不一致。
+        mismatch = bool(persisted_state in _FAIL_SEMANTICS)
     else:
         mismatch = bool(display != persisted_state)
     if mismatch:
@@ -1669,7 +1779,9 @@ def _diagnosis_item(row: dict, source: dict, data_root: str, persisted_at: str) 
         "display_persisted_mismatch": mismatch,
         "artifact_presence": artifacts, "evidence_sources": ["state.db", "source filesystem", "job manifest"],
         "raw_error_code": row.get("raw_error_code") or "UNKNOWN", "evidence_conflicts": conflicts,
-        "confidence": "HIGH" if action == "SOURCE_LOCATION_REVIEW" and identity == "MATCH" else "UNVERIFIED",
+        "confidence": "HIGH" if (
+            (action == "SOURCE_LOCATION_REVIEW" and identity == "MATCH")
+            or action == "SKIPPED" or str(root) in _NOTE_EXISTS_ROOTS) else "UNVERIFIED",
         "action_category": action, "root_cause": root, "stage": stage, "retry_policy": policy,
         "recovery_eligibility": eligibility,
         "recovery_eligibility_source": "diagnosis rule " + DIAGNOSIS_VERSION,
@@ -1728,6 +1840,9 @@ def _handle_failure_diagnosis(query: dict) -> tuple[int, dict]:
                   "will_call_whisper_count": sum(1 for i in items if i["will_call_whisper"]),
                   "source_location_review": sum(1 for i in items if i["action_category"] == "SOURCE_LOCATION_REVIEW"),
                   "alternate_identity_matches": sum(1 for i in items if i["identity_match"] == "MATCH"),
+                  # DEVELOP-P1-9：库里已有同名笔记（没做，不算失败）的单列计数，
+                  # 与 failed 口径分开，页面/统计都不把它算进失败。
+                  "skipped_note_exists": sum(1 for i in items if i["display_state"] == "SKIPPED"),
                   "unknown": sum(1 for i in items if i["action_category"] == "UNKNOWN")}
         categories = [{"action_category": action, "count": sum(1 for i in items if i["action_category"] == action)}
                       for action in DIAGNOSIS_ACTIONS]
@@ -3102,11 +3217,15 @@ def _stage_text_zh(run_id: str, entry: dict | None,
         return "正在处理这个视频：%s" % (stage or "排队")
     if entry and isinstance(entry, dict):
         st = str(entry.get("state") or "")
+        if st == "SKIPPED":
+            # DEVELOP-P1-9：库里已有同名笔记 → 没转写；照实说，不叫失败
+            return "笔记库已有同名笔记，未覆盖；这条已跳过转写（whisper 没跑）：%s" % (
+                entry.get("verdict") or "笔记已存在（未覆盖）")
         if st == "FAIL":
             return "转写失败：%s" % (entry.get("verdict") or "点重试再试一次")
         if st == "PUBLISH_BLOCKED":
             return "初稿已保留，入库未完成：%s" % (
-                entry.get("verdict") or "检查笔记库权限后点重试")
+                entry.get("verdict") or "看本地证据确认原因后点重试入库")
     # DB 行级状态兜底
     if data_root:
         con = _open_ro(data_root)
@@ -4711,6 +4830,45 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
     if not _is_under_root(src_real, input_real):
         return {"run_id": run_id, "state": "SKIP",
                 "verdict": "源不在当前视频文件夹内，已忽略"}
+    # job 目录路径先算出来（此处只算字符串，不落盘）：下面的第 0 道门要往它写一条
+    # 轻量 receipt，真正的 raw/asr 目录仍要过了两道门才建。
+    job_dir = os.path.join(os.path.abspath(data_root), "data", "jobs", run_id)
+    # DEVELOP-P1-9 第 0 道门（**送 engine 之前**）：这条视频的目标笔记在笔记库里
+    # 已经存在 → 直接判 SKIPPED，whisper 一次都不跑，不写 vault、既有一字节不动
+    # （No-Clobber 语义不变）。目标路径复用入库同一真源 `_app_resolve_canonical`，
+    # 不自己发明命名。旧账只在 DB 里认（失忆就白跑），这里补上磁盘真相这一道。
+    existing_note = _vault_note_already_there(input_real, vault_real, src_real)
+    if existing_note:
+        out = {"run_id": run_id, "state": "SKIPPED",
+               "source_filename": _src_fn,
+               "verdict": "笔记已存在（未覆盖），已跳过转写：%s"
+                          "→要更新这篇，先删除或改名它，再点重试"
+                          % (existing_note,),
+               "whisper_calls": 0,
+               "canonical_output_path": existing_note}
+        # 只留一条轻量 receipt（不建 raw/asr、不进 raw/render 链路），
+        # 让「已跳过」重启后仍可查、诊断面板也能给明确类别。
+        manifest_path = os.path.join(job_dir, "manifest.json")
+        if not os.path.isfile(manifest_path):
+            try:
+                os.makedirs(job_dir, exist_ok=True)
+                with open(manifest_path, "w", encoding="utf-8") as fh:
+                    json.dump({"job_id": run_id, "source_id": source_id,
+                               "run_id": run_id, "stage": "app-worker",
+                               "state": "SKIPPED",
+                               "receipts": [{
+                                   "stage": "app-worker", "state": "SKIPPED",
+                                   "run_id": run_id, "source_id": source_id,
+                                   "verdict": out["verdict"],
+                                   "whisper_calls": 0,
+                                   "canonical_output_path": existing_note,
+                                   "created_at": _utc_now_iso()}],
+                               "created_at": _utc_now_iso()},
+                              fh, ensure_ascii=False, indent=2)
+            except OSError:
+                pass
+        _worker_record(out)
+        return out
     # P1-FIX-1 第一道发布门（转写前）：源快照对不上就别开跑，省下整段算力，
     # 也避免把半截内容送进 raw/render/publish 链路。
     stale = _stale_source_reason(src, src_real)
@@ -4725,7 +4883,6 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
     filename = os.path.basename(src_real) or run_id
     _worker_set_current(run_id, filename, STAGE_DISCOVER)
 
-    job_dir = os.path.join(os.path.abspath(data_root), "data", "jobs", run_id)
     os.makedirs(os.path.join(job_dir, "raw"), exist_ok=True)
     os.makedirs(os.path.join(job_dir, "asr"), exist_ok=True)
     manifest_path = os.path.join(job_dir, "manifest.json")
@@ -4940,6 +5097,14 @@ def _process_one_run(data_root: str, input_root: str, ob_vault_root: str | None,
             verdict = "已存入你的笔记库：%s%s" % (
                 pub.get("canonical_output_path"), _naming_note)
             state = "PUBLISHED"
+        elif _pub_target_exists(status):
+            # DEVELOP-P1-9：真因是「库里已有同名笔记，未覆盖」（No-Clobber 保护），
+            # 不是权限问题——旧文案「检查笔记库权限」会把人带沟里，这里改准；
+            # 文案里明说「不算失败」，状态仍留 PUBLISH_BLOCKED 以便用「重跑」重排成稿后重入库。
+            verdict = ("笔记库已有同名笔记，未覆盖（不算失败）：%s"
+                       "→要更新这篇，先删除或改名它再点重试%s"
+                       % (pub.get("canonical_output_path"), _naming_note))
+            state = "PUBLISH_BLOCKED"
         else:
             verdict = "入库未完成，初稿已保留%s→检查笔记库权限后点重试" % (_naming_note,)
             state = "PUBLISH_BLOCKED"

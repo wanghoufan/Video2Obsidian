@@ -2924,6 +2924,182 @@ def part15_p11_watch_reliability(server):
         _p15_drop_root(root11, data11)
 
 
+# ------------------------------------------------------------------ 16 DEVELOP-P1-9
+# 「库里已有同名笔记 → 送 engine 之前就跳过（whisper 0 次）」＋诊断归类/文案修正。
+# 牙口：A 已存在即跳过且引擎零调用 / B 无同名不误伤 / C 反向证伪 / D 诊断明确且不误导。
+
+
+def part16_p19_note_exists_skip(server):
+    """DEVELOP-P1-9：目标笔记已在库 → 转写前 SKIPPED；诊断不落 UNKNOWN、不叫失败。"""
+    from stage5.watcher import Watcher
+
+    root, inp, data = _p15_make_root("p19a")
+    assert_tmp(data, "part16_p19_note_exists_skip")
+    vault = os.path.join(root, "vault")
+    os.makedirs(vault)
+    calls = []
+    real_tr = server._transcribe_audio
+    real_check = server._vault_note_already_there
+    droot = None
+    with server._state_lock:
+        saved_processed = list(server._worker["processed"])
+
+    def _stub_tr(job_asr_dir, src_path, prompt_terms=None):
+        # 只数调用次数：本用例要证的就是「送 engine 之前就停住」还是「真跑了一轮」
+        calls.append(os.path.basename(str(src_path)))
+        return {"text": "这是合成转写正文，用来走通后面整理与成稿。",
+                "segments": [{"text": "这是合成转写正文，用来走通后面整理与成稿。",
+                              "start": 0.0, "end": 1.0}],
+                "engine_calls": 1}
+
+    def _mk_run(name):
+        """真投递一条（走发现链路落 source/run 行），返回 run_id。"""
+        path = os.path.join(inp, name)
+        with open(path, "wb") as fh:
+            fh.write(b"M" * 65536)
+        w = Watcher(inp, data, "profhash", debounce_s=0.2, stable_s=0.2)
+        try:
+            w._on_fs_event(path, False)
+            _p15_wait(lambda: bool(w.deliveries()), 15.0)
+        finally:
+            w.stop()
+        rows = _p15_rows(data, "SELECT run_id, source_id FROM processing_runs")
+        return str(rows[-1][0])
+
+    try:
+        server._transcribe_audio = _stub_tr
+        rid1 = _mk_run("same.mp4")
+        note = os.path.join(vault, "same.md")
+        with open(note, "w", encoding="utf-8") as fh:
+            fh.write("用户 09-13 就写好的笔记，谁都不许动")
+        note_before = sha(note)
+        job1 = os.path.join(data, "data", "jobs", rid1)
+
+        # ---- A：库里已有同名 md → SKIPPED 且 whisper 一次都不跑
+        res_a = server._process_one_run(data, inp, vault, rid1, "profhash")
+        check("16A 目标笔记已存在 → state=SKIPPED",
+              res_a.get("state") == "SKIPPED", res_a.get("state"))
+        check("16A 转写引擎真零调用（stub 计数为空，不是看文案）",
+              calls == [], calls)
+        check("16A 结果自带 whisper_calls==0",
+              res_a.get("whisper_calls") == 0, res_a.get("whisper_calls"))
+        check("16A 人话说清「已存在/未覆盖」且不叫失败",
+              "已存在" in str(res_a.get("verdict"))
+              and "未覆盖" in str(res_a.get("verdict")), res_a.get("verdict"))
+        check("16A 既有笔记字节零改动（No-Clobber 红线未动）",
+              sha(note) == note_before)
+        check("16A 不建 raw/asr（没进转写链路）",
+              not os.path.isdir(os.path.join(job1, "raw"))
+              and not os.path.isdir(os.path.join(job1, "asr")))
+        check("16A 语义落 skipped 桶（没做，不算失败）",
+              server._state_bucket("SKIPPED") == server.BUCKET_SKIPPED
+              and "SKIPPED" not in server.FAIL_STATES)
+        check("16A 重启后仍认得出（磁盘 SKIPPED 可查）",
+              (server._scan_disk_states(data).get(rid1) or {}).get("state")
+              == "SKIPPED", server._scan_disk_states(data).get(rid1))
+
+        # ---- C1：反向证伪——把 vault 检查摘掉 → A 必挂（白跑一整轮 whisper）
+        server._vault_note_already_there = lambda *a, **k: None
+        calls.clear()
+        res_c = server._process_one_run(data, inp, vault, rid1, "profhash")
+        server._vault_note_already_there = real_check
+        check("16C 摘掉 vault 检查 → 引擎真被调（A 的「零调用」有牙）",
+              len(calls) == 1, calls)
+        check("16C 白跑一整轮才在入库处撞名（PUBLISH_BLOCKED）",
+              res_c.get("state") == "PUBLISH_BLOCKED", res_c.get("state"))
+        check("16C 撞名仍不覆盖，且文案不再指向「权限」",
+              sha(note) == note_before
+              and "权限" not in str(res_c.get("verdict"))
+              and "未覆盖" in str(res_c.get("verdict")), res_c.get("verdict"))
+
+        # ---- B：库里没有同名 → 正常转写并入库（不得误伤）
+        calls.clear()
+        rid2 = _mk_run("fresh.mp4")
+        res_b = server._process_one_run(data, inp, vault, rid2, "profhash")
+        check("16B 无同名 → 正常转写（引擎被调一次）", len(calls) == 1, calls)
+        check("16B 正常走完入库（PUBLISHED）",
+              res_b.get("state") == "PUBLISHED", res_b.get("state"))
+        made = str(res_b.get("canonical_output_path") or "")
+        check("16B 库里真出了新笔记，且命名＝去扩展名单.md",
+              bool(made) and os.path.isfile(made)
+              and os.path.basename(made) == "fresh.md", made)
+        check("16B 另一条笔记仍未被碰", sha(note) == note_before)
+
+        # ---- D：造 PUBLISH_BLOCKED/CANONICAL_OUTPUT_EXISTS 记录（＝真机那 6 条的形态）
+        mk_note = "/x/run-exists.md"
+        droot = make_data_root(server, "P19", [
+            {"run_id": "run-exists", "status": "QUEUED",
+             "manifest": {"receipts": [
+                 {"stage": "app-worker", "state": "PUBLISH_BLOCKED",
+                  "run_id": "run-exists",
+                  "verdict": "笔记库已有同名笔记，未覆盖（不算失败）：%s"
+                             "→要更新这篇，先删除或改名它再点重试" % (mk_note,),
+                  "whisper_calls": 1, "publish_status": "CANONICAL_OUTPUT_EXISTS",
+                  "canonical_output_path": mk_note}]}},
+            {"run_id": "run-skipped", "status": "QUEUED",
+             "manifest": {"receipts": [
+                 {"stage": "app-worker", "state": "SKIPPED",
+                  "run_id": "run-skipped",
+                  "verdict": "笔记已存在（未覆盖），已跳过转写：/x/run-skipped.md",
+                  "whisper_calls": 0,
+                  "canonical_output_path": "/x/run-skipped.md"}]}},
+        ])
+        assert_tmp(droot, "part16_p19_diag")
+        code, diag = server._handle_failure_diagnosis({"data_root": [droot]})
+        by_id = {i["run_id"]: i for i in (diag.get("items") or [])}
+        ex = by_id.get("run-exists") or {}
+        check("16D 诊断接口可得", code == 200 and diag.get("ok") is True, code)
+        check("16D 类别明确：PUBLISH_BLOCKED（不再落 UNKNOWN）",
+              ex.get("action_category") == "PUBLISH_BLOCKED", ex.get("action_category"))
+        check("16D 根因＝目标已存在（不是权限）",
+              ex.get("root_cause") == "PUBLISH_TARGET_EXISTS", ex.get("root_cause"))
+        check("16D 语义不叫失败（展示态 SKIPPED，非 FAIL）",
+              ex.get("display_state") == "SKIPPED", ex.get("display_state"))
+        check("16D 文案说清「已存在/未覆盖」",
+              "未覆盖" in str(ex.get("next_action"))
+              and "同名笔记" in str(ex.get("next_action")), ex.get("next_action"))
+        check("16D 全条不含「权限」误导",
+              "权限" not in json.dumps(ex, ensure_ascii=False),
+              [k for k, v in ex.items() if "权限" in str(v)])
+        check("16D 置信度不再 UNVERIFIED", ex.get("confidence") == "HIGH",
+              ex.get("confidence"))
+        check("16D 恢复资格＝需人工（覆盖/改名必须用户显式操作）",
+              ex.get("recovery_eligibility") == "NEEDS_HUMAN",
+              ex.get("recovery_eligibility"))
+        check("16D 不调 whisper", ex.get("will_call_whisper") is False)
+        check("16D 不误判成 mismatch（不触发 fail-closed 降级）",
+              ex.get("display_persisted_mismatch") is False,
+              ex.get("display_persisted_mismatch"))
+        sk = by_id.get("run-skipped") or {}
+        check("16D 入库前跳过也归明确类别 SKIPPED（非 UNKNOWN）",
+              sk.get("action_category") == "SKIPPED"
+              and sk.get("display_state") == "SKIPPED",
+              (sk.get("action_category"), sk.get("display_state")))
+        check("16D 跳过项单列计数、不算进失败",
+              diag["counts"].get("skipped_note_exists") == 2, diag["counts"])
+        check("16D 类别取值仍在诊断枚举内",
+              {i["action_category"] for i in diag["items"]}
+              <= set(server.DIAGNOSIS_ACTIONS),
+              sorted({i["action_category"] for i in diag["items"]}))
+
+        # ---- C2：反向证伪——摘掉 receipt 归类 → D 必挂（回落 UNKNOWN）
+        real_last = server._manifest_last_receipt
+        server._manifest_last_receipt = lambda *a, **k: {}
+        _c2, diag2 = server._handle_failure_diagnosis({"data_root": [droot]})
+        server._manifest_last_receipt = real_last
+        mut = {i["run_id"]: i for i in (diag2.get("items") or [])}.get("run-exists") or {}
+        check("16C 摘掉归类 → 该条回落 UNKNOWN（D 的类别断言有牙）",
+              mut.get("action_category") == "UNKNOWN", mut.get("action_category"))
+    finally:
+        server._transcribe_audio = real_tr
+        server._vault_note_already_there = real_check
+        with server._state_lock:
+            server._worker["processed"] = saved_processed
+        if droot:
+            shutil.rmtree(droot, ignore_errors=True)
+        _p15_drop_root(root, data)
+
+
 def main():
     print("tmp 根：%s" % TMP_ROOT)
     server = load_server()
@@ -2942,6 +3118,7 @@ def main():
     part13_p15_vocab_display(server)
     part14_p16_completed_cursor(server)
     part15_p11_watch_reliability(server)
+    part16_p19_note_exists_skip(server)
     if FAILS:
         print("\nSELFTEST FAIL %d/%d：%s" % (len(FAILS), CHECKS[0], FAILS))
         return 1

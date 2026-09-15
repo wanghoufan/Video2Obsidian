@@ -1,16 +1,18 @@
-# HANDOFF｜P1 全部收口＋冻结（2026-09-15 22:10）：P0 全清＋P1-1…P1-8 全 PASS（P1-1 链修掉监听漏发现 P1），下一步 Windows 迁移（另仓），恢复先读我
+# HANDOFF｜P1 收口＋冻结后接续（2026-09-15 晚）：P0 全清＋P1-1…P1-8 全 PASS；**新增 P1-9 在制品已落盘待走角色链**；Windows 迁移（另仓）暂缓，恢复先读我
 
 > 旧版字段（governance-state / Evidence / Human Gate / Promotion / Dispatch ID）已废弃，不填。
 > 本文件即恢复入口。「一/二/三」三节为本轮梳理版（2026-09-15 14:10 重写，旧版细节压缩进各链报告与 git 历史）；**Phase1 全过程记录**（用户四条反馈原文、九项 HD 决策、16 条真相、迁移决策、额度事件）与**迁移前项目交接原文**见本文件后段各节，逐字未动。
 
-- Captured at（YYYY-MM-DD HH:MM）：**2026-09-15 22:10（TM 收口 + 冻结）**；本阶段 P1 全部收口并推送 `main`，随后**冻结版本**（tag）；下一步＝**Windows 11 迁移**（另建独立仓库，方案已由 planner 产出：`docs/pm/WINDOWS-MIGRATION-PLAN.md`，**只出计划不施工**）
+- Captured at（YYYY-MM-DD HH:MM）：**2026-09-15 22:10（TM 收口 + 冻结）**；本阶段 P1 全部收口并推送 `main`，随后**冻结版本**（tag `v1.0-mac`，落点 `5f06fdb`）；下一步＝**Windows 11 迁移**（另建独立仓库，方案已由 planner 产出：`docs/pm/WINDOWS-MIGRATION-PLAN.md`，**只出计划不施工**）
+- **接续（编排者恢复工作，2026-09-15 晚）**：冻结后发现工作树留有**未提交的 P1-9 在制品**（4 文件），已按「续做半成品默认保留」逐块核对后**先 commit＋push 落盘**，再补走角色链。见 §一.4。Windows 迁移顺延到 P1-9 收口之后。
 - PROJECT_PHASE：**DEVELOP**（Phase2 未关闭）
 - PLAN_VERSION：`PRODUCT_PLAN_V1.3`（正文最新；文末「Readiness Score / 本轮真实验证记录」两段仍为 V1.2 旧文本，见 `docs/pm/PRODUCT_PLAN.md` 顶部收尾注记）
 - PLAN_READINESS_SCORE：**未达 90**（planner 自评 89；Research Reviewer 独立 83；用户已知并决定开工）
 - PLAN_GATE：**APPROVED**（用户明确进 DEVELOP；不是 Readiness 达标通过）
 - DEV_BASELINE：`PRODUCT_PLAN_V1.3`（禁随意改 Plan；变更只走 Change C）
 - CHANGE_REQUEST：**B**（用户 2026-09-15 授权「继续推进」「按分工表为准」「commit/push 默认 main 不再逐次问」）
-- Stage ID（本阶段叫什么）：**DEVELOP-P1-1 收口（P1 收官）**：监听漏发现修复（P1-1-FIX）＋真实规模/真机验证闭环，四角色链全 PASS，已推 `main` 并冻结
+- Stage ID（本阶段叫什么）：**DEVELOP-P1-9（接续，在制品已落盘）**：笔记库已有同名笔记→跳过转写（SKIPPED，whisper 零调用）；已 commit＋push `main`，**待补 code-reviewer／qa／supervisor 三角色链**
+- 上一阶段（已收口）：**DEVELOP-P1-1 收口（P1 收官）**——监听漏发现修复（P1-1-FIX）＋真实规模/真机验证闭环，四角色链全 PASS，已推 `main` 并冻结（tag `v1.0-mac`）
 ---
 
 ## 一、当前的工作进展
@@ -58,13 +60,24 @@
 - **已知限制（supervisor 要求必须落字，已写入 README 中英「已知限制」节）**：拷贝/下载中若**长时间停顿（>约 7 秒）**再续写，可能先按当时内容出一份**不完整稿**，完整稿因 No-Clobber 被挡（实测停 40s：半截稿 402B 落 vault、完整稿 `PUBLISH_BLOCKED`）→ 处理办法：删除该 md 后重新放入视频。**这是 P1-1-FIX 的已知残留（原 P2-a／P2-b 合并）**，非静默。
 - **backlog（挂账，非阻塞）**：① 上述「长停顿→半截稿」根治需结构级 Change B（发布前最终校验＋失败标记语义）；② **P2-c 幽灵行**（被门拦下的 run 在 `run_summary` 显示成「排队中」，撞用户历史投诉，supervisor 建议修）；③ **P3-e**（`shutdown` 谎报 `reconciler_stopped`）；④ **P3**（`contract` 的 M4 最小年龄门差分不可观测）；⑤ 项目**至今无依赖声明文件**（缺 `watchdog` 这类会在新机器踩坑）；⑥ 「源文件不在原位」专门文案未用真实形状夹具复验（P1-1 未覆盖项）。
 
+### 4. P1-9 在制品（接续落盘，未走角色链）
+
+- **来源与性质**：接续时发现工作树 4 个 `M` 未提交（冻结后遗留的在制品），逐块 diff 核对后确认是一套**完整且自洽**的功能（不是做歪的块），按「续做半成品默认保留」先落盘，不回滚。无 `docs/pm/` 计划文档（本链未走 planner，范围＝下面「做了什么」逐条）。
+- **做了什么**（`DEVELOP-P1-9` 标记全文可搜）：① `server.py` 送引擎前加**第 0 道门**——目标笔记已存在则判 `SKIPPED`，**whisper 一次都不跑**、不建 raw/asr、不写 vault（既有笔记一字节不动，No-Clobber 不变），只留一条轻量 receipt（`_vault_note_already_there`，命名真源复用入库同一函数 `_app_resolve_canonical`，不另造规则）② 磁盘 `_scan_disk_states` 认 `SKIPPED`，**重启后仍显示「已跳过」，不回落「排队中」**③ 诊断新增 `SKIPPED` 类别与 `PUBLISH_TARGET_EXISTS` 根因（按状态码判定，不看文案），**不再落 UNKNOWN**，文案不再误导「检查笔记库权限」④ 队列/列表单列 `skipped` 计数（不计入 total，不算成功也不算失败）⑤ 前端 `SKIPPED` 态文案、队列显示、toast、详情区「库里已有 / 重试」入口。
+- **改动量（实测 `git diff --numstat`）**：`app/server.py` **+171/−6**、`app/index.html` **+31/−9**、`tests/selftest_p1_2_contract.py` **+177/−0**、`tests/selftest_p1_2_frontend.py` **+50/−1**。
+- **自测（本窗口 `.venv` 实测）**：`contract` **600 断言全 PASS**（P1-9 新增 16A/16B/16C/16D 共 29 条，含「引擎真零调用」与「摘掉检查→引擎真被调」双向有牙）／`frontend` **全 PASS**（新增 S13：已跳过不画失败红、不进批量重试、监听脱钩）／`v26_presets` **58 全 PASS**。
+- **flaky 一条（挂账，不阻塞）**：首轮 `contract` 曾 **FAIL 1／600**＝`15k 收不掉时 is_running() 仍为 True（不谎报已停)`，**重跑 600/600 全过** → 判时序敏感 flaky（P1-9 未触碰 `watcher.py`，非本次引入）。与历史挂账 **P3-e**（`shutdown` 谎报 `reconciler_stopped`）同源，待一起根治：要么让 `stop()` 收不掉时如实留 `is_running()=True`，要么给该断言加稳定窗。**不自欺**：这条不是「重跑绿了就算过」，已单独挂账。
+- **状态**：已 commit＋push `main`；**code-reviewer／qa／supervisor 未派**（接续时链断在此），下一步补走。
+
 ## 二、下一步的任务
 
 - **下一步（Next Single Action，按序）**：
   0. **（已完成 18:50）P1-6 收口**：qa PASS → supervisor PASS → 两账本 → 推送 `main`（`4d26865`＋`f611824`）。
   1. **（已完成 19:20）P1-8 默认端口去硬编码**：builder（首版＋补两条）→ code-reviewer（首轮 P2×2 → 返工复核 PASS）→ qa（BUG=0）→ supervisor（PASS，HTTP／新牙口由本窗口补位）。默认 **8899**＋`V2O_PORT` 覆盖、`start.sh` 端口单点；残留 P3×6 进 backlog。
   2. **（已完成）P1-1 ＋ P1-1-FIX 收口**：supervisor PASS（放行三条件已办：TASK 账本补行／README 落已知限制／P2 定级措辞更正）→ 推送 `main`；细节见 §一.3。
-  3. **（当前项·用户 2026-09-15 指令）冻结 → Windows 迁移**：① 推送存档后**冻结版本**（打 tag）② Mac 端仓库改名加 **Mac** 后缀（`Video2Obsidian-Mac`）③ Windows 端另建独立仓库 `Video2Obsidian-Windows`，按 `docs/pm/WINDOWS-MIGRATION-PLAN.md` 施工——**用户已明确：本轮只出计划，暂不施工** ④ 两边仓库隔离、互不覆盖。
+  3. **（已完成）冻结**：tag **`v1.0-mac`** 已打（落点 `5f06fdb`）并推送远端。
+  4. **（当前项·接续）P1-9 走完角色链收口**：code-reviewer → qa → supervisor → 两账本（`TASK-MODEL-LOG`／`DISPATCH-LOG`）→ 再推 `main`；同时裁定 15k flaky 与历史 P3-e 是否本链一起修，不定就继续挂账。
+  5. **（顺延）Windows 迁移**：① Mac 端仓库改名加 **Mac** 后缀（`Video2Obsidian-Mac`）② Windows 端另建独立仓库 `Video2Obsidian-Windows`，按 `docs/pm/WINDOWS-MIGRATION-PLAN.md` 施工——**用户已明确：本轮只出计划，暂不施工** ③ 两边仓库隔离、互不覆盖 ④ 远端仓库改名属影响共享状态的操作，动前**再向用户确认一次**。
   4. 收尾：experience-recorder ＋ neat-freak 各一次（每阶段只派一次）。
 - **人要拍什么板（只问大事）**：
   1. **词库三铁律机械保证**（仍挂，不阻塞任何 P1）：「长 wrong 排前」「正词含 wrong 即删条」代码无机械保证。选项：① 只补口径文档（TM 建议）；② 补代码保证（须同改 `_user_rules_revision` 规范化，否则同内容异序被打进死路——见 P1-5 复检节技术约束）；③ 补断言钉现状。

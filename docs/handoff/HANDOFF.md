@@ -67,7 +67,13 @@
 - **改动量（实测 `git diff --numstat`）**：`app/server.py` **+171/−6**、`app/index.html` **+31/−9**、`tests/selftest_p1_2_contract.py` **+177/−0**、`tests/selftest_p1_2_frontend.py` **+50/−1**。
 - **自测（本窗口 `.venv` 实测）**：`contract` **600 断言全 PASS**（P1-9 新增 16A/16B/16C/16D 共 29 条，含「引擎真零调用」与「摘掉检查→引擎真被调」双向有牙）／`frontend` **全 PASS**（新增 S13：已跳过不画失败红、不进批量重试、监听脱钩）／`v26_presets` **58 全 PASS**。
 - **flaky 一条（挂账，不阻塞）**：首轮 `contract` 曾 **FAIL 1／600**＝`15k 收不掉时 is_running() 仍为 True（不谎报已停)`，**重跑 600/600 全过** → 判时序敏感 flaky（P1-9 未触碰 `watcher.py`，非本次引入）。与历史挂账 **P3-e**（`shutdown` 谎报 `reconciler_stopped`）同源，待一起根治：要么让 `stop()` 收不掉时如实留 `is_running()=True`，要么给该断言加稳定窗。**不自欺**：这条不是「重跑绿了就算过」，已单独挂账。
-- **状态**：已 commit＋push `main`；**code-reviewer／qa／supervisor 未派**（接续时链断在此），下一步补走。
+- **三角色链（已补走完，全 PASS）**：
+  - **code-reviewer**（`opencode/muse-spark-1.3-contributor-free`，本窗口）：PASS，**0 P0 / 0 P1**；P2×1、P3×6；变异 **6/6 有牙**；独立复算自建夹具 **51/51**；命名真源与入库 `canonical_path_for` **9 种命名全等**（确认无第二套命名）；AST 证新增 4 函数、改动 7 函数全在范围，`_err_text`/`_strip_paths`/`_stale_source_reason`/两道发布门/状态桶逐字未动，`watcher.py`/`reconcile.py` 未入提交。报告 `docs/review/P1-9-SKIP-EXISTING-NOTE-CODE-REVIEW.md`。
+  - **qa**（`codex/gpt-5.6-luna`，codex 直调，tokens 82,819）：PASS，**新增业务 BUG 0**；独立夹具过主路径与边界（子目录同名／未配 vault／大写扩展名／同名是目录／转写途中撞名走**真** `initial_publish` 状态码）；三套中 `contract` **rc=1**（沙箱禁 loopback bind，环境限制）→ **本窗口补位 600/600 rc=0**、`frontend` rc0 全 PASS、`presets` 58 rc0 全 PASS；未覆盖真实 whisper／真机 UI／HTTP 真服务。报告 `docs/qa/P1-9-SKIP-QA-2026-09-15.md`。
+  - **supervisor**（`opencode-go/muse-spark-1.3-contributor`，本窗口）：**放行推 main，本链打回 0/2**；三套 600/173/58 rc0；自建夹具 15/15 跑两遍一致（含「删笔记后同一 run 重试真 PUBLISHED」＝门 0 不永久锁死）；证伪 5/5 有牙；账本正控 EXIT=0（TASK 58／DISPATCH 95 坏行 0）＋负控 **4/4 有牙**（用 /tmp 备份还原，**未用 `git checkout`**）；P2-1 与 P3×6 定级**全部同意、不升不降、不阻塞**。复检节 `docs/qa/P1-9-SKIP-QA-2026-09-15.md:64`。
+- **挂账（本链新增，非阻塞）**：**P2-1 口径相反**——同一条 run，队列计 `failed`（`PUBLISH_BLOCKED`）、诊断面板显示 `SKIPPED`「不算失败」；supervisor 建议按**方案②**修（摘 `PUBLISH_TARGET_EXISTS` 出 `_NOTE_EXISTS_ROOTS`，一行），**是否修由用户定**。P3×6（reviewer/qa 各记一份，逐条对齐）：脱敏口径同 PUBLISHED 先例／「已跳过」与成功同色／门 0 早于源稳定门与半截限制叠加／`PENDING_PUBLISH` 等仍用旧「检查权限」文案／同名目标是目录／历史 flaky 与无依赖声明。
+- **账本 schema 校验 EXIT=1 的 1 条**：`TASK-MODEL-LOG` 第 40 行 `role="迁移整理工"` 不属 9+1（迁移遗留），挂账不改历史行。
+- **状态**：**P1-9 已收口**（commit＋push `main`），无未收口 P0/P1。
 
 ## 二、下一步的任务
 
@@ -76,7 +82,7 @@
   1. **（已完成 19:20）P1-8 默认端口去硬编码**：builder（首版＋补两条）→ code-reviewer（首轮 P2×2 → 返工复核 PASS）→ qa（BUG=0）→ supervisor（PASS，HTTP／新牙口由本窗口补位）。默认 **8899**＋`V2O_PORT` 覆盖、`start.sh` 端口单点；残留 P3×6 进 backlog。
   2. **（已完成）P1-1 ＋ P1-1-FIX 收口**：supervisor PASS（放行三条件已办：TASK 账本补行／README 落已知限制／P2 定级措辞更正）→ 推送 `main`；细节见 §一.3。
   3. **（已完成）冻结**：tag **`v1.0-mac`** 已打（落点 `5f06fdb`）并推送远端。
-  4. **（当前项·接续）P1-9 走完角色链收口**：code-reviewer → qa → supervisor → 两账本（`TASK-MODEL-LOG`／`DISPATCH-LOG`）→ 再推 `main`；同时裁定 15k flaky 与历史 P3-e 是否本链一起修，不定就继续挂账。
+  4. **（已完成·接续）P1-9 走完角色链收口**：在制品先落盘 → code-reviewer（0 P0/P1）→ qa（BUG 0，HTTP 段由本窗口补位）→ supervisor（放行 0/2）→ 两账本 → 已推 `main`。15k flaky 与历史 P3-e **未修，继续挂账**。
   5. **（顺延）Windows 迁移**：① Mac 端仓库改名加 **Mac** 后缀（`Video2Obsidian-Mac`）② Windows 端另建独立仓库 `Video2Obsidian-Windows`，按 `docs/pm/WINDOWS-MIGRATION-PLAN.md` 施工——**用户已明确：本轮只出计划，暂不施工** ③ 两边仓库隔离、互不覆盖 ④ 远端仓库改名属影响共享状态的操作，动前**再向用户确认一次**。
   4. 收尾：experience-recorder ＋ neat-freak 各一次（每阶段只派一次）。
 - **人要拍什么板（只问大事）**：

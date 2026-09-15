@@ -270,3 +270,16 @@ P3：连续写 10s（94 次事件）。写入期间**投递 0 次**；末块后 
 ---
 
 > 返工复核取证留存（全部系统 tmp，非仓库）：探针 `/tmp/p11b-probeA.py|probeB.py|real.py|half.py|m4diff.py|scope.py|falsify.sh`；日志 `/tmp/p11b-*.log`；备份 `/tmp/p11b-backup/`（含 `sha256.txt`）；真机夹具 **`/tmp/p11b-real-8925/`（正常发布 `vault/canary-clip.md` ＋ 半截 run 无 job 目录的物证）**、**`/tmp/p11b-half-8927/`（截断稿 `vault/frozen-half.md` ＋ `PUBLISHED` 判词的物证）**、`/tmp/p11b-half-8926/`（非 faststart 半截在 ffmpeg 阶段安全失败的对照）、`/tmp/p11b-clip30.mp4`、`/tmp/p11b-fs60-trunc.mp4`。本报告为本轮唯一改动文件。
+
+---
+
+## 收尾注记（neat-freak，2026-09-15 P1 收官本轮；只加注，未删原文、未改任何结论）
+
+- 核对基准：冻结后工作树 = `5f06fdb`（HEAD，`tag v1.0-mac`，已 push `origin/main`），`git status` 仅 `?? .codebuddy/`。
+- **一致（实跑核过，原文成立）**：`:170`（返工复核节）记 `git diff --numstat HEAD` 六文件＝`app/server.py 71/0`、`src/stage5/__init__.py 21/2`、`reconcile.py 179/7`、`startup.py 32/5`、`watcher.py 237/16`、`tests/selftest_p1_2_contract.py 571/0`（**+1111/−30**）——以 `git diff --numstat 7b97aaa ac3ecd8 -- <该六文件>` 实测**逐项一致**。`:4`（首轮）5 文件 +488/−19 属未提交工作树口径，算术自洽（13+102+32+103+238=488；2+0+5+12+0=19）。
+- **差异 1（首轮节行号/函数名在返工后已失效，保留原文按快照读）**：`:45`、`:123`、`:132`、`:136`、`:148` 引用的 `watcher.py:278-291`／`:251-259`／`:284` 与函数 `_stability`、`_flush_one` **现全仓零命中**（只在本文正文出现）：现实现为 `src/stage5/watcher.py:284 _flush_loop → :294 _flush_batch → _verdicts/_deliver_safe`，`stop` `:213`、`_on_fs_event` `:250`。`reconcile.py` 的 `_loop/stop/is_running` 由 `:163-165/:184-190/:192-193` 漂到 **`:221/:249/:257/:260`**（`RECONCILE_INTERVAL_S` `:47`）。
+- **差异 2（半截边界口径已被独立量测取代）**：`:208`（§R3）记「边界落在 6.5–7.5s、7.5s 投半截」→ 应以本仓 QA 报告 `docs/qa/P1-1-SCALE-QA-2026-09-15.md` §S2 的独立量测 **「6.5s 安全 / 7.0s 起投半截」** 为准（与 `min_age = DEBOUNCE_S 3.0 + (STABLE_ROUNDS 3−1)×STABLE_PROBE_S 2.0 = 7.0s` 自洽）。
+- **差异 3（「vault 安全」措辞已被证伪；P2 定级裁定已更正）**：`:242`（§R5 挂账裁定①）与 `:248`（§R6 P2-b）记「**vault 安全**」→ 已被 QA 报告 §S4 真机实证**证伪**（停 40s：半截稿 402B 落 vault、完整稿 `PUBLISH_BLOCKED`）。supervisor 裁定 **P2-a／P2-b 合并为一条 P2 并撤回「vault 安全」**，`HANDOFF.md:58` 已按合并口径落字（非静默挂账）。原文保留，结论以更正后口径为准。
+- **差异 4（基线状态）**：`:4`／`:170` 记「未提交（工作树，基线 `HEAD=7b97aaa`）」为当时快照；该 6 文件现已随 `ac3ecd8` 提交并 push `main`。
+- **未办（挂账，交 HANDOFF 未决）**：`:74`（§三F）与 `:139`（P3-5）请 neat-freak 在 `docs/pm/STAGE5-PLAN.md:47`、`docs/qa/STAGE5-QA-REPORT.md:24/:52/:65` 加新语义（首投 `PROMOTED`）口径注记 —— **本轮未加**（不在本次加注授权范围内），已在 HANDOFF 收尾节未决项登记。
+- **取证路径已被清理**：本报告引用的 `/tmp/p11-*`、`/tmp/p11fix_*`、`/tmp/p11fix2_*`、`/tmp/p11b-*`、`/tmp/p11-real` 等已按用户指令于本轮收尾删除（合计约 6.8GB）→ 本报告不再是可复跑取证；结论未受影响，保持原样。

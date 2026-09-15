@@ -128,3 +128,14 @@ Stage 0 冻结/建仓/compileall 平台失败清单；Stage 1 启动、venv、ff
 
 现在只执行当前最早未完成阶段；先读 AGENTS.md、角色卡、USER_MODEL_OVERRIDE.md、HANDOFF、经验一句话，再读本计划和 git 状态。遇到需要改管理员策略、扩大真实数据权限、改变 ASR 主后端或仓库策略时停下找用户拍板。
 ```
+
+---
+
+## 收尾注记（neat-freak，2026-09-15 P1 收官本轮；只加注，未删原文、未改任何结论）
+
+- 核对基准：冻结后工作树 = `5f06fdb`（HEAD，`tag v1.0-mac`）。本计划**只出方案不施工**，本轮无代码改动。
+- **一致（逐项实跑核过原文引用，全部命中、文件均存在）**：§1 `src/stage1/asr.py:49-58`（`FROZEN_*` 单点，`:49-50` 为 `mlx-community/whisper-large-v3-turbo` rev `a4aaeec0…f6fb`）与 `:178-190`（`mlx_whisper.transcribe` 调用）、`stage7/transcribe.py:80-93`、`stage8/transcribe_chunks.py:149-167`、`stage7/prompt_builder.py:26-39`；§2 `stage5/watcher.py:71-90`（3s+2s×3 稳定门，常量实际在 `:84-87`）、`stage2/instance.py:24`＋`:79-108`、`stage4/volume_probe.py:10-27`、`stage11/reliability.py:132-174`、`server.py:5644-5683`（`open -R`）、`server.py:3042-3065`＋`index.html:576`（`obsidian://`）、`asr.py:111-156`／`transcribe_chunks.py:109-137`（ffmpeg 现命令）；§3 `src/stage1/ingest.py:77`（Unix `mount`）。
+- **差异 1（端口行号，差 2 行）**：§2「端口｜原样复用：`127.0.0.1:8899`+`V2O_PORT`（`app/server.py:54-70`）」→ 端口真源块实际为 **`app/server.py:54-68`**（`:68` 为 `del _env_port`；`:70` 已是 `DEFAULT_DATA_ROOT`），与 `HANDOFF.md:50/:87` 记的 `:54-68` 一致。结论（默认 8899＋`V2O_PORT` 覆盖）不受影响。
+- **差异 2（文件名）**：§3 原样复用清单写「stage12 **status_cli/snapshot**」→ `src/stage12/` 实际文件为 `__init__.py`、`menu_bar.py`、`status_cli.py`、**`status_snapshot.py`**（**无 `snapshot.py`**）。
+- **时效说明（非差异）**：`src/stage5/watcher.py` 的稳定门口径为本轮 `P1-1-FIX` 定稿值（静默 3.0s／采样 2.0s×3 轮／最小年龄 7.0s／独占占用检测，见 `watcher.py:84-87` 与 `README.md:110/:116` 已知限制）；§1 引用的 8GB 上游 benchmark 与本仓 MLX revision 为当时取证数字，Windows 端须按 §1 重冻结 CT2 checkpoint/revision，不得沿用本仓 revision。
+- **未决**：§7 四条待用户确认项（无托盘自启／模型与 ffmpeg 放 Release／`%LOCALAPPDATA%` data root／CPU int8 只显式兜底）**仍未拍板**；Windows 端尚未建仓、未施工。

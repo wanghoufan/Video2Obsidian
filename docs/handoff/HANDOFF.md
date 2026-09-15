@@ -350,3 +350,22 @@
   - `docs/qa/P0-3-STATE-ENTRY-QA-2026-09-14.md` 尾部 supervisor 复检节（打回 1/2）：历史快照，只加注不改正文——当时 `+112/−11`、账本 46／派工 24，当前已为 `+209/−34`；当时行号 `:605/:270/:742` 为旧位置，旧三入口现 0 命中；P0-3 本链打回计数仍为 `1/2`（语义修复链未新增 supervisor 打回）。
 - 清理：删仓根 `./.DS_Store`＋`docs/.DS_Store` 共 2 个；`__pycache__` 全仓本就为空；复查 `find -name __pycache__ -o -name .DS_Store` 输出为空。未删任何业务/文档文件；`env.err`、benchmark `results/*.log` 未动（按要求保留）。
 - 未决（P0-3 未收口，差 supervisor 复检；不写收口/完成）：① supervisor 复检语义修复链（含 server `28/3` vs `+19/−3` 计数口径裁定）；② `TASK-MODEL-LOG`／`DISPATCH-LOG` 语义修复链四行（builder/reviewer/qa/语义builder）落盘与 `rework` 口径（仍 1/2）由 TM 定；③ `HANDOFF.md` 工作树 `M`（TM 本轮落盘改动）与四份新报告均未提交未推送，是否 commit/push 待用户给分支名；④ QA 真 mismatch 夹具曾用 `FAILED_RETRYABLE`（旧报告）vs 现实枚举 `*_FAILED` 家族，口径差已记不拦。
+
+---
+
+## 收尾记一笔（neat-freak，2026-09-15 P1 收官本轮）
+
+- 范围：只做治理与加注（三份报告尾部加注 ＋ 本节）＋ 清系统 tmp 产物；**未改业务代码**（`app/`、`src/`、`tests/` 零改动）、**未改任何报告正文结论**、未 commit/push、未碰 secrets、未碰 `008林粒粒AI编程/`、未碰用户真实目录（`~/Downloads/需转录视频`、`~/Downloads/暂不转录视频`、`~/Documents/ob 仓库`）。
+- **清理（系统 tmp，先列清单后删）**：用户点名的族 `p11-*｜p11_*｜p11fix_*｜p16_*｜p18_*｜sup_*｜ux2_*｜v2o-*` **147 项 / 5.61 GB**；同族扩展（同一批探针/夹具，仅分隔符差：`p11b-*`、`p11sup_*`/`p11sup-*`、`p11fix-*`/`p11fix2_*`、`p18sup|rev|rev2|-pyc`、`v2o_*`）**98 项 / 1.19 GB**。**合计 245 项 / 约 6.80 GB 已删**，复查 0 命中；`/tmp` 由约 9.6GB 降至 **2.8GB**。删除前已确认**无任何进程持有**（`lsof` 零命中；8765=PID 6586、8766=65597 仅监听，未触碰）。
+- **保留（未动）**：`/tmp/settings.json.bak-20260915`（分类器配置备份）、`/tmp/win_plan_prompt.md`、`/tmp/settings.json` 现网配置。
+- **只列不删（未在用户清单内，同属 tmp 但属更早批的残留，合计 136 项 / 0.07 GB）**：`p12_*|p13_*|p14_*|p15_*|p17_*|p15rev2*|p13rev*|p14rev*`（P1-2…P1-7 各链探针/夹具）＋ `p1-2*|p1_7*|p1-7*|p1.json` ＋ `supervisor2.log`。理由：用户清单只点名 `p16_*`／`p18_*` 两支更早批，未点名 p12–p15/p17 支，按「拿不准先列」处理——需要清的话下一轮说一声即可（体积可忽略）。
+- **仓库卫生**：删仓根 `.DS_Store` ＋ `app/`、`src/stage1,2,3,4,5,6,7,8,9,12/` 共 **11 个 `__pycache__`**（全部在 `.gitignore` 内，由本轮服务/测试运行产生，mtime 21:47–22:02）；复查 `find`（排除 `.venv`）**输出为空**。`.venv/` 内 `__pycache__` **未删**（属已装依赖的正常运行产物，非仓内残留，删了无收益且可能影响用户在跑的环境）。
+- **文档一致性加注（各在文件尾部追加一节，原文与结论一字未动）**：
+  - `docs/qa/P1-1-SCALE-QA-2026-09-15.md` §收尾注记：**一致项**＝`:195` 自证「原 189 行 / 12,964 字节 / sha256 `d7b33a5d…ce624`」，`head -n 189` 实测**逐字一致**（含字节数）；**差异 5 处**＝① gate 落点 `:4714/:4916` 实为注释行，判定调用在 `:4716/:4918`（`initial_publish :4933` 一致）② §S7 账本 92→**93** 行、`TASK-MODEL-LOG` 55→**56** 行且**仍无独立 `P1-1` 行**（S10 条件 1 只部分办到）③ §S8/§S10 条件 2 已闭合（`README.md:110/:116`、`README.en.md:110/:116`、本文件 `:58`）④ §S9「工作树 8 个 `M`」已被 `ac3ecd8` 覆盖 ⑤ 首轮节 `:32`/`:151` 为历史快照（现 `watcher.py:84-87`、周期兜底已接线、契约 571/rc0）。
+  - `docs/review/P1-1-FIX-WATCHER-CODE-REVIEW.md` §收尾注记：**一致项**＝返工节 `:170` 六文件 numstat 以 `git diff --numstat 7b97aaa ac3ecd8` 实测**逐项一致**（+1111/−30）；**差异 4 处**＝① 首轮节 `:45/:123/:132/:136/:148` 的 `watcher.py:278-291|:251-259|:284` 与 `_stability`/`_flush_one` 返工后**全仓零命中**（现 `:284 _flush_loop → :294 _flush_batch`；`reconcile.py` 漂到 `:221/:249/:257/:260`）② 半截边界 `:208` 的 6.5–7.5s 应以 qa §S2 的 **6.5s 安全 / 7.0s 起投** 为准 ③ `:242`/`:248` 的「vault 安全」**已被 §S4 真机证伪**，P2-a/P2-b 合并裁定见本节 `:58` ④ `:4`/`:170` 的「未提交／基线 `7b97aaa`」已随 `ac3ecd8` 提交推送。**未办**：`:74`/`:139`（P3-5）请 neat-freak 给 `STAGE5-PLAN.md:47`、`STAGE5-QA-REPORT.md:24/:52/:65` 加注 → 见下未决。
+  - `docs/pm/WINDOWS-MIGRATION-PLAN.md` §收尾注记：**一致项**＝§1/§2/§3 全部行号引用（`asr.py:49-58`/`:178-190`、`transcribe.py:80-93`、`transcribe_chunks.py:149-167`/`:109-137`、`prompt_builder.py:26-39`、`watcher.py:71-90`、`instance.py:24`/`:79-108`、`volume_probe.py:10-27`、`reliability.py:132-174`、`server.py:5644-5683`/`:3042-3065`、`index.html:576`、`asr.py:111-156`、`ingest.py:77`）**逐项命中、引用文件均存在**；**差异 2 处**＝① 端口 `app/server.py:54-70` 实为 **`:54-68`**（与 `:50`/`:87` 一致）② §3 写 `stage12 status_cli/snapshot`，实际文件名是 **`status_snapshot.py`**（无 `snapshot.py`）。
+- **未决（不写收口/完成）**：
+  1. `docs/review/...WATCHER-CODE-REVIEW.md:74`/`:139` 的 **P3-5 请求未执行**：`docs/pm/STAGE5-PLAN.md:47` 与 `docs/qa/STAGE5-QA-REPORT.md:24/:52/:65` 的 A5「抖动文件仍 WAITING」口径在 `P1-1-FIX` 后已变为「首投 `PROMOTED`」（reviewer 探针 4 实测），至今**无注记**——本轮授权范围只含三份报告，故只记不办，待用户/TM 一句话即可补。
+  2. `TASK-MODEL-LOG.jsonl` **缺独立 `P1-1`（首轮 qa）任务行**；`DISPATCH-LOG.jsonl` 已 93 行。
+  3. 本轮 tmp 清理后，三份报告引用的 `/tmp/**` 取证路径**已不可复跑**（结论未变，仅取证可复现性下降）。
+  4. 更早批 tmp 残留 136 项 / 0.07 GB 只列未删（见上）。

@@ -75,6 +75,25 @@
 - **账本 schema 校验 EXIT=1 的 1 条**：`TASK-MODEL-LOG` 第 40 行 `role="迁移整理工"` 不属 9+1（迁移遗留），挂账不改历史行。
 - **状态**：**P1-9 已收口**（commit＋push `main`），无未收口 P0/P1。
 
+### 5. 收尾注记（neat-freak，2026-09-16；只加注，本节结论正文不动）
+
+**一致项（6 条，实测基准＝当前工作树 HEAD `e38151a`）**
+
+1. **改动量 numstat**：`app/server.py +171/−6`、`app/index.html +31/−9`、`tests/selftest_p1_2_contract.py +177/−0`、`tests/selftest_p1_2_frontend.py +50/−1` —— 与 `git show --numstat 3d501a5` 实测**逐项一致**（`docs/review/P1-9-SKIP-EXISTING-NOTE-CODE-REVIEW.md:19-25` 亦一致）。
+2. **commit hash 语义**：`3d501a5`＝在制品落盘（5 文件：4 业务/测试 ＋ HANDOFF）、`e38151a`＝收口（5 文件：两份新报告 ＋ HANDOFF ＋ 两账本）、`378eac2`＝基线 —— 与 `git log`／`git show --name-status` 实测一致。
+3. **三套自测（本窗口 `.venv` 本人跑）**：`contract 600/600 rc=0`、`frontend 173 条 PASS rc=0`、`presets 58 rc=0` —— 与 supervisor 节 `docs/qa/P1-9-SKIP-QA-2026-09-15.md:79-81` 一致；qa 报告 `:46` 的 contract `rc=1` 确为 codex 沙箱禁 loopback bind 的环境限制，补位结论成立。
+4. **账本行数与卫生**：`TASK-MODEL-LOG` **58 行**一致；`TASK-MODEL-LOG.jsonl:40` 实测 `role="迁移整理工"`（确在第 40 行、确不属 9+1），与本节上方「账本 schema 校验 EXIT=1 的 1 条」一致。
+5. **抽查引用行号 8 处全部命中**：`app/server.py:4837-4871`（门 0）、`:4917`（引擎调用在门后）、`:950`（`_scan_disk_states`）、`:1040`（`_app_resolve_canonical`）、`:122`（`FAIL_STATES`）、`:1726-1727`（诊断展示 SKIPPED）、`app/index.html:896-898`（「库里已有」文案）、`:464-468`（`stClass`）。（另抽查 `src/stage4/publish_commit.py:54-56`/`:118`、`src/stage4/conflict.py:129-130`、`src/stage3/render.py:58` 亦全命中。）
+6. **复检节指向**：`docs/qa/P1-9-SKIP-QA-2026-09-15.md:64`——`:64` 为该节起始分隔线、标题在 `:66`，指向同一节，无歧义。
+
+**差异项（1 条）**
+
+1. **DISPATCH 行数差 1**：本节上方 supervisor 条目与 `docs/qa/P1-9-SKIP-QA-2026-09-15.md:134` 均记 **95 行**，实测 `docs/model/DISPATCH-LOG.jsonl` 为 **96 行**（基线 `378eac2`＝93，`e38151a` 新增 reviewer／qa／supervisor 三行 ＝ +3）。成因＝记账时刻口径（校验发生在最后一行落盘前），**非坏行**，正控「坏行 0」结论不受影响；不改正文，只在此登记。
+
+**另：历史未决项已办（上一轮 neat 只记未办）**
+
+- `docs/pm/STAGE5-PLAN.md` 与 `docs/qa/STAGE5-QA-REPORT.md` **已各在文件尾部追加「收尾注记」一节**，说明 A5「抖动文件仍 WAITING」在 P1-1-FIX（`ac3ecd8`）后已变为「首投 `PROMOTED`」，并附 `docs/review/P1-1-FIX-WATCHER-CODE-REVIEW.md:74/:139` 探针 4 证据；核对结论＝**与当前代码一致**（`src/stage5/watcher.py:74-86`、`:284-352`）。两文件正文与结论一字未动。
+
 ## 二、下一步的任务
 
 - **下一步（Next Single Action，按序）**：

@@ -102,3 +102,13 @@ Stage5 全程 Whisper 调用恒为 0（转写执行不属本 Stage）
 
 - 无，按TM已定执行（本计划无阻塞项，不问人）。
 - TM 已定事项备忘（执行，不复议）：① 外置测试目录（仓库外独立 Data Root + 独立合成 Input Root，Stage1 `/tmp/s1t*` 与 Stage2 H2 外置目录模式延续）；② 异常路径一律用合成副本（原片不动，只动副本；canonical/笔记一律不碰）；③ 真实长视频一律不测直到产品完成（用户明确，用例最大文件为合成小文件）；④ `src/stage1/` + `src/stage2/` + `src/stage3/` + `src/stage4/` 只读加法（新增只进 `src/stage5/`，diff 为空为硬门）；⑤ STOP EXPANSION（Stage6+ 禁入：Path Mirror、Prompt/Vocab、VAD/Chunk、阈值调优、Archive A/B/C、`current_path` 更新、LaunchAgent、Menu Bar 一律 Out；Triple Discovery Race 按 Source=1/Run=1（Case 3）延续；watchdog 真实启动可用 file-system event，测试用合成目录）。
+
+---
+
+## 收尾注记（neat-freak，2026-09-16；只加注，不改正文、不改结论）
+
+- **事由**：历史未决项——`:47`（P0-6）中「抖动文件仍 WAITING，门内 append 不提前 PROMOTED」的 A5 口径，在 **P1-1-FIX（commit `ac3ecd8`）之后已变**，本文件此前无注记。
+- **新口径**：稳定判定改为「静默 3.0s ＋ 采样 2.0s×3 轮（最小年龄 7s）＋ 独占占用检测」后，**抖动期间根本不投递**，因此**首个投递结果的状态是 `PROMOTED`**（旧期望 `WAITING_FOR_STABLE_FILE`）。
+- **核对结果：与当前代码一致**。证据：`src/stage5/watcher.py:74-86`（`DEBOUNCE_S`/`STABLE_PROBE_S=2.0`/`STABLE_ROUNDS=3`，注释写明尾延迟 ≈7s）、`:284-352`（`_flush_loop`/`_flush_batch`/`_verdicts`，采样门位于投递之前）。P0-6 的**实质**（不得绕过 Stable 门提前 PROMOTED）**仍成立**，变的只是「首个投递结果的观测状态」这一口径。
+- **引用证据**：`docs/review/P1-1-FIX-WATCHER-CODE-REVIEW.md` §三F `:74`（探针 4：真 watcher ＋ 真 discover，1KB×2／40ms 抖动 60 次 → 投递 **1 次**、写完 +0.69s、`status=PROMOTED`）与 `:139`（P3-5 请求加注）；链路旁证 `docs/qa/P1-9-SKIP-QA-2026-09-15.md:64` 起 supervisor 复检节（P1-9 未触碰 `src/`，该口径此后未再变化）。
+- **行号口径**：本注记与正文引用行号均以**当前工作树**为准（2026-09-16，HEAD `e38151a`）。

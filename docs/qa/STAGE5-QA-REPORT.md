@@ -99,3 +99,14 @@ Runner：`/tmp/s5qa_run.py`（仓库外）→ `/tmp/s5qa/s5qa_results.json`（56
 
 ---
 目标：Stage5验收S5-T06｜剩 P0：无（QA 口径 PASS；闭环判定以 supervisor 复检为准）｜下一步：交 product-reviewer 验 + supervisor 复检（HANDOFF 只记状态，不代写结论）。
+
+---
+
+## 收尾注记（neat-freak，2026-09-16；只加注，不改正文、不改结论）
+
+- **事由**：历史未决项——本报告 `:24`（A5 用例行）、`:52`（A5 明细：「期望首个命中的 `result.status==WAITING_FOR_STABLE_FILE`」）、`:65`（§72 子集门「Stable File Detection PASS（A5 抖动仍 WAITING）」）三处的 A5 口径，在 **P1-1-FIX（commit `ac3ecd8`）之后已变**，此前无注记。
+- **新口径**：稳定判定改为「静默 3.0s ＋ 采样 2.0s×3 轮（最小年龄 7s）＋ 独占占用检测」后，**抖动期间根本不投递**，因此**首个投递结果的状态是 `PROMOTED`**（旧期望 `WAITING_FOR_STABLE_FILE`）。
+- **核对结果：与当前代码一致**。证据：`src/stage5/watcher.py:74-86`（`DEBOUNCE_S`/`STABLE_PROBE_S=2.0`/`STABLE_ROUNDS=3`，尾延迟 ≈7s）、`:284-352`（`_flush_loop`/`_flush_batch`/`_verdicts`，采样门在投递之前）。§72「Stable File Detection PASS」的**实质**（不得绕过 Stable 门提前 PROMOTED）**仍成立**，变的只是「首个投递结果的观测状态」。
+- **引用证据**：`docs/review/P1-1-FIX-WATCHER-CODE-REVIEW.md` §三F `:74`（探针 4：真 watcher ＋ 真 discover，1KB×2／40ms 抖动 60 次 → 投递 **1 次**、写完 +0.69s、`status=PROMOTED`）与 `:139`（P3-5 请求加注）；链路旁证 `docs/qa/P1-9-SKIP-QA-2026-09-15.md:64` 起 supervisor 复检节（P1-9 未触碰 `src/`，该口径此后未再变化）。
+- **不改正文的理由**：`:8` 的 56/56 双轮 PASS 与本节各用例结论均为**当时取证值**，按「历史报告只加注不改正文」处理，结论一律不动。
+- **行号口径**：本注记与正文引用行号均以**当前工作树**为准（2026-09-16，HEAD `e38151a`）。

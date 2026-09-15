@@ -1627,6 +1627,9 @@ def _diagnosis_item(row: dict, source: dict, data_root: str, persisted_at: str) 
                  ("raw_path", "normalized_path", "rendered_path", "canonical_output_path")}
     return {
         "run_id": run_id, "source_label": os.path.basename(recorded) or run_id,
+        # P1-4/FR-3：「目录尾段」直接复用列表侧同一 helper `_dir_tail()`
+        # （见 :1081 `source_dir_tail`），不另造第二套尾段口径
+        "source_dir_tail": _dir_tail(os.path.dirname(recorded)),
         "recorded_path_redacted": _diag_redact_path(recorded),
         "recorded_path_exists": recorded_exists,
         "alternate_path_checked": bool(not recorded_exists),

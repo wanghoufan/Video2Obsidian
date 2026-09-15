@@ -83,19 +83,28 @@ def body(obj):
 
 # ------------------------------------------------------------------ 夹具
 
-def add_run(con, run_id, src_path, status, aligned=True, source_size=None):
-    """按真 DDL 落一行（processing_runs 无 raw_error_code/reason 列，诊断只读 status）。"""
+def add_run(con, run_id, src_path, status, aligned=True, source_size=None,
+            content_identity=None, identity_from=None):
+    """按真 DDL 落一行（processing_runs 无 raw_error_code/reason 列，诊断只读 status）。
+
+    P2-2：`content_identity` 默认仍是旧的 `"x"*40`（既有断言一个都不放松）；需要走通
+    「源文件不在原位＋替代位置身份匹配」那条唯一分支的用例传真 sha256。
+    `identity_from` 指定 size/mtime 的取材文件（缺省＝`src_path`）——「登记路径无文件、
+    文件在替代位置」时，身份三元组必须按替代位置的真文件算，否则 `_diag_identity`
+    在第一道 size 比对上就 MISMATCH，永远到不了 MATCH。
+    """
     now = "2026-09-14T00:00:00Z"
     event_at = now if aligned else "2026-09-01T00:00:00Z"
-    size = os.path.getsize(src_path) if os.path.isfile(src_path) else 0
-    mtime = os.stat(src_path).st_mtime_ns if os.path.isfile(src_path) else 0
+    truth = identity_from or src_path
+    size = os.path.getsize(truth) if os.path.isfile(truth) else 0
+    mtime = os.stat(truth).st_mtime_ns if os.path.isfile(truth) else 0
     con.execute(
         "INSERT INTO sources (source_id, path_identity_key, content_identity,"
         " logical_source_identity, current_path, current_location_type,"
         " source_size, source_mtime_ns, status, first_seen_at, last_seen_at)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        ("src_" + run_id, src_path, "x" * 40, "lsid_" + run_id, src_path,
-         "LOCAL", size if source_size is None else source_size, mtime,
+        ("src_" + run_id, src_path, content_identity or ("x" * 40), "lsid_" + run_id,
+         src_path, "LOCAL", size if source_size is None else source_size, mtime,
          "ACTIVE", now, now))
     con.execute(
         "INSERT INTO processing_runs (run_id, source_id, creation_mode,"
@@ -128,8 +137,22 @@ def make_data_root(server, tag, runs):
             if spec.get("with_src", True):
                 with open(src, "wb") as fh:
                     fh.write(b"fake-media-" + spec["run_id"].encode())
+            # P2-2：替代位置（同一 basename）：登记路径**不落文件**，文件放到
+            # `root/<alt_dir>/`，身份三元组（size/mtime/sha256）按替代位置的真文件算——
+            # 这样才走得到 `_diagnosis_item` 里 identity=MATCH 那条唯一分支（真 16 条）。
+            alt_dir = spec.get("alt_dir")
+            identity_from = content_identity = None
+            if alt_dir:
+                payload_bytes = b"fake-media-" + spec["run_id"].encode()
+                alt_path = os.path.join(root, alt_dir, os.path.basename(src))
+                os.makedirs(os.path.dirname(alt_path), exist_ok=True)
+                with open(alt_path, "wb") as fh:
+                    fh.write(payload_bytes)
+                identity_from = alt_path
+                content_identity = hashlib.sha256(payload_bytes).hexdigest()
             add_run(con, spec["run_id"], src, spec["status"],
-                    aligned=spec.get("aligned", True))
+                    aligned=spec.get("aligned", True),
+                    content_identity=content_identity, identity_from=identity_from)
             manifest = spec.get("manifest")
             if manifest:
                 job_dir = os.path.join(root, "data", "jobs", spec["run_id"])
@@ -175,6 +198,12 @@ PUB_SPEC = {"run_id": "run-publish", "status": "PUBLISH_BLOCKED",
             "manifest": {"raw_path": "@raw", "normalized_path": "@norm",
                          "rendered_path": "@render", "render_revision_id": "rev1"}}
 OK_SPEC = {"run_id": "run-ok", "status": "SUCCEEDED"}
+# P2-2：真 16 条那条分支——登记路径无文件（with_src=False），文件落在替代位置 `_alt/`
+# 且身份三元组（size/mtime/sha256）与 sources 行一致 → MATCH
+ALT_SPEC = {"run_id": "run-alt", "status": "TRANSCRIBE_FAILED",
+            "with_src": False, "alt_dir": "_alt"}
+# 对照：同样不在原位，但没有任何替代位置命中（不编造替代路径）
+NOALT_SPEC = {"run_id": "run-noalt", "status": "TRANSCRIBE_FAILED", "with_src": False}
 
 
 def build_root_a(server):
@@ -1842,6 +1871,165 @@ def part10_p13_semantics(server):
         shutil.rmtree(noroot, ignore_errors=True)
 
 
+# ------------------------------------------------------------------ 11 P1-4 脱敏摘要（FR-3/HD-2=A）
+
+# FR-3 允许进一键复制正文的 7 类字段——前端 `FAIL_DIGEST_FIELDS` 白名单的契约来源
+DIGEST_SOURCE_FIELDS = ("source_label", "source_dir_tail", "raw_error_code",
+                        "action_category", "confidence", "missing_evidence", "next_action")
+# HD-2=A/DoD5：只做脱敏摘要，不做完整路径导出
+NO_FULLPATH_EXPORT = ("导出全路径", "导出完整路径", "导出绝对路径",
+                      "复制完整路径", "复制全路径")
+
+
+def part11_p14_digest(server):
+    """P1-4/FR-3/HD-2=A：一键复制摘要所依赖的字段与脱敏口径，在后端这一侧钉死。
+
+    DoD5「不提供完整绝对路径导出」＝接口只暴露打码后的字段：本用例断言诊断响应里
+    既没有真实绝对路径（含 tmp 的 `/var/…` 真形态），也没有任何字段等于真实登记路径。
+    """
+    root = build_root_a(server)
+    assert_tmp(root, "part11_p14_digest")
+    try:
+        code, diag = server._handle_failure_diagnosis({"data_root": [root]})
+        check("11a 诊断接口可得", code == 200 and diag.get("ok") is True, (code, diag))
+        items = diag.get("items") or []
+        check("11a 有未完成项可诊断", len(items) >= 1, len(items))
+
+        # 11b FR-3 摘要 7 类来源字段逐条齐备且非空（前端白名单字段的契约来源）
+        missing = sorted({k for k in DIGEST_SOURCE_FIELDS for i in items if k not in i})
+        check("11b 摘要 7 类来源字段逐条齐备", not missing, missing)
+        blank = sorted({k for k in DIGEST_SOURCE_FIELDS for i in items
+                        if not str(i.get(k) or "").strip()})
+        check("11b 7 类字段逐条非空（未知也要写 UNKNOWN/占位，不留空）", not blank, blank)
+
+        # 11c 脱敏：整包零真实绝对路径（复用 6 节同一 SENSITIVE 扫描口径，不另造一套）
+        scan_leak("诊断响应零绝对路径/正文/token（P1-4）", diag, [root, TMP_ROOT])
+        check("11c 原登记路径逐条已打码（…/ 形态）",
+              all(str(i.get("recorded_path_redacted", "")).startswith("…/") for i in items),
+              [(i.get("run_id"), i.get("recorded_path_redacted")) for i in items])
+        real = {os.path.join(root, "_src", "%s.mp4" % i["run_id"]) for i in items}
+        flat = json.dumps(diag, ensure_ascii=False)
+        check("11c 无任何字段等于真实登记路径（HD-2=A 不做完整路径导出）",
+              not any(p in flat for p in real), sorted(p for p in real if p in flat))
+
+        # 11d 目录尾段与列表侧同源同口径（复用 _dir_tail，不另造第二套尾段写法）
+        code_s, snap = server._handle_status({"data_root": [root], "limit": ["200"]})
+        by_run = {str(r.get("run_id")): r for r in (snap.get("recent_runs") or [])}
+        pairs = [(i["run_id"], i["source_dir_tail"], by_run[i["run_id"]].get("source_dir_tail"))
+                 for i in items if i["run_id"] in by_run]
+        check("11d 诊断目录尾段与列表 source_dir_tail 逐条一致",
+              bool(pairs) and all(a == b for _, a, b in pairs), pairs)
+        check("11d 目录尾段逐条是打码形态（…/ 开头）",
+              all(str(i.get("source_dir_tail", "")).startswith("…/") for i in items),
+              [(i.get("run_id"), i.get("source_dir_tail")) for i in items])
+
+        # 11e 口径单测（HD-2=A 原文例子「…/第七周/xxx.mp4」）
+        check("11e _diag_redact_path 只留 basename＋两级父目录标签",
+              server._diag_redact_path(
+                  "/Users/zzymima0000/Downloads/需转录视频/第七周/样例.mp4")
+              == "…/需转录视频/第七周/样例.mp4",
+              server._diag_redact_path(
+                  "/Users/zzymima0000/Downloads/需转录视频/第七周/样例.mp4"))
+        check("11e _dir_tail 只留末段",
+              server._dir_tail("/Users/zzymima0000/Downloads/需转录视频/第七周") == "…/第七周",
+              server._dir_tail("/Users/zzymima0000/Downloads/需转录视频/第七周"))
+        check("11e _strip_paths 含空格路径整段抹掉（宁可多抹不漏尾段）",
+              server._strip_paths("打不开 /Users/zzy/My Data/vault/x.md") == "打不开 …",
+              server._strip_paths("打不开 /Users/zzy/My Data/vault/x.md"))
+        check("11e _strip_paths 遇中文标点收尾（不吃掉后文）",
+              server._strip_paths("先看 /Users/a/b，再点重试") == "先看 …，再点重试",
+              server._strip_paths("先看 /Users/a/b，再点重试"))
+
+        # 11f 类别/置信度/错误码只许枚举或明确占位，不许编造
+        cats = {i["action_category"] for i in items}
+        check("11f 类别取值属诊断枚举（不编造）",
+              cats.issubset(set(server.DIAGNOSIS_ACTIONS)), sorted(cats))
+        check("11f 置信度取值属 {HIGH, UNVERIFIED}",
+              {i["confidence"] for i in items}.issubset({"HIGH", "UNVERIFIED"}),
+              sorted({i["confidence"] for i in items}))
+        check("11f 错误码逐条非空字符串（未知写 UNKNOWN）",
+              all(isinstance(i["raw_error_code"], str) and i["raw_error_code"].strip()
+                  for i in items), [i["raw_error_code"] for i in items])
+        check("11f 缺失证据逐条非空字符串",
+              all(str(i["missing_evidence"]).strip() for i in items),
+              [i["missing_evidence"] for i in items])
+        check("11f 建议（next_action）逐条非空人话",
+              all(str(i["next_action"]).strip() for i in items),
+              [i["next_action"] for i in items])
+
+        # 11g 前端入口：一键复制的是脱敏摘要；不新增「导出全路径」类按钮（HD-2=A）
+        html = open(os.path.join(ROOT, "app", "index.html"), encoding="utf-8").read()
+        hits = [k for k in NO_FULLPATH_EXPORT if k in html]
+        check("11g 未新增「导出全路径」类入口（HD-2=A/DoD5）", not hits, hits)
+        check("11g 复制入口文案标明「脱敏摘要」", "复制脱敏摘要" in html)
+        check("11g 摘要只由白名单 7 键出口（无第 8 类字段拼装）",
+              'var FAIL_DIGEST_FIELDS=["label","tail","code","category","confidence",'
+              '"missing","next"];' in html, "FAIL_DIGEST_FIELDS 声明缺失或字段变了")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def part12_p14_alt_branch(server):
+    """P2-2：真 16 条那条唯一分支——「源文件不在原位＋替代位置身份匹配」。
+
+    旧夹具把 `content_identity` 写死 `"x"*40` → `_diag_identity` 恒 MISMATCH →
+    `SOURCE_LOCATION_REVIEW`／`MATCH`／`confidence=HIGH`／`alternate_path_redacted!=UNKNOWN`
+    在自测里**根本不可达**，于是最敏感的那个字段（替代路径＝用户把文件搬到哪儿）
+    **没有任何断言在守**。本用例把该分支跑通，并钉死它必须是脱敏值。
+    """
+    root = make_data_root(server, "ALT", [ALT_SPEC])
+    assert_tmp(root, "part12_p14_alt_branch")
+    try:
+        code, diag = server._handle_failure_diagnosis({"data_root": [root]})
+        check("11h 替代路径用例：诊断接口可得", code == 200 and diag.get("ok") is True, (code, diag))
+        items = diag.get("items") or []
+        check("11h 替代路径用例：可诊断到 1 条", len(items) == 1, items)
+        it = items[0] if items else {}
+        # 分支可达性：登记路径无文件（否则不会去扫替代位置）＋身份真 MATCH
+        check("11h 分支可达：源不在原位（recorded_path_exists=False）",
+              it.get("recorded_path_exists") is False, it.get("recorded_path_exists"))
+        check("11h 分支可达：替代位置身份匹配 MATCH（旧夹具恒 MISMATCH，到不了这里）",
+              it.get("identity_match") == "MATCH", it.get("identity_match"))
+        check("11h 类别＝SOURCE_LOCATION_REVIEW 且置信度＝HIGH",
+              it.get("action_category") == "SOURCE_LOCATION_REVIEW"
+              and it.get("confidence") == "HIGH",
+              (it.get("action_category"), it.get("confidence")))
+        check("11h 替代路径确实被检查过（alternate_path_checked=True）",
+              it.get("alternate_path_checked") is True, it.get("alternate_path_checked"))
+
+        # 11i 最敏感字段：替代路径必须脱敏（把 server.py 的 _diag_redact_path 拿掉即 rc=1）
+        alt_real = os.path.join(root, "_alt", "run-alt.mp4")
+        alt = str(it.get("alternate_path_redacted") or "")
+        check("11i 替代路径不是 UNKNOWN（真取到了值，不是空跑）",
+              alt not in ("", "UNKNOWN"), alt)
+        check("11i 替代路径已脱敏（…/ 形态，只留末 3 段）",
+              alt.startswith("…/") and "/var/" not in alt and "/private/" not in alt, alt)
+        check("11i 替代路径不等于真实替代路径（HD-2=A 不做完整路径导出）",
+              alt != alt_real, (alt, alt_real))
+        flat = json.dumps(diag, ensure_ascii=False)
+        check("11i 响应里不存在真实替代路径明文", alt_real not in flat)
+        scan_leak("11i 替代路径分支的响应零绝对路径/正文/token（P1-4）", diag, [root, TMP_ROOT])
+        check("11i 原登记路径同样只留打码形态",
+              str(it.get("recorded_path_redacted", "")).startswith("…/"),
+              it.get("recorded_path_redacted"))
+
+        # 11i2 对照：替代路径不存在时该字段仍是 UNKNOWN（不编造替代路径）
+        noroot = make_data_root(server, "NOALT", [NOALT_SPEC])
+        assert_tmp(noroot, "part12_p14_alt_branch.noroot")
+        try:
+            code2, diag2 = server._handle_failure_diagnosis({"data_root": [noroot]})
+            items2 = diag2.get("items") or []
+            check("11i2 对照：找不到替代位置时 identity 不 MATCH、字段写 UNKNOWN",
+                  code2 == 200 and len(items2) == 1
+                  and items2[0].get("identity_match") != "MATCH"
+                  and items2[0].get("alternate_path_redacted") == "UNKNOWN",
+                  [(i.get("identity_match"), i.get("alternate_path_redacted")) for i in items2])
+        finally:
+            shutil.rmtree(noroot, ignore_errors=True)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     print("tmp 根：%s" % TMP_ROOT)
     server = load_server()
@@ -1855,6 +2043,8 @@ def main():
     part8_http_contract(server)
     part9_rework_guards(server)
     part10_p13_semantics(server)
+    part11_p14_digest(server)
+    part12_p14_alt_branch(server)
     if FAILS:
         print("\nSELFTEST FAIL %d/%d：%s" % (len(FAILS), CHECKS[0], FAILS))
         return 1

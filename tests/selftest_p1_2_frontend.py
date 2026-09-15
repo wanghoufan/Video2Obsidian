@@ -39,7 +39,18 @@ FUNCS = [
     # P1-3 返工（P2-1/P2-2）：批量重试的文案与失败原因透传
     "retryRootHint", "retryRun", "retryAllFailed", "failedRuns", "isFailedRun",
     "filenameForRunId",
+    # P1-4/FR-3/HD-2=A：脱敏摘要复制＋页面逐条本地证据（缺一个即 ReferenceError → rc=1）
+    "redactPathField", "redactPathTail", "redactCopyField", "digestEntry",
+    "digestDataRoot", "dropDiagCache", "loadDiag", "diagItemFor",
+    "failDigestFields", "failDigestText", "evidenceLinesFor", "failEvidenceText",
+    "renderDiagEvidence", "copyAllFailedReasons", "showFailEvidence",
+    # P1-4 用到的既有函数：复制短句化（FR-17）与长文面板本体，抽真源码才验得动
+    "copyText", "openLongPanel", "failPartsForRun", "filenameForRun", "shortId",
 ]
+
+# P1-4：模块常量/模块变量也照抄真源码，不手写——常量改了测试跟着改，不会漂移
+DECLS = ["FAIL_DIGEST_FIELDS", "REDACT_STOP_CHARS", "NO_EVIDENCE", "diagCache",
+         "effectiveDataRoot", "lastLongText"]
 
 
 def extract(src, name):
@@ -62,6 +73,15 @@ def extract(src, name):
                 return src[start:i + 1]
         i += 1
     raise AssertionError("函数 %s 花括号不配对" % name)
+
+
+def extract_decl(src, name):
+    """按变量名抓 `var ...;` 声明**整行**真源码（常量/模块变量照抄，不手写复现）。"""
+    for line in src.splitlines():
+        s = line.strip()
+        if s.startswith("var ") and s.endswith(";") and ("%s=" % name) in s.replace(" ", ""):
+            return s
+    raise AssertionError("index.html 找不到变量声明 %s（改名了？）" % name)
 
 
 DRIVER = r"""
@@ -102,12 +122,24 @@ function setInterval(fn, ms){ TIMERS++; TIMER_CB = fn; return TIMERS; }
 function clearInterval(){ TIMERS = 0; }
 function confirm(){ return true; }
 var FETCH_QUEUE = [], ROUTES = [];
+// P2-1 反例用：按 url 子串把响应挂起（模拟「旧目录那条请求还在飞」），由用例手动放行
+var HOLD = [];
 function mkResp(r){ return {status: r.status,
                             json: function(){ return Promise.resolve(r.json); }}; }
 function fetch(url, opts){
   var method = (opts && opts.method) || "GET";
   REC.urls.push(url);
   REC.calls.push({url: url, method: method, body: (opts && opts.body) || null});
+  var held = null, hi;
+  for(hi = 0; hi < HOLD.length; hi++){
+    if(HOLD[hi].match && url.indexOf(HOLD[hi].match) >= 0
+       && (!HOLD[hi].method || HOLD[hi].method === method)){ held = HOLD[hi]; break; }
+  }
+  if(held){
+    var slot = {};
+    held.queue.push(slot);
+    return new Promise(function(res){ slot.release = function(r){ res(mkResp(r)); }; });
+  }
   var best = null;   // 取“最长匹配”=最具体的路由，避免 /api/vocab 吃掉 /api/vocab/candidates
   for(var i = 0; i < ROUTES.length; i++){
     if(url.indexOf(ROUTES[i].match) >= 0
@@ -137,6 +169,10 @@ function toast(t){ TOASTS.push(String(t == null ? "" : t)); }
 // var detailsByRun={}，桩里按同结构复现）
 var cache = {runs: []};
 var detailsByRun = {};
+// P1-4：剪贴板桩——copyText 真源码走 navigator.clipboard.writeText，这里把写出去的
+// 正文原样收下，供「摘要里到底有没有真实路径」的断言用
+var CLIP = [];
+var navigator = {clipboard: {writeText: function(t){ CLIP.push(String(t)); return Promise.resolve(); }}};
 // P1-3/CANDIDATE-UI2 P3-2：recScope 单选桩（只实现被测函数用到的那几种选择器）
 var RADIOS = [{value: "sel", checked: true}, {value: "all", checked: false}];
 var document = {
@@ -167,9 +203,10 @@ function reset(){
   vocabApplyJobId = null; vocabApplyTimer = null; vocabApplyRunning = false;
   vocabApplyFailStreak = 0; vocabApplyStartedAt = 0; vocabCandidatesRevision = null;
   effectiveDataRoot = "";   // 真源码里的模块变量（P2-新1）
-  FETCH_QUEUE = []; TIMERS = 0; ROUTES = [];
+  FETCH_QUEUE = []; TIMERS = 0; ROUTES = []; HOLD.length = 0;
   SAYS = []; RADIOS = [{value: "sel", checked: true}, {value: "all", checked: false}];
   TOASTS = []; cache = {runs: []}; detailsByRun = {};
+  CLIP.length = 0; dropDiagCache();   // P1-4：剪贴板与诊断缓存每个用例清零，不跨用例串味
 }
 
 // ------------------------------------------------------------------ S1 本页 job 全程钉住
@@ -847,9 +884,325 @@ async function s9(){
      retryCalls().map(function(c){ return c.body; }));
 }
 
+// ------------- S10 P1-4/FR-3/HD-2=A：脱敏摘要复制＋页面逐条本地证据
+// 反向证伪①：把 redactPathField/redactPathTail/redactCopyField 打成恒等（＝去掉脱敏）
+//             → 10b 必须 rc=1；
+// 反向证伪②：把 copyAllFailedReasons 的 shortOk 换成整篇正文（＝长文进状态行）
+//             → 10a/10d 必须 rc=1；
+// 反向证伪③（P2-1）：把 loadDiag 的 mark 改回「写模块级 diagCache」旧形态
+//             → 10f 必须 rc=1（A 目录的迟到响应会落到 B 目录的缓存里）；
+// 反向证伪④（P2-2 前端侧）：拿掉 evidenceLinesFor 里替代路径那行的 redactPathField
+//             （复核报告记的 :1367，行号随后续改动漂移，以字段为准）
+//             → 10g 必须 rc=1（未打码回包的真路径会进页面证据）。
+var S10_ROOT = "/tmp/p14-fake-rootA";
+var REAL_USER_PATH = "/Users/zzymima0000/需转录视频/第七周/样例视频.mp4";
+var REAL_ALT_PATH = "/Users/zzymima0000/暂不转录视频/第七周/样例视频.mp4";
+function diagReqs(){
+  var n = 0;
+  for(var i = 0; i < REC.urls.length; i++){
+    if(REC.urls[i].indexOf("/api/failures/diagnosis") >= 0) n++;
+  }
+  return n;
+}
+function p14Item(extra){
+  var base = {run_id: "run-1", source_label: "样例视频.mp4", source_dir_tail: "…/第七周",
+    raw_error_code: "SOURCE_NOT_AT_RECORDED_PATH", action_category: "SOURCE_LOCATION_REVIEW",
+    confidence: "HIGH", missing_evidence: "页面同刻 snapshot/state event 链",
+    next_action: "确认替代路径后重新诊断",
+    root_cause: "SOURCE_NOT_AT_RECORDED_PATH+IDENTITY_MATCH_AT_ALTERNATE_PATH",
+    stage: "DISCOVERY", recorded_path_redacted: "…/需转录视频/第七周/样例视频.mp4",
+    recorded_path_exists: false,
+    alternate_path_redacted: "…/暂不转录视频/第七周/样例视频.mp4", identity_match: "MATCH",
+    persisted_state: "QUEUED", display_state: "FAIL", provenance_status: "NOT_TIME_ALIGNED",
+    recovery_eligibility: "NEEDS_HUMAN", will_call_whisper: false,
+    evidence_sources: ["state.db", "source filesystem", "job manifest"],
+    evidence_conflicts: ["页面快照与持久状态事件未对齐"],
+    artifact_presence: {raw_path: false, normalized_path: false, rendered_path: false,
+                        canonical_output_path: false}};
+  for(var k in (extra || {})){ base[k] = extra[k]; }
+  return base;
+}
+function diagPayload(items){
+  return {status: 200, json: {ok: true, diagnosis_version: "v1.3-failure-taxonomy-1",
+    diagnosis_snapshot_id: "diag-abc123", generated_at: "2026-09-15T00:00:00Z",
+    counts: {}, categories: [], items: items}};
+}
+function twoFailedRuns(){
+  cache.runs = [{run_id: "run-1", status: "FAILED", source_filename: "样例视频.mp4",
+                 source_dir_tail: "…/第七周"},
+                {run_id: "run-2", status: "FAILED", source_filename: "第二个.mp4",
+                 source_dir_tail: "…/第八周"}];
+}
+// 摘要正文只允许「标题＋逐条白名单字段行」，多一行都不行
+function onlyWhitelistedLines(text){
+  var lines = String(text).split("\n").slice(1);   // 第 0 行是文档标题
+  for(var i = 0; i < lines.length; i++){
+    var l = lines[i];
+    if(!l) continue;
+    if(/^\d+\. /.test(l)) continue;
+    if(/^ {3}(错误码|类别|置信度|缺失证据|建议)：/.test(l)) continue;
+    return false;
+  }
+  return true;
+}
+function countOf(text, needle){
+  return String(text).split(needle).length - 1;
+}
+function hasAnyAbsPath(text){
+  var t = String(text);
+  var bad = ["/Users/", "/Volumes/", "/private/", "/var/", "/tmp/", "/home/"];
+  for(var i = 0; i < bad.length; i++){ if(t.indexOf(bad[i]) >= 0) return bad[i]; }
+  return "";
+}
+function shortSay(){ return SAYS[SAYS.length - 1] || ""; }
+async function s10(){
+  // 10a 诊断可得：7 类字段齐、脱敏来源/目录尾段都在、真实路径不在
+  reset();
+  el("inData").value = S10_ROOT;
+  twoFailedRuns();
+  route("/api/failures/diagnosis",
+        diagPayload([p14Item({}), p14Item({run_id: "run-2", source_label: "第二个.mp4",
+                                          source_dir_tail: "…/第八周"})]));
+  copyAllFailedReasons();
+  ck("10a 复制前先出短提示（不是静默等）",
+     SAYS.join(" | ").indexOf("正在整理脱敏摘要") >= 0, SAYS);
+  await settle(4);
+  var t = CLIP[CLIP.length - 1] || "";
+  ck("10a 摘要有正文（真的写进剪贴板）", t.length > 80, t.length);
+  ck("10a 每条 7 类字段齐全（各出现 N 次）",
+     countOf(t, "错误码：") === 2 && countOf(t, "类别：") === 2
+     && countOf(t, "置信度：") === 2 && countOf(t, "缺失证据：") === 2
+     && countOf(t, "建议：") === 2, t);
+  ck("10a 脱敏 source label ＋ 目录尾段都在",
+     t.indexOf("样例视频.mp4（目录尾段：…/第七周）") >= 0
+     && t.indexOf("第二个.mp4（目录尾段：…/第八周）") >= 0, t);
+  ck("10a 取值来自诊断接口（不编造类别/置信度/错误码）",
+     t.indexOf("SOURCE_LOCATION_REVIEW") >= 0 && t.indexOf("HIGH") >= 0
+     && t.indexOf("SOURCE_NOT_AT_RECORDED_PATH") >= 0, t);
+  ck("10a 后端词汇字段不被路径脱敏误伤（缺失证据原样）",
+     t.indexOf("缺失证据：页面同刻 snapshot/state event 链") >= 0, t);
+  ck("10a 摘要里零绝对路径（/Users//Volumes//private//var//tmp/ 扫描）",
+     hasAnyAbsPath(t) === "", hasAnyAbsPath(t));
+  ck("10a 摘要里没有转写正文标记（只带元数据）",
+     t.indexOf("正文MARKER") < 0, t);
+  ck("10a 复制成功提示是一句短话（无换行、≤40 字）",
+     shortSay().indexOf("\n") < 0 && shortSay().length <= 40 && shortSay().indexOf("已复制 2 条脱敏摘要") >= 0,
+     shortSay());
+  ck("10a toast 同样是短句（不弹长文洪水）",
+     TOASTS.join("|").indexOf("\n") < 0
+     && TOASTS.every(function(x){ return x.length <= 40; }), TOASTS);
+  ck("10a 长文不得进状态提示行",
+     SAYS.join(" | ").indexOf("缺失证据：") < 0, SAYS);
+  ck("10a 复制不自动打开长文面板（FR-17）", !REC.cls["longPanel"], REC.cls["longPanel"]);
+  ck("10a 长文只进短提示背后的可关闭面板备用入口",
+     el("btnViewLong").style.display === "inline-block"
+     && String(lastLongText).indexOf("缺失证据：") >= 0
+     && String(lastLongText).length === t.length, String(lastLongText).length);
+  var nDiag = 0;
+  for(var i = 0; i < REC.urls.length; i++){
+    if(REC.urls[i].indexOf("/api/failures/diagnosis") >= 0) nDiag++;
+  }
+  ck("10a 同一轮只调一次诊断接口（读盘有缓存，不反复扫盘）", nDiag === 1, nDiag);
+  ck("10a 诊断请求带上本页生效数据目录",
+     (REC.urls[REC.urls.length - 1] || "").indexOf("data_root=") >= 0, REC.urls);
+
+  // 10b 兜底脱敏：诊断字段里混进真实绝对路径（旧版/异常后端），摘要里也不许出现
+  reset();
+  el("inData").value = S10_ROOT;
+  twoFailedRuns();
+  route("/api/failures/diagnosis", diagPayload([p14Item({
+    source_label: REAL_USER_PATH,
+    source_dir_tail: "/Users/zzymima0000/暂不转录视频/第七周",
+    next_action: "去 " + REAL_USER_PATH + " 看看文件是否还在"})]));
+  copyAllFailedReasons();
+  await settle(4);
+  var t2 = CLIP[CLIP.length - 1] || "";
+  ck("10b 真实绝对路径不进摘要（去掉脱敏即 rc=1）",
+     t2.indexOf("/Users/") < 0 && t2.indexOf(REAL_USER_PATH) < 0, t2);
+  ck("10b 打码后仍留可用信息（不是全抹成空）",
+     t2.indexOf("…/需转录视频/第七周/样例视频.mp4") >= 0, t2);
+  ck("10b 来源 label 按 _diag_redact_path 同口径（basename＋两级父目录）",
+     countOf(t2, "1. …/需转录视频/第七周/样例视频.mp4") === 1
+     && countOf(t2, "/Users/") === 0, t2);
+  ck("10b 目录尾段按 _dir_tail 同口径（…/末段）",
+     t2.indexOf("（目录尾段：…/第七周）") >= 0, t2);
+  ck("10b 建议里整句路径按 _strip_paths 同口径抹掉（宁可多抹不漏尾段）",
+     t2.indexOf("去 …") >= 0 && t2.indexOf("看看文件是否还在") < 0, t2);
+
+  // 10c 页面可看逐条本地证据（DoD3）：详情区内联 ＋ 逐条面板，都不只藏在复制结果里
+  reset();
+  el("inData").value = S10_ROOT;
+  twoFailedRuns();
+  route("/api/failures/diagnosis",
+        diagPayload([p14Item({}), p14Item({run_id: "run-2", source_label: "第二个.mp4"})]));
+  renderDiagEvidence("run-1");
+  ck("10c 详情区先给「加载中」不改写事实", (REC.text["diagEvidence"] || "").indexOf("加载中") >= 0,
+     REC.text["diagEvidence"]);
+  await settle(4);
+  var ev = REC.text["diagEvidence"] || "";
+  ck("10c 详情区逐条本地证据在页面上可见",
+     ev.indexOf("原登记路径（脱敏）：…/需转录视频/第七周/样例视频.mp4") >= 0
+     && ev.indexOf("身份匹配：MATCH") >= 0, ev);
+  ck("10c 页面证据含冲突/provenance/恢复资格（比复制摘要更全）",
+     ev.indexOf("provenance：NOT_TIME_ALIGNED") >= 0 && ev.indexOf("恢复资格：NEEDS_HUMAN") >= 0
+     && ev.indexOf("证据冲突：页面快照与持久状态事件未对齐") >= 0, ev);
+  ck("10c 页面证据里也零绝对路径", hasAnyAbsPath(ev) === "", hasAnyAbsPath(ev));
+  // 10c2 详情区每 5 秒随 refresh 重画：已查过的快照不得再写回「加载中」（否则每 5 秒闪一下）
+  renderDiagEvidence("run-1");
+  ck("10c2 刷新重画详情区不再闪「加载中」（同步返回时旧证据仍在）",
+     (REC.text["diagEvidence"] || "").indexOf("加载中") < 0
+     && (REC.text["diagEvidence"] || "").indexOf("身份匹配：MATCH") >= 0,
+     REC.text["diagEvidence"]);
+  var nDiag3 = 0;
+  for(var q = 0; q < REC.urls.length; q++){
+    if(REC.urls[q].indexOf("/api/failures/diagnosis") >= 0) nDiag3++;
+  }
+  ck("10c2 重画不重复请求诊断（同目录同轮复用缓存）", nDiag3 === 1, nDiag3);
+  showFailEvidence();
+  ck("10c 逐条面板先开再填（读取中占位，不假装已读）",
+     REC.cls["longPanel"] === "open"
+     && (REC.text["longPanelText"] || "").indexOf("读取中") >= 0, REC.text["longPanelText"]);
+  await settle(4);
+  var pv = REC.text["longPanelText"] || "";
+  ck("10c 逐条面板列出全部失败项（逐条可看）",
+     pv.indexOf("失败本地证据（逐条，只读；共 2 条") >= 0
+     && pv.indexOf("run …run-1") >= 0 && pv.indexOf("run …run-2") >= 0, pv);
+  ck("10c 面板正文零绝对路径", hasAnyAbsPath(pv) === "", hasAnyAbsPath(pv));
+  ck("10c 面板是既有可关闭面板（四退出复用，未新造浮层）",
+     !!el("longPanel") && !!el("btnLongClose"), REC.cls["longPanel"]);
+
+  // 10d 降级路：诊断不可得 → 缺失写「未提供」不编造；原因/正文/token 一律不进摘要
+  reset();
+  el("inData").value = S10_ROOT;
+  detailsByRun = {"run-1": {state: "FAIL",
+    verdict: "源视频文件找不到了：样例视频.mp4；正文MARKER与TOKEN-ABC一律不得出现→检查 "
+             + REAL_USER_PATH + " 是否还在，补回后点重试"}};
+  cache.runs = [{run_id: "run-1", status: "FAILED", source_filename: "样例视频.mp4",
+                 source_dir_tail: "…/第七周"}];
+  route("/api/failures/diagnosis", {status: 200, json: {ok: false, code: "DB_MISSING"}});
+  copyAllFailedReasons();
+  await settle(4);
+  var t4 = CLIP[CLIP.length - 1] || "";
+  ck("10d 诊断不可得仍给摘要（降级不空手）",
+     t4.indexOf("样例视频.mp4") >= 0 && t4.indexOf("失败诊断摘要（脱敏；共 1 条）") >= 0, t4);
+  ck("10d 缺失字段写「未提供」，不编造类别/置信度/错误码",
+     t4.indexOf("错误码：未提供（诊断不可用）") >= 0
+     && t4.indexOf("类别：未提供（诊断不可用）") >= 0
+     && t4.indexOf("置信度：未提供（诊断不可用）") >= 0
+     && t4.indexOf("缺失证据：未提供（诊断不可用）") >= 0, t4);
+  ck("10d 降级建议里的真实绝对路径已脱敏（抹到中文标点收尾）",
+     t4.indexOf("/Users/") < 0 && t4.indexOf("检查 …，补回后点重试") >= 0, t4);
+  ck("10d 原因/正文/token 不进摘要（只留 7 类允许字段）",
+     t4.indexOf("正文MARKER") < 0 && t4.indexOf("TOKEN-ABC") < 0, t4);
+  ck("10d 摘要正文只有白名单字段行（白名单外键没有出口）",
+     onlyWhitelistedLines(t4) === true, t4);
+  ck("10d 白名单恰好是 FR-3 那 7 类字段",
+     FAIL_DIGEST_FIELDS.join(",") === "label,tail,code,category,confidence,missing,next",
+     FAIL_DIGEST_FIELDS.join(","));
+  ck("10d 降级路成功提示仍是短句", shortSay().indexOf("\n") < 0 && shortSay().length <= 40
+     && shortSay().indexOf("已复制 1 条脱敏摘要") >= 0, shortSay());
+  renderDiagEvidence("run-1");
+  await settle(4);
+  ck("10d 诊断不可用时页面证据如实说明降级（不装作有证据）",
+     (REC.text["diagEvidence"] || "").indexOf("诊断不可用") >= 0
+     && hasAnyAbsPath(REC.text["diagEvidence"] || "") === "",
+     REC.text["diagEvidence"]);
+
+  // 10e 没有目录 / 非法目录：不查诊断（宁可不给，也不去诊断别的目录）
+  reset();
+  el("inData").value = "relative/x";
+  effectiveDataRoot = "";
+  cache.runs = [{run_id: "run-1", status: "FAILED", source_filename: "样例视频.mp4"}];
+  copyAllFailedReasons();
+  await settle(4);
+  var nDiag2 = 0;
+  for(var j = 0; j < REC.urls.length; j++){
+    if(REC.urls[j].indexOf("/api/failures/diagnosis") >= 0) nDiag2++;
+  }
+  ck("10e 数据目录非法/缺失时不发诊断请求（不误连别的目录）", nDiag2 === 0, REC.urls);
+  ck("10e 该情形仍给降级摘要且不含路径",
+     (CLIP[CLIP.length - 1] || "").indexOf("未提供（诊断不可用）") >= 0
+     && hasAnyAbsPath(CLIP[CLIP.length - 1] || "") === "", CLIP[CLIP.length - 1]);
+  // 10f P2-1 反例：A 目录诊断在飞 → 用户切到目录 B ＋ 手动刷新（:2028 dropDiagCache）
+  //     → 放行 A 的迟到响应 → 取到的必须是 B 的数据或明确未加载，绝不能是 A 的 items
+  reset();
+  var RACE_A = "/tmp/p14-race-A", RACE_B = "/tmp/p14-race-B";
+  el("inData").value = RACE_A;
+  cache.runs = [{run_id: "run-1", status: "FAILED", source_filename: "a.mp4"}];
+  HOLD.push({match: "p14-race-A", queue: []});
+  loadDiag();                                   // A 的请求发出后挂住（还在飞）
+  ck("10f A 目录诊断请求已在飞", diagReqs() === 1, diagReqs());
+  el("inData").value = RACE_B;
+  dropDiagCache();                              // ＝手动刷新 :2028
+  route("/api/failures/diagnosis", diagPayload([p14Item({source_label: "B-ITEM.mp4"})]));
+  loadDiag();                                   // 换目录后必须能重新发起
+  await settle(3);
+  ck("10f 换目录＋刷新后能重新发起诊断（不因旧请求在飞就永久算「已加载」）",
+     diagReqs() === 2, diagReqs());
+  ck("10f 新目录的诊断先落地（B 的数据在缓存里）",
+     (diagItemFor("run-1") || {}).source_label === "B-ITEM.mp4",
+     diagItemFor("run-1") && diagItemFor("run-1").source_label);
+  HOLD[0].queue[0].release({status: 200, json: {ok: true, diagnosis_snapshot_id: "diag-A",
+    generated_at: "2026-09-15T00:00:00Z", items: [p14Item({source_label: "A-ITEM.mp4"})]}});
+  await settle(4);
+  var raced = diagItemFor("run-1");
+  ck("10f 迟到响应不得落到新目录的缓存（绝不能是 A 的 items）",
+     !raced || String(raced.source_label) !== "A-ITEM.mp4", raced && raced.source_label);
+  ck("10f 迟到响应也不得改写给到别的目录的快照 id",
+     String(diagCache.snap || "") !== "diag-A" && String(diagCache.root || "") === RACE_B,
+     [diagCache.snap, diagCache.root]);
+  copyAllFailedReasons();
+  await settle(4);
+  var t6 = CLIP[CLIP.length - 1] || "";
+  ck("10f 摘要正文里零 A 目录数据（换目录后的复制不串味）",
+     t6.indexOf("A-ITEM") < 0 && t6.indexOf("B-ITEM") >= 0, t6);
+
+  // 10f2 同一反例的另一形态：不点刷新、只把目录改成 B → 也必须重新发起（不吃旧 pending）
+  reset();
+  el("inData").value = RACE_A;
+  cache.runs = [{run_id: "run-1", status: "FAILED", source_filename: "a.mp4"}];
+  HOLD.push({match: "p14-race-A", queue: []});
+  loadDiag();
+  el("inData").value = RACE_B;
+  route("/api/failures/diagnosis", diagPayload([p14Item({source_label: "B-ITEM.mp4"})]));
+  loadDiag();
+  await settle(3);
+  ck("10f2 只换目录（未刷新）也重新发起诊断，不吃旧目录的 pending",
+     diagReqs() === 2, diagReqs());
+  HOLD[0].queue[0].release({status: 200, json: {ok: true, items: [p14Item({source_label: "A-ITEM.mp4"})]}});
+  await settle(4);
+  var raced2 = diagItemFor("run-1");
+  ck("10f2 迟到响应同样不串目录", !raced2 || String(raced2.source_label) !== "A-ITEM.mp4",
+     raced2 && raced2.source_label);
+
+  // 10g P2-2（前端侧）：诊断回包里的 recorded/alternate 是**未打码**的真实绝对路径
+  //     （旧版后端或异常回包）→ 页面证据仍不许出现真路径（拿掉兜底即 rc=1）
+  reset();
+  el("inData").value = S10_ROOT;
+  twoFailedRuns();
+  route("/api/failures/diagnosis", diagPayload([p14Item({
+    recorded_path_redacted: REAL_USER_PATH,
+    alternate_path_redacted: REAL_ALT_PATH})]));
+  renderDiagEvidence("run-1");
+  await settle(4);
+  var ev2 = REC.text["diagEvidence"] || "";
+  ck("10g 未打码的替代路径在页面上仍被脱敏（拿掉该行兜底脱敏即 rc=1）",
+     ev2.indexOf("替代路径（脱敏）：…/暂不转录视频/第七周/样例视频.mp4") >= 0
+     && ev2.indexOf(REAL_ALT_PATH) < 0, ev2);
+  ck("10g 未打码的原登记路径同样被脱敏", ev2.indexOf(REAL_USER_PATH) < 0
+     && ev2.indexOf("原登记路径（脱敏）：…/需转录视频/第七周/样例视频.mp4") >= 0, ev2);
+  ck("10g 该情形页面证据里零真实绝对路径", hasAnyAbsPath(ev2) === "", hasAnyAbsPath(ev2));
+  showFailEvidence();
+  await settle(4);
+  var pv2 = REC.text["longPanelText"] || "";
+  ck("10g 逐条面板里替代/原登记路径同样已被脱敏",
+     pv2.indexOf(REAL_ALT_PATH) < 0 && pv2.indexOf(REAL_USER_PATH) < 0
+     && hasAnyAbsPath(pv2) === "", hasAnyAbsPath(pv2));
+}
+
 (async function(){
   await s1(); await s2(); await s3(); await s4(); await s5(); await s6(); await s7();
-  await s8(); await s9();
+  await s8(); await s9(); await s10();
   if(FAILS.length){ console.log("FRONT FAIL " + FAILS.length + ": " + FAILS.join(" | "));
                     process.exit(1); }
   console.log("FRONT ALL PASS");
@@ -860,6 +1213,8 @@ async function s9(){
 def main():
     src = open(HTML, encoding="utf-8").read()
     parts = []
+    for name in DECLS:
+        parts.append(extract_decl(src, name))
     for name in FUNCS:
         parts.append(extract(src, name))
     js = "\n\n".join(parts) + "\n" + DRIVER

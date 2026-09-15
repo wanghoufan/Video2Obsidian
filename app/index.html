@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>V2O · 本机控制台</title>
+<title>懒得笔记 · 本地视频自动转文字</title>
 <style>
 :root{
   --bg:#10181A; --panel:#18262A; --panel2:#142024;
@@ -35,7 +35,7 @@ main{display:grid;grid-template-columns:220px 1fr 300px;gap:12px;padding:12px 20
 section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}
 section h2{font-size:13px;color:var(--dim);margin:0 0 10px;font-weight:600}
 .tape{background:var(--input-bg);border:1px solid var(--line);border-radius:6px;padding:10px 8px;position:relative}
-.tape::before{content:"V2O · 本机磁带";display:block;font-family:var(--mono);font-size:10px;color:var(--orange);letter-spacing:2px;margin-bottom:8px}
+.tape::before{content:"懒得笔记 · 本机磁带";display:block;font-family:var(--mono);font-size:10px;color:var(--orange);letter-spacing:2px;margin-bottom:8px}
 .tape .leader{height:6px;background:var(--orange);border-radius:3px;margin-bottom:10px}
 .seg{margin:8px 0;padding:6px 8px;background:var(--panel2);border-left:3px solid var(--dim);border-radius:0 4px 4px 0}
 .seg .nm{font-size:12px}
@@ -176,7 +176,7 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
 </head>
 <body>
 <header class="top">
-  <h1><span class="v2o">V2O</span> 本机控制台</h1>
+  <h1><span class="v2o">懒得笔记</span> 本地视频自动转文字</h1>
   <span class="meta">本地运行 · 数据默认在外置测试目录</span>
   <span class="lock off" id="lock">● 未监听</span>
   <button class="theme" id="btnTheme" title="切换深色/浅色">◐ 浅色</button>
@@ -1057,11 +1057,11 @@ function toast(t, kind){
   try{
     if("Notification" in window){
       if(Notification.permission==="granted"){
-        new Notification("V2O",{body:t});
+        new Notification("懒得笔记",{body:t});
       }else if(Notification.permission!=="denied"&&!notifAsked){
         notifAsked=true;
         Notification.requestPermission().then(function(p){
-          if(p==="granted"){try{new Notification("V2O",{body:t});}catch(e){}}
+          if(p==="granted"){try{new Notification("懒得笔记",{body:t});}catch(e){}}
         }).catch(function(){});
       }
     }

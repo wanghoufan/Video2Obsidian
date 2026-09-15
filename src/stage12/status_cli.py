@@ -121,7 +121,7 @@ def run_menu(data_root: str, limit: int = 5, _input=input, _print=print) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="stage12-status",
-        description="Read-only V2O status display (counts by state,"
+        description="Read-only 懒得笔记 status display (counts by state,"
         " recent runs, error count).",
     )
     ap.add_argument(

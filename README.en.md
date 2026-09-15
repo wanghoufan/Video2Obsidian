@@ -1,4 +1,4 @@
-# Video2Obsidian — Turn Local Videos into Obsidian Notes
+# 懒得笔记 (Video2Obsidian) — Turn Local Videos into Obsidian Notes
 
 > Drop videos into a folder and get text notes as Markdown, all on your local Mac.
 
@@ -8,7 +8,7 @@
 
 ## What is this?
 
-Video2Obsidian watches a video folder on your Mac, transcribes new videos locally, fixes known wrong words, splits the text into readable paragraphs, and saves the result as Markdown.
+懒得笔记 (Video2Obsidian) watches a video folder on your Mac, transcribes new videos locally, fixes known wrong words, splits the text into readable paragraphs, and saves the result as Markdown.
 
 If you provide an Obsidian vault directory, notes are written there mirroring the video folder structure. If you leave it empty, notes stay in the data directory and your existing vault is untouched. Source videos are archived separately. No cloud API calls are required, so there is no API cost.
 

@@ -1,19 +1,30 @@
-# HANDOFF｜P1-5 全链收口（2026-09-15 10:15）：全 P0 清＋P1-2／P1-3／P1-4／P1-5 全 PASS（P1-5 本链 supervisor 0/2），交付待提交，恢复先读我
+# HANDOFF｜P1-7 全链收口（2026-09-15 13:15）：P0 全清＋P1-2/3/4/5/7 全 PASS（P1-7 本链 supervisor 待复检），P1-5 已推 7bc8cec，恢复先读我
 
 > 旧版字段（governance-state / Evidence / Human Gate / Promotion / Dispatch ID）已废弃，不填。
 > 本文件即恢复入口。下面「一、当前进展／二、下一步／三、注意事项」按恢复用结构编排，字段名仍按 HANDOFF 模板。**Phase1 全过程记录**（用户四条反馈原文、九项 HD 决策、16 条真相、迁移决策、额度事件）见本文件后段各节；**迁移前项目交接原文**见文末附录。
 
-- Captured at（YYYY-MM-DD HH:MM）：2026-09-15 10:15（恢复窗口**连续推进三条链**：补完 P1-3（11 派＋复检）推 `fa6ba1b` → P1-4（5 派＋复检）推 `e340396` → **P1-5（5 派＋复检）** 本轮提交；无外派在跑。机器钟 09-14 23:40 → 09-15 10:15，部分报告印章为 09-15、此前记录为 09-14，并存不矛盾）
+- Captured at（YYYY-MM-DD HH:MM）：2026-09-15 13:15（恢复窗口连续推进：P1-5 提交推送 `7bc8cec` → **P1-7（6 派）交付+QA 全 PASS，差 supervisor 复检**；无外派在跑）
 - PROJECT_PHASE：**DEVELOP**（用户 2026-09-14 明确说「第二阶段，开发」进 Phase2；23:27 叫停暂停，本轮恢复并收口全 P0，仍在 Phase2 未关闭）
 - PLAN_VERSION：`PRODUCT_PLAN_V1.3`（正文最新；文末「Readiness Score / 本轮真实验证记录」两段仍为 V1.2 旧文本——第 5 轮修订被用户中止，未收尾，见 `docs/pm/PRODUCT_PLAN.md` 顶部收尾注记）
 - PLAN_READINESS_SCORE：**未达 90**（planner 自评 **89**；Research Reviewer 独立打分 **83**，两轮结论均 FAIL；用户已知并决定开工）
 - PLAN_GATE：**APPROVED**（用户明确进 DEVELOP，锁定基线开工；不是 Readiness 达标通过）
 - DEV_BASELINE：`PRODUCT_PLAN_V1.3`（Phase2 锁定基线，禁随意改 Plan；变更只走 Change C）
 - CHANGE_REQUEST：**B**（P1-3 批含 P2-7「扩 `/api/retry` 契约带 `data_root`」，属局部功能变化→只更新局部 Requirement/DoD，留 DEVELOP、不召 Sol Planner；用户 2026-09-15 明确「继续推进」「按分工表为准」，授权连续推进不再逐次问）
-- Stage ID（本阶段叫什么）：**DEVELOP-P1-5 全链收口**（P1-5 达成；P0-1／P0-2／P0-3／P1-2／P1-3／P1-4 均全清）。P1-5 本链 supervisor 累计打回 **0/2**（链内 0 次 FAIL）。P1-4／P1-3 链 0/2、P0-3 链 1/2、P0-1 1/2、P0-2 0/2。**已推送 `main`：c753b15（P0）→ 92fa77e（P1-2）→ 3af2da7 → fa6ba1b（P1-3）→ e340396（P1-4）；P1-5 交付本轮提交**。
+- Stage ID（本阶段叫什么）：**DEVELOP-P1-7 产品改名**（P1-5 已提交推送 `7bc8cec`＝`e340396..7bc8cec`；P1-7 链 6 派全 PASS、QA 无 P0/P1，**差 supervisor 复检**。P1-7 本链 supervisor 累计打回 **0/2**。P1-5／P1-4／P1-3 链 0/2、P0-3 链 1/2、P0-1 1/2、P0-2 0/2。**已推送 `main`：c753b15（P0）→ 92fa77e（P1-2）→ 3af2da7 → fa6ba1b（P1-3）→ e340396（P1-4）→ 7bc8cec（P1-5）；P1-7 交付待复检后提交**。
 ---
 
 ## 一、当前的工作进展
+
+- **DEVELOP-P1-7 全链（2026-09-15 13:15，6 派全 PASS，差 supervisor 复检）**：按序续做 **P1-7「产品改名懒得笔记」**（S，非 blocking；`CHANGE_REQUEST=B`，DoD 局部扩展一项「菜单栏/CLI 可见名称」）。TM 重盘 V2O 可见处＝5 处（`:6/:38/:179/:1060/:1064`，与旧记一致但行号漂）。共 **6 派**：
+  - **① builder 首版（PASS）**：index.html 5 处＋README 两标题两首句（en 标题 `懒得笔记 (Video2Obsidian) — …` 括注仓库名）；3 文件 9+/9−、server.py 零 diff、三套自测 rc0、反向证伪 3/3 rc=1。
+  - **② code-reviewer 首轮（PASS）**：要求点 8/8、DoD 五项全 PASS、变异证伪实证「自测无品牌断言牙」；**P2-1＝`src/stage12/menu_bar.py` 七处可见 V2O 漏盘**（TM 盘点只列了 index.html）＋P3-1（补断言牙）＋P3-3（start.sh echo）＋P3-4（server.py 版本串豁免）。报告 `docs/review/P1-7-RENAME-CODE-REVIEW.md`。
+  - **③ TM 裁定（Change B）**：P2-1/P3-1/P3-3 同批修（理由：P1-7 产品意图＝可见品牌全改，menu_bar 属同一品牌面、纯文案）；④ builder 返工后另报 `status_cli.py:124` 同性质观察，TM 同判同批修。
+  - **④ builder 返工（PASS）**：menu_bar 4 改（:47/:48/:92/:139）3 留（V2OApp 类名属技术标识）＋start.sh :2/:26＋frontend 自测 `brand_checks` 断言牙 +15 行；三套自测 rc0、反向证伪 3/3 rc=1。
+  - **⑤ builder 微修（PASS）**：status_cli.py:124 一行＋断言 +3 行；证伪 rc=1、还原 sha256 一致。
+  - **⑥ code-reviewer 返工复核二（PASS，同报告追加）**：净增量 7 文件 34+/16− 重建对上；变异两牙 2/2 rc=1（/tmp 备份还原，未用 git checkout）；DoD 六项全 PASS；P2-1/P3-1/P3-3 关闭。过程备注：auto mode 分类器故障两次拦其 Bash 写命令，改用 Edit 通道完成，取证不受影响。
+  - **⑦ qa 独立 QA（PASS，实走 codex/gpt-5.6-luna，68.5k tokens）**：无 P0/P1；自写探针扫六文件品牌面全过、前端 157/157＋词库 58/58 rc0＋断言变异有牙（title 回滚 rc=1，sha256 复验一致）；**QA-P17-001（P2，OPEN）＝codex 沙箱禁 bind 本机随机端口致 contract HTTP 段 rc=1（环境限制非业务断言失败；本窗口 code-reviewer 已实跑 contract 482 项 rc0 补位，与 P1-3/P1-2 链同类已知问题）**；真机 UI 如实标 NOT_VERIFIED。报告 `docs/qa/P1-7-RENAME-QA-2026-09-15.md`。
+  - **账本（TM 补记）**：`DISPATCH-LOG` 69→**76** 行（本链 6 派＋supervisor 复检 1 行）；`TASK-MODEL-LOG` 52→**53** 行（P1-7 任务行 builder 初版由 TM 依根表补记）；两道校验 exit 0（TASK 53／DISPATCH 76）。
+  - **环境事件（如实记）**：auto mode 安全分类器 11:50–13:00 限流（429 额度 16:55 重置）拦 Bash 写命令，用户拍板给分类器换模型 `hy3`（settings `subagents.agents.autoModeClassifier.model`），codex QA 派工随之放行；hy3 对复杂 heredoc 仍偶发判不动，TM 改用文件编辑通道写账本。
 
 - **DEVELOP-P0-1 全链收口（2026-09-14）**：builder 首版（luna旧通道，server.py +220行）→reviewer 首轮FAIL三项→builder 返工三项（go/deepseek本窗口）→reviewer 复核PASS→qa 初验FAIL两BUG→builder 返工2→qa RETEST2双PASS→supervisor 首检FAIL（打回1/2：账本缺行＋派工缺行＋HANDOFF模型过期）→TM补账本＋派工行＋HANDOFF对齐根表→supervisor 复检PASS。报告：`docs/review/P0-1-DIAGNOSIS-CODE-REVIEW.md`、`P0-1-DIAGNOSIS-REWORK-REVIEW.md`、`docs/qa/P0-1-DIAGNOSIS-INDEPENDENT-RETEST-2026-09-14.md`、`P0-1-DIAGNOSIS-RETEST2-2026-09-14.md`。
 - **DEVELOP-P0-2 全链收口（2026-09-14，本链0/2）**：builder 实现批量恢复闭环（server.py 累计约+837行：retry-plan dry-run/token摘要/TTL10分钟、retry-batch confirm+409零执行+幂等单job、job真源原子写、INTERRUPTED不续跑、三策略、16条双层排除、No-Clobber）→reviewer PASS（P0-2-RECOVERY-CODE-REVIEW.md，1×P1交qa）→qa 首轮撞真实 `_diag_alternate_paths` 扫 ~/Downloads 卡死（单条10秒＋不返回，工具超时无报告）→builder SCAN-FIX 有界重写（2s/2000目录预算、跳过云同步根大目录、Volumes只扫顶层、fail-closed）→reviewer SCAN-FIX复核PASS→qa 复验PASS无新增BUG（P0-2-RECOVERY-QA-2026-09-14.md，11项全过：77=61+16可复算、幂等单job、三409、INTERRUPTED、No-Clobber、两路fail-closed、真函数tmp计时54.2ms）→supervisor PASS。已知缺口（不拦收口）：D-20/D-21执行级注入与真并发、P1-1真机转写端到端；RETRANSCRIBE恒whisper=0如实fail-closed。报告见上。账本45行、派工21行，schema均exit 0。`app/server.py` 未提交未推送。
@@ -71,9 +82,9 @@
 
 - **下一步（Next Single Action，按序）**：
   1. ~~派 supervisor 复检 P0-3／P1-2~~ **已办**（23:31／01:05 均 PASS）。
-  2. ~~P1-3／P1-4／P1-5 链~~ **均已办（08:45／09:30／10:15 各全链收口）**：11＋5＋5 派＋各一次 supervisor 复检，均无未收口 P0/P1。
-  3. **已推送 `main`：P0 `c753b15`／P1-2 `92fa77e`／HANDOFF 回写 `3af2da7`／P1-3 `fa6ba1b`／P1-4 `e340396`；P1-5 交付本轮提交**（用户已授权：commit/push 默认走 `main`，不再逐次问）。
-  4. **下一个默认做 P1-7**（产品改名「懒得笔记」，S；**落地前须重新盘点 `V2O` 可见处**——旧记「4 处」已过期，现剩 `:6/:38/:179/:1060/:1064` 五处且行号已漂）。用户如要换序（例如先做 P1-6 视觉布局，那是用户追加反馈二的原项）一句话即改。
+  2. ~~P1-3／P1-4／P1-5 链~~ **均已办（08:45／09:30／10:15 各全链收口）**：11＋5＋5 派＋各一次 supervisor 复检，均无未收口 P0/P1。~~P1-5 提交~~ **已办：`7bc8cec` 已推 main（13:00 前后）**。
+  3. ~~P1-7 链~~ **已办（13:15，6 派＋QA 全 PASS）**：**只差 supervisor 复检**；复检 PASS 后提交推送（用户已授权：commit/push 默认走 `main`，不再逐次问）。
+  4. **P1-7 之后默认做 P1-6**（视觉布局与历史管理，M，用户追加反馈二原项）。之后 **P1-1 最后**（真实规模/长视频/61 篇重验证；并入 P1-5 链 P3-1「真 16 条诊断墙钟」一并实测）。
   5. P1 顺序（TM 定）：**P1-2✅ → P1-3✅ → P1-4✅ → P1-5✅ → P1-7 → P1-6 → P1-1**（P1-1 真实规模/长视频/61 篇重验证最后跑；P1-5 链 P3-1「真 16 条诊断墙钟」建议并入 P1-1 一并实测）。
   6. 若要真机目检 P0/P1 交付：需先起服务（8765 现无监听，PORT 硬编码；改 `app/` 或 `src/` 后必须重启再验）；**自动化禁点真机主题开关**。
   7. 经验／neat-freak 收尾只派一次，等用户说收工再派。

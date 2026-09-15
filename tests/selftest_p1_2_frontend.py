@@ -1390,7 +1390,25 @@ async function s11(){
 """
 
 
+def brand_checks():
+    """P3-1 品牌断言牙（防改名回退）：只钉用户可见文案；v2o- 键/.v2o class/V2OApp 类名属技术标识，不在此列。"""
+    root = os.path.dirname(HTML)
+    src = open(HTML, encoding="utf-8").read()
+    assert '<title>懒得笔记 · 本地视频自动转文字</title>' in src, "title 品牌回退"
+    assert '<h1><span class="v2o">懒得笔记</span>' in src, "h1 品牌回退"
+    assert 'content:"懒得笔记 · 本机磁带"' in src, "磁带品牌回退"
+    assert "V2O" not in open(os.path.join(root, "start.sh"), encoding="utf-8").read(), "start.sh V2O 残留"
+    mb = open(os.path.join(root, "..", "src", "stage12", "menu_bar.py"), encoding="utf-8").read()
+    left = [l.strip() for l in mb.splitlines() if "V2O" in l and "V2OApp" not in l]
+    assert not left, "menu_bar.py 可见文案 V2O 残留（非 V2OApp 类名）: %s" % left
+    sc = open(os.path.join(root, "..", "src", "stage12", "status_cli.py"), encoding="utf-8").read()
+    sc_left = [l.strip() for l in sc.splitlines() if "V2O" in l and "V2OApp" not in l]
+    assert not sc_left, "status_cli.py 可见文案 V2O 残留（非 V2OApp 类名）: %s" % sc_left
+
+
 def main():
+    brand_checks()
+    print("BRAND SELFTEST PASS")
     src = open(HTML, encoding="utf-8").read()
     parts = []
     for name in DECLS:

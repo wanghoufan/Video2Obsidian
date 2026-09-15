@@ -44,8 +44,8 @@ def _table_total(snapshot: dict, table: str) -> int:
 def build_title(snapshot: dict) -> str:
     """Title line derived from the same numbers collect() returns."""
     if not (snapshot or {}).get("ok"):
-        return "V2O unavailable"
-    return "V2O S:%d R:%d E:%d" % (
+        return "懒得笔记 unavailable"
+    return "懒得笔记 S:%d R:%d E:%d" % (
         _table_total(snapshot, "sources"),
         _table_total(snapshot, "processing_runs"),
         int((snapshot or {}).get("error_count", 0)),
@@ -89,7 +89,7 @@ if RUMPS_AVAILABLE:
         """Menu-bar app with exactly two actions: Refresh and Quit."""
 
         def __init__(self, data_root: str, limit: int = 5) -> None:
-            super().__init__("V2O")
+            super().__init__("懒得笔记")
             self._data_root = os.path.abspath(data_root)
             self._limit = limit
             self._snapshot = collect(self._data_root, self._limit)
@@ -136,7 +136,7 @@ def main(argv=None) -> int:
 
     ap = argparse.ArgumentParser(
         prog="stage12-menu-bar",
-        description="Optional read-only V2O menu-bar display.",
+        description="Optional read-only 懒得笔记 menu-bar display.",
     )
     ap.add_argument(
         "--data-root",

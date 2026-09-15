@@ -1475,8 +1475,11 @@ function reapplyAll(){
 }
 var loadedVocabEntries=[];
 var vocabGroupLabels={programming:"预置-编程",crypto:"预置-币圈",finance:"预置-金融",user:"我自己加的"};
+// P1-5/VOCAB-FOLD P3-2：分组判定只做**展示层归一化**（trim+小写）——`" programming "`
+// 不再被误归到「我自己加的」。归一化只进这一个判据，**不碰落盘内容**，
+// 也不影响后端「正确文本含 wrong 即删条」等三铁律（落盘串一律原样透传）。
 function vocabGroupFor(entry){
-  var source=String((entry&&entry.source)||"").toLowerCase();
+  var source=String((entry&&entry.source)||"").trim().toLowerCase();
   if(source==="programming"||source==="preset:programming")return "programming";
   if(source==="crypto"||source==="preset:crypto")return "crypto";
   if(source==="finance"||source==="preset:finance")return "finance";
@@ -1485,19 +1488,34 @@ function vocabGroupFor(entry){
 function renderVocabList(){
   var filter=String(el("vocabFilter").value||"").trim().toLowerCase();
   var groups={programming:[],crypto:[],finance:[],user:[]};
+  var matched=0;
   loadedVocabEntries.forEach(function(entry){
     var hay=String(entry.wrong||"")+" "+String(entry.right||"");
     if(filter&&hay.toLowerCase().indexOf(filter)<0)return;
     groups[vocabGroupFor(entry)].push(entry);
+    matched++;
   });
-  el("vocabListSummary").textContent="已导入词库（"+loadedVocabEntries.length+"条）";
+  // P1-5/VOCAB-FOLD P3-4：过滤时把两个口径分开说——总数（词库一共多少条）与
+  // 匹配数（本次筛出几条），不再让老总数被误读成「这次会应用多少条」。
+  el("vocabListSummary").textContent="已导入词库（"+loadedVocabEntries.length+"条）"
+    +(filter?("· 匹配 "+matched+" 条"):"");
+  // P1-5/VOCAB-FOLD P3-3：空库只留一句人话，不再让四个组各喊一次「暂无匹配词条」。
+  // P1-5 返工（code-reviewer P3-3）：这句**不写方位**——添加行(`#vocWrong`/`#btnVocAdd`)在
+  // 词库列表**之后**（`index.html:268-271` vs 列表块 `:263-267`），写「在上方」属事实错误；
+  // 方位词还会随布局调整漂移（P1-6 就是布局活），故只描述动作、不描述位置。
+  if(!loadedVocabEntries.length){
+    el("vocabList").innerHTML='<div class="hint">词库还没有词条：跑一次 AI 审查生成候选，或手动添加词条。</div>';
+    return;
+  }
   var h="";
   ["programming","crypto","finance","user"].forEach(function(group){
     var items=groups[group];
     h+='<details class="vocabGroup"><summary>'+vocabGroupLabels[group]+'（'+items.length+'条）</summary>';
     if(!items.length){h+='<div class="hint">暂无匹配词条</div>';}else{
       items.forEach(function(e){
-        h+='<div class="vrow"><span>'+esc(e.wrong)+' → '+esc(e.right)+' <span class="hint">（来源：'+esc(e.source||"user")+'）</span></span><button class="mini" data-vocdel="'+esc(e.wrong)+'">删除</button></div>';
+        // P1-5/VOCAB-FOLD P3-1：行内来源标签**限定为四组标签之一**，与该词条所在组
+        // 恒一致——不再回显后端原始 source（candidate／领域名／日后新增值都不外露）。
+        h+='<div class="vrow"><span>'+esc(e.wrong)+' → '+esc(e.right)+' <span class="hint">（来源：'+vocabGroupLabels[group]+'）</span></span><button class="mini" data-vocdel="'+esc(e.wrong)+'">删除</button></div>';
       });
     }
     h+='</details>';
@@ -1580,7 +1598,10 @@ function loadVocabCandidates(){
     var labels={high:"高置信度",medium:"中置信度",low:"低置信度"}, h="";
     ["high","medium","low"].forEach(function(level){
       var items=(o.candidates&&o.candidates[level])||[];
-      h+='<details class="candGroup" '+(level!=="low"?'open':'')+'><summary><label class="candGroupHead"><input type="checkbox" data-candidate-group="'+level+'" '+(level!=="low"?'checked':'')+'> '+labels[level]+'（'+items.length+'）</label></summary>';
+      // P1-5/CANDIDATE-UI2 P3-3：组头 checkbox 长在 <summary> 里，点它会被浏览器当成
+      // 折叠动作一起做掉（勾中/低组时最容易顺手把组收起来）。这里在组头 label 上
+      // 掐断冒泡：**勾选只勾选、不折叠**；折叠仍走 summary 的三角标/空白处，功能不动。
+      h+='<details class="candGroup" '+(level!=="low"?'open':'')+'><summary><label class="candGroupHead" onclick="event.stopPropagation()"><input type="checkbox" data-candidate-group="'+level+'" '+(level!=="low"?'checked':'')+'> '+labels[level]+'（'+items.length+'）</label></summary>';
       items.forEach(function(c){
         var evidence=c.evidence||[], evidenceHtml=evidence.length?'<details class="candEvidenceDetails"><summary>证据（'+evidence.length+'）</summary><div>'+esc(evidence.join("；"))+'</div></details>':'';
         h+='<label class="candRow"><input type="checkbox" data-candidate-index="'+esc(String(c.index))+'" data-candidate-level="'+level+'" '+(level!=="low"?'checked':'')+'>'
@@ -1588,7 +1609,10 @@ function loadVocabCandidates(){
       });
       h+='</details>';
     });
-    box.innerHTML=h;setCandidateControls(true);all.checked=false;
+    box.innerHTML=h;setCandidateControls(true);
+    // P1-5/CANDIDATE-UI2 P3-4：初态不再硬写 false（高中组明明已勾），改由**同一个**
+    // syncCandidateSelectAll 算——页面所见与提交范围从此只有一套口径。
+    syncCandidateSelectAll();
     candidateCheckboxes().forEach(function(c){c.onchange=syncCandidateSelectAll;});
     candidateGroupCheckboxes().forEach(function(c){c.onchange=function(){
       candidateCheckboxes().forEach(function(item){if(item.getAttribute("data-candidate-level")===c.getAttribute("data-candidate-group"))item.checked=c.checked;});

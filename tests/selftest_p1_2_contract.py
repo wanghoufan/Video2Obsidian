@@ -2030,6 +2030,53 @@ def part12_p14_alt_branch(server):
         shutil.rmtree(root, ignore_errors=True)
 
 
+# ------------------------------------------------- 13 P1-5 词库展示层的落盘边界
+
+def part13_p15_vocab_display(server):
+    """P1-5 词库与候选易用性修整（前端 `index.html`）：把「trim 只做展示层归一化」
+    这条边界在后端这一侧钉死。
+
+    本批 12 项全部落在前端展示层（分组标签/trim/空态/筛选计数/组头点击/全选初态），
+    后端零改动。这里守两件事：
+      ① 落盘语义没被展示层的 trim 波及——保存写入的串与传入逐字一致（不 trim、
+         不动 source），读取侧既有归一化只 strip、不改大小写（所以前端 `vocabGroupFor`
+         必须自己 trim+小写才归得对组，P3-2 不是多余代码）；
+      ② 后端候选导入确实会落 `source:"candidate"`（P3-1 的根因），所以前端必须把它
+         映射进四组标签之一、不能原样回显。
+    """
+    root = make_data_root(server, "P15", [])
+    assert_tmp(root, "part13_p15_vocab_display")
+    try:
+        # 13a 保存逐字落盘：不带任何展示层归一化
+        raw = [{"wrong": "  带空格错词  ", "right": "  带空格正词  ",
+                "source": " Candidate "}]
+        server._save_vocab_entries(root, raw)
+        saved = read_json(os.path.join(root, "vocab-user.json"), None)
+        check("13a 保存逐字落盘（不 trim、不动 source 原样）", saved == raw, saved)
+
+        # 13b 读取侧只 strip、不改大小写 → 前端不自己 trim+小写就会归错组
+        loaded = server._load_vocab_entries(root)
+        check("13b 读取只 strip 不改大小写（前端需自行 trim+小写才归得对组）",
+              loaded == [{"wrong": "带空格错词", "right": "带空格正词",
+                          "source": "Candidate"}], loaded)
+
+        # 13c 候选导入落盘 source 恒为 candidate（前端四组标签必须吸收它）
+        write_candidates(root, [{"wrong": "候选错词", "right": "候选正词",
+                                 "confidence": "high"}])
+        code, get = server._handle_vocab_candidates_get({"data_root": [root]})
+        rev = get.get("candidates_revision")
+        code, res = server._run_vocab_candidates_apply({
+            "data_root": root, "indices": [0], "rerun_old": False,
+            "candidates_revision": rev})
+        vocab = read_json(os.path.join(root, "vocab-user.json"), [])
+        cand = [e for e in vocab if e.get("wrong") == "候选错词"]
+        check("13c 候选导入落盘 source=candidate（前端须映射成四组标签之一）",
+              code == 200 and res.get("ok") is True and len(cand) == 1
+              and cand[0].get("source") == "candidate", (code, vocab))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     print("tmp 根：%s" % TMP_ROOT)
     server = load_server()
@@ -2045,6 +2092,7 @@ def main():
     part10_p13_semantics(server)
     part11_p14_digest(server)
     part12_p14_alt_branch(server)
+    part13_p15_vocab_display(server)
     if FAILS:
         print("\nSELFTEST FAIL %d/%d：%s" % (len(FAILS), CHECKS[0], FAILS))
         return 1

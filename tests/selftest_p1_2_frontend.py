@@ -46,11 +46,15 @@ FUNCS = [
     "renderDiagEvidence", "copyAllFailedReasons", "showFailEvidence",
     # P1-4 用到的既有函数：复制短句化（FR-17）与长文面板本体，抽真源码才验得动
     "copyText", "openLongPanel", "failPartsForRun", "filenameForRun", "shortId",
+    # P1-5 词库列表展示层：分组判定（trim/大小写）与整块渲染（来源标签/空态/筛选计数）
+    "vocabGroupFor", "renderVocabList",
 ]
 
 # P1-4：模块常量/模块变量也照抄真源码，不手写——常量改了测试跟着改，不会漂移
 DECLS = ["FAIL_DIGEST_FIELDS", "REDACT_STOP_CHARS", "NO_EVIDENCE", "diagCache",
-         "effectiveDataRoot", "lastLongText"]
+         "effectiveDataRoot", "lastLongText",
+         # P1-5：词库分组标签表与当前词条表，照抄真源码
+         "vocabGroupLabels", "loadedVocabEntries"]
 
 
 def extract(src, name):
@@ -90,6 +94,11 @@ var REC = {text: {}, cls: {}, calls: [], urls: []};
 // 真源码里这两个是模块常量，桩里按 index.html 同值复现
 var VOCAB_APPLY_MAX_FAIL = 8, VOCAB_APPLY_MAX_MS = 10 * 60 * 1000;
 function elStub(id){
+  // P1-5：renderVocabList 会往 el("vocabList").innerHTML 写整块并在末尾重绑删除按钮，
+  // 桩里给一个只收 HTML、没有删除按钮的容器（真按钮由 esc() 真源码生成，见 S11）
+  if(id === "vocabList"){
+    return {innerHTML: "", querySelectorAll: function(){ return []; }};
+  }
   if(id === "candidateList"){
     return {
       innerHTML: "",
@@ -1200,9 +1209,180 @@ async function s10(){
      && hasAnyAbsPath(pv2) === "", hasAnyAbsPath(pv2));
 }
 
+// ------------------------------------------------------------------ S11 P1-5 词库与候选易用性
+// 按 `data-candidate-*` 从**真源码渲染出来的 markup** 反解勾选项：勾选初态断言认的是
+// loadVocabCandidates 的真实输出，不是手抄常量（改回旧形态即 rc=1）。
+// P1-5 返工（code-reviewer P3-4）：桩要有一份**可持久的 DOM 影子**——markup 首次解析出
+// 元素对象后按 key 记住，此后每次 querySelectorAll 返回**同一批对象**，于是
+// `syncCandidateSelectAll` 对 `g.checked` 的写回落在**断言读到的那份状态**上（真实 DOM 里
+// 改的是 property、再次 query 拿回的是同一个元素）。只有重写 innerHTML（真实 DOM 会销毁
+// 子节点）才作废重建。旧形态每次从 markup 重新 new 临时对象，写回全丢、断言读到的是
+// markup 默认的 checked 属性 → M9（删组头回写）rc=0，属假信心。
+function candListStub(){
+  var reg = {}, html = "";
+  function mk(idx, level, checked){
+    return {checked: checked, disabled: false, onclick: null, onchange: null,
+            getAttribute: function(k){
+              return k === "data-candidate-index" ? idx : level; }};
+  }
+  function pick(key, idx, level, checked){
+    if(!reg[key]) reg[key] = mk(idx, level, checked);
+    return reg[key];
+  }
+  var box = {querySelectorAll: function(sel){
+    var tags = html.match(/<input[^>]*>/g) || [], out = [], i, m;
+    for(i = 0; i < tags.length; i++){
+      if(sel === "[data-candidate-index]"){
+        m = /data-candidate-index="([^"]*)"[^>]*data-candidate-level="([^"]*)"/.exec(tags[i]);
+        if(m) out.push(pick("i:" + m[1], m[1], m[2], / checked[ >]/.test(tags[i])));
+      }else if(sel === "[data-candidate-group]"){
+        m = /data-candidate-group="([^"]*)"/.exec(tags[i]);
+        if(m) out.push(pick("g:" + m[1], m[1], m[1], / checked[ >]/.test(tags[i])));
+      }
+    }
+    return out;
+  }};
+  Object.defineProperty(box, "innerHTML", {
+    get: function(){ return html; },
+    set: function(v){ html = String(v); reg = {}; }});   // 重写 innerHTML＝旧子节点全销毁
+  return box;
+}
+
+async function s11(){
+  // ---- A2/B `VOCAB-FOLD P3-2`：分组判定只做展示层归一化（trim＋小写）
+  reset();
+  ck("S11a 分组判定去前后空格：`  programming  ` 归预置-编程",
+     vocabGroupFor({source: "  programming  "}) === "programming",
+     vocabGroupFor({source: "  programming  "}));
+  ck("S11a 分组大小写不敏感：`Crypto` 归预置-币圈",
+     vocabGroupFor({source: "Crypto"}) === "crypto");
+  ck("S11a preset 前缀带空格同组：` preset:finance ` 归预置-金融",
+     vocabGroupFor({source: " preset:finance "}) === "finance");
+  ck("S11a 纯空白/无 source/`candidate`/null 一律归「我自己加的」",
+     vocabGroupFor({source: "   "}) === "user" && vocabGroupFor({}) === "user"
+     && vocabGroupFor({source: "candidate"}) === "user" && vocabGroupFor(null) === "user");
+
+  // ---- A1/B P3-1 行内来源标签限四组 ＋ A4/B P3-4 筛选计数 ＋ trim 不许碰落盘串
+  reset();
+  loadedVocabEntries = [
+    {wrong: "候选错词", right: "候选正词", source: "candidate"},
+    {wrong: " 带空格错词 ", right: " 带空格正词 ", source: " finance "},
+    {wrong: "野生错词", right: "野生正词", source: "whatever"}
+  ];
+  el("vocabFilter").value = "";
+  renderVocabList();
+  var vhtml = el("vocabList").innerHTML;
+  ck("S11b 行内来源标签恒为四组标签之一（candidate/领域名/野生值都不外露）",
+     vhtml.indexOf("（来源：我自己加的）") >= 0
+     && vhtml.indexOf("（来源：预置-金融）") >= 0
+     && vhtml.indexOf("candidate") < 0 && vhtml.indexOf("whatever") < 0
+     && vhtml.indexOf("finance") < 0, vhtml);
+  ck("S11b 未过滤时 summary 只报总数（不出现「匹配」）",
+     el("vocabListSummary").textContent === "已导入词库（3条）",
+     el("vocabListSummary").textContent);
+  ck("S11c 展示层 trim 不碰落盘串：删除按钮仍带原样错词（含前后空格）",
+     vhtml.indexOf('data-vocdel=" 带空格错词 "') >= 0, vhtml);
+
+  el("vocabFilter").value = "错词";
+  renderVocabList();
+  ck("S11d 过滤中 summary 同时报总数与匹配数",
+     el("vocabListSummary").textContent === "已导入词库（3条）· 匹配 3 条",
+     el("vocabListSummary").textContent);
+  el("vocabFilter").value = "候选";
+  renderVocabList();
+  ck("S11d 匹配数随过滤缩小（总数不变）",
+     el("vocabListSummary").textContent === "已导入词库（3条）· 匹配 1 条",
+     el("vocabListSummary").textContent);
+
+  // ---- A3/B P3-3：空库整块一句；过滤零命中仍按组显示（口径未变）
+  reset();
+  loadedVocabEntries = [];
+  el("vocabFilter").value = "";
+  renderVocabList();
+  var vempty = el("vocabList").innerHTML;
+  ck("S11e 空库只留一句人话（无四个组块、无四连「暂无匹配词条」）",
+     vempty.indexOf("vocabGroup") < 0 && vempty.indexOf("暂无匹配词条") < 0
+     && vempty.indexOf('class="hint"') >= 0, vempty);
+  // P1-5 返工（code-reviewer P3-3）：空态文案**整条比对**（不用子串——子串挡不住方位词走样），
+  // 钉死「只描述动作、不写方位」。写回「在上方手动添加」而添加行实际在列表**下方**
+  // （`index.html:268-271` vs 列表块 `:263-267`）即事实错误，本仓已因此返工两次。
+  ck("S11e 空库空态文案整条一致（不含方位词，改回「在上方手动添加」即 rc=1）",
+     vempty === '<div class="hint">词库还没有词条：跑一次 AI 审查生成候选，或手动添加词条。</div>',
+     vempty);
+
+  reset();
+  loadedVocabEntries = [{wrong: "有的错词", right: "有的正词", source: "user"}];
+  el("vocabFilter").value = "没有这一条";
+  renderVocabList();
+  var vnone = el("vocabList").innerHTML;
+  ck("S11e 过滤零命中仍按四组显示（未被空态分支吃掉）",
+     (vnone.match(/class="vocabGroup"/g) || []).length === 4
+     && (vnone.match(/暂无匹配词条/g) || []).length === 4, vnone);
+
+  // ---- A5/B `CANDIDATE-UI2 P3-3`：组头勾选不再顺带折叠
+  reset();
+  ELS["candidateList"] = candListStub();
+  FETCH_QUEUE.push({status: 200, json: {ok: true, has_candidates: true, count: 2,
+      candidates_revision: "REV-S11", data_root: "/tmp/p12-s11",
+      candidates: {high: [{index: 0, wrong: "高错词", right: "高正词"}],
+                   medium: [{index: 1, wrong: "中错词", right: "中正词"}], low: []}}});
+  loadVocabCandidates();
+  await flush();
+  var cheads = el("candidateList").innerHTML.match(/<label class="candGroupHead"[^>]*>/g) || [];
+  ck("S11f 三个组头都掐断冒泡（点勾选只勾选、不再折叠）",
+     cheads.length === 3
+     && cheads.every(function(t){ return t.indexOf("stopPropagation") >= 0; }), cheads);
+  // ---- A6/B `CANDIDATE-UI2 P3-4`：全选初态与组内勾选同源
+  ck("S11g 全选初态＝真状态（高中组默认已勾、无低置信度 → 全选勾上）",
+     el("candidateSelectAll").checked === true, el("candidateSelectAll").checked);
+  ck("S11g 组头初态同样按真勾选算（high/medium 勾、low 不勾）",
+     candidateGroupCheckboxes().map(function(g){
+       return g.getAttribute("data-candidate-group") + ":" + g.checked; }).join(",")
+     === "high:true,medium:true,low:false",
+     candidateGroupCheckboxes().map(function(g){
+       return g.getAttribute("data-candidate-group") + ":" + g.checked; }));
+  // P1-5 返工（code-reviewer P3-4）：上面那条的期望值与本夹具的 markup 默认**恰好重合**
+  // （high/medium 的组头 markup 就是 checked、low 不是），所以它单独**验不到组头回写**。
+  // 这条用一个**空组**把两者拆开：medium 0 条 → 真值 false（`items.length>0`），而 markup
+  // 默认给的是 checked → 只有真跑过 syncCandidateSelectAll 的组头回写才过得去（删即 rc=1）。
+  var citems0 = candidateCheckboxes();
+  citems0[0].checked = false;          // 行为级：用户取消一个已勾项
+  citems0[0].onchange();               // 真源码 :1613 绑的就是 syncCandidateSelectAll
+  ck("S11g 取消已勾项后组头与全选跟着取消（组头回写被删即 rc=1）",
+     candidateGroupCheckboxes().map(function(g){
+       return g.getAttribute("data-candidate-group") + ":" + g.checked; }).join(",")
+     === "high:false,medium:true,low:false" && el("candidateSelectAll").checked === false,
+     [el("candidateSelectAll").checked,
+      candidateGroupCheckboxes().map(function(g){
+        return g.getAttribute("data-candidate-group") + ":" + g.checked; })]);
+
+  reset();
+  ELS["candidateList"] = candListStub();
+  FETCH_QUEUE.push({status: 200, json: {ok: true, has_candidates: true, count: 2,
+      candidates_revision: "REV-S11", data_root: "/tmp/p12-s11",
+      candidates: {high: [{index: 0, wrong: "高错词", right: "高正词"}],
+                   medium: [], low: [{index: 1, wrong: "低错词", right: "低正词"}]}}});
+  loadVocabCandidates();
+  await flush();
+  ck("S11g 存在默认不勾的低置信度时全选就是不勾（同一口径，不硬写 false）",
+     el("candidateSelectAll").checked === false
+     && candidateGroupCheckboxes().filter(function(g){
+          return g.getAttribute("data-candidate-group") === "high"; })[0].checked === true,
+     [el("candidateSelectAll").checked,
+      candidateGroupCheckboxes().map(function(g){ return g.checked; })]);
+  // P1-5 返工（code-reviewer P3-4）：空组（medium 0 条）组头真值＝false，markup 默认＝checked
+  // → 这条与 markup 默认相反，删掉组头回写即 rc=1（M9 的定点验收断言）。
+  ck("S11g 空组组头按 0 条算（真值 false，不是 markup 默认的 checked）",
+     candidateGroupCheckboxes().map(function(g){
+       return g.getAttribute("data-candidate-group") + ":" + g.checked; }).join(",")
+     === "high:true,medium:false,low:false",
+     candidateGroupCheckboxes().map(function(g){
+       return g.getAttribute("data-candidate-group") + ":" + g.checked; }));
+}
+
 (async function(){
   await s1(); await s2(); await s3(); await s4(); await s5(); await s6(); await s7();
-  await s8(); await s9(); await s10();
+  await s8(); await s9(); await s10(); await s11();
   if(FAILS.length){ console.log("FRONT FAIL " + FAILS.length + ": " + FAILS.join(" | "));
                     process.exit(1); }
   console.log("FRONT ALL PASS");

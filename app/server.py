@@ -52,7 +52,20 @@ from stage12.status_snapshot import collect  # noqa: E402  (只读复用)
 from stage5.startup import run_startup  # noqa: E402  (后台启动复用)
 
 HOST = "127.0.0.1"
-PORT = 8765
+# P1-8：端口真源（唯一）。默认 8899；可用环境变量 V2O_PORT 覆盖（start.sh 透传）。
+PORT = 8899
+_env_port = (os.environ.get("V2O_PORT") or "").strip()
+if _env_port:
+    try:
+        PORT = int(_env_port)
+    except ValueError:
+        sys.stderr.write("V2O_PORT 必须是 1-65535 的整数，当前为 %r；未指定则用默认 %s。\n"
+                         % (_env_port, 8899))
+        raise SystemExit(2)
+    if not 1 <= PORT <= 65535:
+        sys.stderr.write("V2O_PORT 超出 1-65535 范围：%s。\n" % (PORT,))
+        raise SystemExit(2)
+del _env_port
 
 DEFAULT_DATA_ROOT = os.path.join(tempfile.gettempdir(), "v2o-console-data")
 DEFAULT_PROFILE_HASH = "local-console-v1"

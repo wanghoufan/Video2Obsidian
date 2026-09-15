@@ -1,8 +1,11 @@
 #!/bin/sh
-# 懒得笔记 本机控制台一键启动：选 python -> 起 127.0.0.1:8765 -> 打开浏览器。
+# 懒得笔记 本机控制台一键启动：选 python -> 起 127.0.0.1:8899（V2O_PORT 可覆盖）-> 打开浏览器。
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+
+# P1-8：端口收敛到这一处；真源＝app/server.py 的 PORT 默认值（8899），V2O_PORT 优先。
+PORT="${V2O_PORT:-8899}"
 
 PY=""
 for cand in "$ROOT/stage0bench/bin/python" "$ROOT/.venv/bin/python" "$ROOT/venv/bin/python"; do
@@ -24,17 +27,17 @@ else
 fi
 
 echo "用 $PY 启动 懒得笔记 本机控制台…"
-"$PY" app/server.py &
+V2O_PORT="$PORT" "$PY" app/server.py &
 SRV=$!
 sleep 1
 if ! kill -0 $SRV 2>/dev/null; then
   echo "启动失败，查看上方报错。" >&2
   exit 1
 fi
-echo "已起 http://127.0.0.1:8765/（Ctrl+C 停止）"
+echo "已起 http://127.0.0.1:$PORT/（Ctrl+C 停止）"
 if command -v open >/dev/null 2>&1; then
-  open "http://127.0.0.1:8765/"
+  open "http://127.0.0.1:$PORT/"
 elif command -v xdg-open >/dev/null 2>&1; then
-  xdg-open "http://127.0.0.1:8765/"
+  xdg-open "http://127.0.0.1:$PORT/"
 fi
 wait $SRV

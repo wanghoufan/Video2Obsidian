@@ -5,7 +5,7 @@
 红线口径（照 HANDOFF）：
   - 只用**外置 tmp + 合成数据**；不碰用户真实视频目录与 Obsidian 库；
   - 凡调 handler 的用例，首行断言 data_root 在系统 tmp 下（经验 2026-09-13）；
-  - 不起 8765、不请求线上服务、不写真实 data/state.db。
+  - 不起 8899、不请求线上服务、不写真实 data/state.db。
 
 运行：python3 tests/selftest_p1_2_contract.py
 全过 EXIT=0；任一断言失败 EXIT=1（坏例只看 exit 码，不看打印）。
@@ -930,7 +930,7 @@ def part7_regression(server):
         shutil.rmtree(root, ignore_errors=True)
 
 
-# ------------------------------------------------------------------ 8 真实 HTTP 路由（本进程临时端口，不碰 8765）
+# ------------------------------------------------------------------ 8 真实 HTTP 路由（本进程临时端口，不碰 8899）
 
 def part8_http_contract(server):
     """走真 Handler.do_GET/do_POST：路由、错误结构、坏库不掉线、主题默认浅色。"""
@@ -948,7 +948,31 @@ def part8_http_contract(server):
         fh.write("not a sqlite database")
     srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     port = int(srv.server_address[1])
-    check("8 端口不是 8765（不碰线上服务）", port != 8765 and port != 0, port)
+    check("8 端口不是 8899（不碰线上服务）", port != 8899 and port != 0, port)
+    # P1-8：默认端口钉值（防无声改回旧端口）。隔离环境变量：临时摘掉 V2O_PORT
+    # 重新加载一份模块取「默认路径」，断言后把 os.environ 原样恢复，不污染同进程其它用例。
+    _saved_port_env = os.environ.pop("V2O_PORT", None)
+    try:
+        fresh = load_server()
+    finally:
+        if _saved_port_env is not None:
+            os.environ["V2O_PORT"] = _saved_port_env
+    check("8 未设 V2O_PORT 时默认端口＝8899（真源，防回退）",
+          getattr(fresh, "PORT", None) == 8899, getattr(fresh, "PORT", None))
+    # P1-8 P2-1：start.sh 的默认值与 URL 必须与 server.py 真源机械咬合（改一处忘一处即挂）
+    sh_src = open(os.path.join(ROOT, "app", "start.sh"), encoding="utf-8").read()
+    sh_defaults = re.findall(r"V2O_PORT:-(\d+)", sh_src)
+    check("8 start.sh 端口收敛成 V2O_PORT:-<默认> 单变量（恰好一处）",
+          len(sh_defaults) == 1, sh_defaults)
+    check("8 start.sh 默认值＝server.py 默认端口（真源分叉即挂）",
+          sh_defaults == [str(getattr(fresh, "PORT", None))], sh_defaults)
+    sh_bare = sorted(set(re.findall(r"(?<!\d)(\d{4,5})(?!\d)", sh_src)))
+    check("8 start.sh 除该默认值外无裸端口数字（防再写死一份）",
+          sh_bare == sh_defaults, sh_bare)
+    sh_code = [l for l in sh_src.splitlines() if l.strip() and not l.strip().startswith("#")]
+    check("8 start.sh URL 全走 $PORT（非注释行无 127.0.0.1:<数字> 硬编码）",
+          all(re.search(r"127\.0\.0\.1:\d", l) is None for l in sh_code),
+          [l for l in sh_code if re.search(r"127\.0\.0\.1:\d", l)])
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = "http://127.0.0.1:%d" % port
 

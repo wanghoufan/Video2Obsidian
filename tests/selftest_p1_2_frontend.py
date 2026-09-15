@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """builder 自验（DEVELOP-P1-2 前端任务身份）：抽 `app/index.html` 真源码 + node 桩，
 断言「轮询带 data_root+job_id、只渲染本页那次 job、别目录/别任务不串」。
-不点真机、不起 8765、不请求线上服务。
+不点真机、不起 8899、不请求线上服务。
 
 做法：从 index.html 里按函数名**逐字抽真源码**（不手抄），拼上 DOM/fetch 桩跑
 node；任一断言失败 node 退出码非 0，本脚本随之退出 1。
@@ -10,6 +10,7 @@ node；任一断言失败 node 退出码非 0，本脚本随之退出 1。
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1434,13 +1435,19 @@ async function s12(){
 
 
 def brand_checks():
-    """P3-1 品牌断言牙（防改名回退）：只钉用户可见文案；v2o- 键/.v2o class/V2OApp 类名属技术标识，不在此列。"""
+    """P3-1 品牌断言牙（防改名回退）：只钉用户可见文案；v2o- 键/.v2o class 属技术标识，不在此列；
+    start.sh 一行更严：仅按令牌豁免 V2O_PORT（V2OApp 等子串不再放行）。"""
     root = os.path.dirname(HTML)
     src = open(HTML, encoding="utf-8").read()
     assert '<title>懒得笔记 · 本地视频自动转文字</title>' in src, "title 品牌回退"
     assert '<h1><span class="v2o">懒得笔记</span>' in src, "h1 品牌回退"
     assert 'content:"懒得笔记 · 本机磁带"' in src, "磁带品牌回退"
-    assert "V2O" not in open(os.path.join(root, "start.sh"), encoding="utf-8").read(), "start.sh V2O 残留"
+    # P1-8：`V2O_PORT` 是环境变量技术标识（非用户可见文案），只按 token 边界精确摘除；
+    # 不做 V2OApp 之类子串豁免（那是放宽）；V2O_PORT_EXTRA／XV2O_PORT 因边界不符照咬不放。
+    sh = open(os.path.join(root, "start.sh"), encoding="utf-8").read()
+    sh_left = [l.strip() for l in sh.splitlines()
+               if "V2O" in re.sub(r"\bV2O_PORT\b", "", l)]
+    assert not sh_left, "start.sh 可见文案 V2O 残留（仅豁免 V2O_PORT 令牌）: %s" % sh_left
     mb = open(os.path.join(root, "..", "src", "stage12", "menu_bar.py"), encoding="utf-8").read()
     left = [l.strip() for l in mb.splitlines() if "V2O" in l and "V2OApp" not in l]
     assert not left, "menu_bar.py 可见文案 V2O 残留（非 V2OApp 类名）: %s" % left

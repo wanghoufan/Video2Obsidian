@@ -37,7 +37,7 @@
 启动后浏览器会自动打开：
 
 ```text
-http://127.0.0.1:8765/
+http://127.0.0.1:8899/
 ```
 
 页面里按顺序做三件事：
@@ -70,7 +70,7 @@ stage0bench/bin/python → .venv/bin/python → venv/bin/python → python3
 - 找到带 `mlx_whisper` 的 Python：转写可用。
 - 找不到：控制台照常打开，但点开始转写时会报 `400 PRECHECK_MLX_MISSING`，换对 Python 后重起即可。
 
-端口固定为 `127.0.0.1:8765`，只监听本机。
+端口默认 `127.0.0.1:8899`，只监听本机；如需换端口，用环境变量 `V2O_PORT` 覆盖（`app/start.sh` 会透传给 `app/server.py`）。
 
 ## 使用方法
 
@@ -78,7 +78,7 @@ stage0bench/bin/python → .venv/bin/python → venv/bin/python → python3
 
 ```bash
 ./app/start.sh
-# 打开 http://127.0.0.1:8765/
+# 打开 http://127.0.0.1:8899/
 # 填视频文件夹 → 点开始监听 → 丢视频进去 → 任务列表看结果
 ```
 

@@ -37,7 +37,7 @@ Run from the repository root:
 The browser opens automatically at:
 
 ```text
-http://127.0.0.1:8765/
+http://127.0.0.1:8899/
 ```
 
 Then, in order:
@@ -70,7 +70,7 @@ stage0bench/bin/python -> .venv/bin/python -> venv/bin/python -> python3
 - With `mlx_whisper`: transcription is available.
 - Without it: the console still opens, but starting a job returns `400 PRECHECK_MLX_MISSING`. Switch to the right Python and restart.
 
-The port is fixed at `127.0.0.1:8765` and only listens locally.
+The port defaults to `127.0.0.1:8899` and only listens locally; to change it, override with the `V2O_PORT` environment variable (`app/start.sh` passes it through to `app/server.py`).
 
 ## Usage
 
@@ -78,7 +78,7 @@ The port is fixed at `127.0.0.1:8765` and only listens locally.
 
 ```bash
 ./app/start.sh
-# Open http://127.0.0.1:8765/
+# Open http://127.0.0.1:8899/
 # Fill video folder -> Start watching -> Drop videos in -> Check the job list
 ```
 

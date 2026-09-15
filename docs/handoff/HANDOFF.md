@@ -1,16 +1,16 @@
-# HANDOFF｜P1-6 已收口推送 main（2026-09-15 18:50）：P0 全清＋P1-2/3/4/5/6/7 全 PASS，下一步 P1-8 改端口→P1-1，恢复先读我
+# HANDOFF｜P1-6＋P1-8 已收口推送 main（2026-09-15 19:20）：P0 全清＋P1-2/3/4/5/6/7/8 全 PASS，只剩 P1-1，恢复先读我
 
 > 旧版字段（governance-state / Evidence / Human Gate / Promotion / Dispatch ID）已废弃，不填。
 > 本文件即恢复入口。「一/二/三」三节为本轮梳理版（2026-09-15 14:10 重写，旧版细节压缩进各链报告与 git 历史）；**Phase1 全过程记录**（用户四条反馈原文、九项 HD 决策、16 条真相、迁移决策、额度事件）与**迁移前项目交接原文**见本文件后段各节，逐字未动。
 
-- Captured at（YYYY-MM-DD HH:MM）：**2026-09-15 18:50（TM 收口更新）**；原始暂停快照 14:10（用户指令「开发先到这里暂时结束」）；**P1-6 四角色链全 PASS 并推送 main；下一步 P1-8（改端口）→ P1-1**
+- Captured at（YYYY-MM-DD HH:MM）：**2026-09-15 19:20（TM 收口更新）**；原始暂停快照 14:10（用户指令「开发先到这里暂时结束」）；**P1-6＋P1-8 两条链已收口推送 `main`；下一步只剩 P1-1**
 - PROJECT_PHASE：**DEVELOP**（Phase2 未关闭）
 - PLAN_VERSION：`PRODUCT_PLAN_V1.3`（正文最新；文末「Readiness Score / 本轮真实验证记录」两段仍为 V1.2 旧文本，见 `docs/pm/PRODUCT_PLAN.md` 顶部收尾注记）
 - PLAN_READINESS_SCORE：**未达 90**（planner 自评 89；Research Reviewer 独立 83；用户已知并决定开工）
 - PLAN_GATE：**APPROVED**（用户明确进 DEVELOP；不是 Readiness 达标通过）
 - DEV_BASELINE：`PRODUCT_PLAN_V1.3`（禁随意改 Plan；变更只走 Change C）
 - CHANGE_REQUEST：**B**（用户 2026-09-15 授权「继续推进」「按分工表为准」「commit/push 默认 main 不再逐次问」）
-- Stage ID（本阶段叫什么）：**DEVELOP-P1-6 收口**（builder／code-reviewer／qa／supervisor 四角色链全 PASS，已推 main；qa 的两项环境限制由本窗口补位）
+- Stage ID（本阶段叫什么）：**DEVELOP-P1-8 收口**（默认端口 8765→**8899**＋`V2O_PORT` 覆盖，四角色链全 PASS，已推 `main`）；P1-6 亦已于 18:50 收口
 ---
 
 ## 一、当前的工作进展
@@ -25,10 +25,11 @@
 | P1-4 | 脱敏摘要复制（HD-2=A，5 派） | `e340396` | PASS 0/2 |
 | P1-5 | 词库与候选易用性修整（5 派） | `7bc8cec` | PASS 0/2 |
 | P1-7 | 产品改名「懒得笔记」（7 派＋supervisor） | `da0f572` | PASS 0/2（QA-P17-001 判 CLOSED） |
-| P1-6 | 布局与历史分页（FR-10/11/12/15＋D-15，4 派） | `（本轮推送，见 git log HEAD）` | PASS 0/2（qa 的 HTTP 段环境限制由本窗口补位跑通） |
+| P1-6 | 布局与历史分页（FR-10/11/12/15＋D-15，4 派） | `4d26865`＋收口 `f611824` | PASS 0/2（qa 的 HTTP 段环境限制由本窗口补位跑通） |
+| P1-8 | 默认端口去硬编码 8765→**8899**＋`V2O_PORT` 覆盖（5 派，清历史 P2-4/P2-5） | `（本轮推送，见 git log HEAD）` | PASS 0/2（qa 的 HTTP／新牙口环境限制由本窗口补位跑通） |
 
 - 各链遗留 P3/P2 均记 backlog（见下「待排期」），无未收口 P0/P1。
-- P1 顺序（TM 定）：P1-2✅ → P1-3✅ → P1-4✅ → P1-5✅ → P1-7✅ → **P1-6✅（2026-09-15 18:50）** → **P1-8（改端口，用户新加）** → P1-1（最后，真实规模/长视频/61 篇重验证；并入 P1-5 链 P3-1「真 16 条诊断墙钟」实测）。
+- P1 顺序（TM 定）：P1-2✅ → P1-3✅ → P1-4✅ → P1-5✅ → P1-7✅ → P1-6✅（18:50） → **P1-8✅（19:20，用户新加）** → **P1-1（最后一项：真实规模/长视频/61 篇基准重验证；并入 P1-5 链 P3-1「真 16 条诊断墙钟」实测）**。
 
 ### 2. P1-6 链状态（**已收口**，证据在此备查）
 
@@ -38,20 +39,21 @@
 - **③ qa 独立 QA（PASS，codex/gpt-5.6-luna，耗时 5m50s，2026-09-15 18:36）**：业务 BUG **0**；FR-10/11/12/15＋HD-6/7/9＋D-15 逐条过；自建非 77 条夹具复算 keyset 页 3/3/3/1 无重复遗漏、并列 `run_id DESC` 决胜、回退行、坏游标 5 类 400、跨目录重放如实记；自算签名**实证** reviewer 的 P3-1（无密钥 sha256 可伪造）；报告 `docs/qa/P1-6-LAYOUT-HISTORY-QA-2026-09-15.md`。未覆盖：contract HTTP 段（codex 沙箱禁 loopback bind）＋真机 UI。
 - **④ supervisor 复检（PASS，放行推送；本链 0/2 无 blocking）**：三套自测 **512/167/58 rc0**；**HTTP 段补位**——本窗口可 bind，`contract:949` 真 loopback 27 条全 PASS＋独立探针 27 项 rc0 → qa 该项判为环境限制**已补位**；反向证伪 **4/4 有牙**、5 文件 sha256 还原逐字一致（**未用 `git checkout`**）；两账本 exit0＋负控 **11/11 有牙**；三处对账本链 0 不匹配（另见 2 行表换代前历史行差异，不阻塞）；8765 外部进程零扰动。复检节在 qa 报告 `:75`。
 - **已知遗留（非阻塞）**：qa 未覆盖「真机 UI 目检」→ 由本窗口 computer-use 补或按用户手测；reviewer/qa 共记 P3×5（P3-1 若要升 HMAC 需用户点头）。
-- **账本**：`DISPATCH-LOG` **80 行**（P1-6 四派已落：builder／code-reviewer／qa／supervisor）；`TASK-MODEL-LOG` **54 行**（P1-6 任务行已落）；两道校验 exit 0 且负控有牙。
-- **工作树／推送（TM 2026-09-15 18:50 收口）**：P1-6 代码 `4d26865`＋收口提交（本 HANDOFF＋两账本＋qa 报告）已 push `main`；工作树仅 `?? .codebuddy/`（会话产物，保留不提交）。
+- **账本**：`DISPATCH-LOG` **86 行**（P1-6 四派＋P1-8 五派全落）；`TASK-MODEL-LOG` **55 行**（P1-6／P1-8 任务行均已落）；两道校验 exit 0 且负控有牙（P1-8 复检负控 15/15）。
+- **工作树／推送（TM 2026-09-15 19:20 收口）**：P1-6（`4d26865`＋`f611824`）已 push；P1-8 收口提交（端口 8 文件＋`docs/review/P1-8-PORT-CODE-REVIEW.md`＋`docs/qa/P1-8-PORT-QA-2026-09-15.md`＋两账本＋本 HANDOFF）已 push `main`；工作树仅 `?? .codebuddy/`（会话产物，保留不提交）。
+- **P1-8 收口要点**：默认端口 **8899**（`app/server.py:54-68`，非法值 rc2 人话）＋环境变量 **`V2O_PORT`** 覆盖；`app/start.sh:8` 端口**单点**（`PORT="${V2O_PORT:-8899}"`）并透传，URL 全用 `$PORT`（清掉历史 P2-4/P2-5「改一处忘一处」）；文档中英＋测试同步；`contract:952-975` 新增钉值断言＋4 条 start.sh 牙口（**双向**：改 server.py 或 start.sh 任一侧都红）。8 文件 **+69/−22**。
 - **暂停收尾（neat-freak 2026-09-15 本轮，PASS）**：P1-7 review 加行号勘误注记（:370→:364）、P1-6 review 加 numstat 口径注记；删仓根 `.DS_Store`；`__pycache__` 全仓零命中；业务文件零触碰。
 - **环境事件（如实记）**：auto mode 安全分类器 11:50–13:00 限流（glm 端点 429，16:55 重置）拦 Bash 命令，用户拍板在 settings 配 `subagents.agents.autoModeClassifier.model=hy3`（x0.00 credits 档）恢复；hy3 对长复合命令仍偶发判不动 → 对策＝简单命令/任务书落文件让 codex 自读/文件编辑通道写账本，连续失败挂定时重试。
 - **环境事件 2（2026-09-15 18:35–18:45，TM）**：hy3 恶化——对 `codex exec` 派工命令**持续**返回 `Max turns (1) exceeded`（同轮连拦 5 次：长提示词／短提示词／`bash 脚本`／`cp` 全部被拦，仅 `codex --version` 等极短命令过），P1-6 派 qa 因此卡住。**用户拍板换分类器**，实走两步：① `hy3` → `glm-5.3-flash`（热加载生效但**同样** `Max turns (1) exceeded`，证明瓶颈是**分类器单轮预算**而非模型档位）② `glm-5.3-flash` → **`deepseek-v4.1-flash`**（**通过**，派工命令放行）。现网值＝`deepseek-v4.1-flash`；改动前原件备份 `/tmp/settings.json.bak-20260915`。**配置热加载生效（无需重启会话）**；不改默认权限模式（仍 `auto`）。
-- **环境事件 3（端口，TM 2026-09-15 18:30 实测）**：**8765 现被另一个无关项目占用**——`/Users/zzymima0000/Downloads/视频笔记 ob/葫芦军师/红利打新底仓计算器_V1.2正式长期版/server.py`（PID 6586，11:41 启动，HTTP 200）。本项目红线「固定 8765」改为**覆盖端口起服务**（`PORT=xxxx` 环境变量，禁改业务文件、**禁杀该进程**）；真机目检须用覆盖端口，注意 localStorage 按 origin 隔离。
+- **环境事件 3（端口，TM 18:30 实测 → 19:20 已解）**：**8765 被另一个无关项目占用**（`/Users/zzymima0000/Downloads/视频笔记 ob/葫芦军师/红利打新底仓计算器_V1.2正式长期版/server.py`，PID 6586，11:41 启动）。**已由 P1-8 解决**：本项目默认端口改 **8899**，可用 `V2O_PORT` 覆盖；**仍禁 bind/kill 8765 与 PID 6586**。真机目检走 8899（注意 localStorage 按 origin 隔离，旧 8765 origin 的隐藏/主题偏好不会自动带过来）。
 
 ## 二、下一步的任务
 
 - **下一步（Next Single Action，按序）**：
-  0. **（已完成 2026-09-15 18:50）P1-6 全链收口**：qa PASS（18:36，任务书 `/tmp/p16_qa_prompt.md`＋脚本 `/tmp/p16_qa_run.sh` 留档可续用）→ supervisor PASS（18:50）→ 两账本落盘（DISPATCH 80／TASK 54）→ 提交并推送 `main`。细节见 §一.2。
-  1. **（当前，立即做）P1-8 默认端口去硬编码**（用户 2026-09-15 指示）：8765 已被外部项目常占 → 换默认端口并把 `PORT` 收敛成单一真源（`app/server.py:55` 定义）＋ `app/start.sh:2/:34/:36/:38` 联动，清历史 P2-4/P2-5（三轮评审未清）；同步文档 `README.md:40/:73/:81`、`README.en.md:40/:73/:81`、`docs/usage.md:17/:20`、`docs/troubleshooting.md:22`；`tests/selftest_p1_2_contract.py:951` 的「端口不是 8765」断言随新默认端口改写。**新默认端口＝`8899`（TM 自定，实测空闲、避开历史 8766–8771 区间；用户 2026-09-15 指示此类小事不必问）**。改动面小，可跳 planner/product，**不可跳 code-reviewer＋qa＋supervisor**。
-  2. **之后 P1-1**（最后一个 P1：真实规模/长视频/61 篇基准重验证；并入 P1-5 链 P3-1「真 16 条诊断墙钟」实测；需真实 whisper 与长耗时，用户知情）。
-  3. P1 全清后收尾：experience-recorder ＋ neat-freak 各一次（每阶段只派一次）。
+  0. **（已完成 18:50）P1-6 收口**：qa PASS → supervisor PASS → 两账本 → 推送 `main`（`4d26865`＋`f611824`）。
+  1. **（已完成 19:20）P1-8 默认端口去硬编码**：builder（首版＋补两条）→ code-reviewer（首轮 P2×2 → 返工复核 PASS）→ qa（BUG=0）→ supervisor（PASS，HTTP／新牙口由本窗口补位）。默认 **8899**＋`V2O_PORT` 覆盖、`start.sh` 端口单点；残留 P3×6 进 backlog。
+  2. **（当前项）P1-1**（最后一个 P1：真实规模/长视频/61 篇基准重验证；并入 P1-5 链 P3-1「真 16 条诊断墙钟」实测；需真实 whisper 与长耗时，用户知情）。
+  3. 收尾：experience-recorder ＋ neat-freak 各一次（每阶段只派一次）。
 - **人要拍什么板（只问大事）**：
   1. **词库三铁律机械保证**（仍挂，不阻塞任何 P1）：「长 wrong 排前」「正词含 wrong 即删条」代码无机械保证。选项：① 只补口径文档（TM 建议）；② 补代码保证（须同改 `_user_rules_revision` 规范化，否则同内容异序被打进死路——见 P1-5 复检节技术约束）；③ 补断言钉现状。
   2. 是否换主用模型：以分工表为准，用户给精确 ID 才改表。
@@ -70,7 +72,7 @@
 - **红线**：commit/push 默认走 `main` 不再逐次问（用户授权）；**不碰 secrets**；不改 V1.10/V2.0 封存；`docs/sop/` 仅模板示例；`.codebuddy/` 会话产物不提交不删除。
 - **数据安全**：测试只用**外置 tmp＋合成数据**；真实视频目录与 Obsidian 库**禁写**；凡调 handler 的测试首行断言 `data_root` 在 tmp 下；只读真实库先拷 tmp、用完即删。
 - **No-Clobber**：已发布笔记永不覆盖；缺失 vault 不重建；user-edited＝一切字节差异。
-- **服务**：`stage0bench venv python` 跑 `app/server.py`（PORT 硬编码 8765）；**8765 当前被另一无关项目占用（见环境事件 3）→ 用 `PORT=<空闲端口>` 覆盖起服务，禁杀他人进程、禁改业务文件**；**改 `app/` 或 `src/` 后必须重启再验**；真机目检先起覆盖端口服务。
+- **服务**：`stage0bench venv python` 跑 `app/server.py`，**默认端口 8899（P1-8 起；`V2O_PORT=<端口>` 可覆盖）**，或直接用 `app/start.sh` 一键起（端口自动透传＋开浏览器）；**改 `app/` 或 `src/` 后必须重启再验**；8765 属另一无关项目（PID 6586），**禁 bind、禁 kill**。
 - **主题**：默认必须**浅色**（`data-theme="light"`）；自动化**禁点真机主题开关**，用「抽源码＋node 桩」验。
 - **词库三铁律**：wrong ≥ 2 字；正确文本含 wrong 即删条；长 wrong 排前；上限 500（①③有机械保证，②③「删条/排前」暂无——见待拍板项）。
 - **产品名**：**「懒得笔记」** 已全量落地（P1-7）；GitHub 仓库名与内部 `v2o-*` 标识不动。

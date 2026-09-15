@@ -1,16 +1,16 @@
-# HANDOFF｜P1-2 全链收口（2026-09-15 01:05）：P0-1/P0-2/P0-3 全清＋P1-2 PASS（本链 supervisor 0/2），交付待提交，恢复先读我
+# HANDOFF｜P1-3 全链收口（2026-09-15 08:45）：全 P0 清＋P1-2／P1-3 全 PASS（P1-3 本链 supervisor 0/2），交付待提交，恢复先读我
 
 > 旧版字段（governance-state / Evidence / Human Gate / Promotion / Dispatch ID）已废弃，不填。
 > 本文件即恢复入口。下面「一、当前进展／二、下一步／三、注意事项」按恢复用结构编排，字段名仍按 HANDOFF 模板。**Phase1 全过程记录**（用户四条反馈原文、九项 HD 决策、16 条真相、迁移决策、额度事件）见本文件后段各节；**迁移前项目交接原文**见文末附录。
 
-- Captured at（YYYY-MM-DD HH:MM）：2026-09-15 01:05（用户「继续推进」后开 P1-2 链：builder×4→code-reviewer×4→qa×2 共 **10 派**，supervisor 复检 **PASS** 收口；无外派在跑。**注：本链跨零点**，机器钟 09-14 23:40 → 09-15 01:03，故部分报告印章为 09-15、此前记录为 09-14，两者并存不矛盾）
+- Captured at（YYYY-MM-DD HH:MM）：2026-09-15 08:45（恢复窗口续做：P1-3 共 **11 派**（builder×5／code-reviewer×4／qa×2）＋ supervisor 复检，全链收口；无外派在跑。**注：本链跨零点**，机器钟 09-14 23:40 → 09-15 08:45，故部分报告印章为 09-15、此前记录为 09-14，两者并存不矛盾）
 - PROJECT_PHASE：**DEVELOP**（用户 2026-09-14 明确说「第二阶段，开发」进 Phase2；23:27 叫停暂停，本轮恢复并收口全 P0，仍在 Phase2 未关闭）
 - PLAN_VERSION：`PRODUCT_PLAN_V1.3`（正文最新；文末「Readiness Score / 本轮真实验证记录」两段仍为 V1.2 旧文本——第 5 轮修订被用户中止，未收尾，见 `docs/pm/PRODUCT_PLAN.md` 顶部收尾注记）
 - PLAN_READINESS_SCORE：**未达 90**（planner 自评 **89**；Research Reviewer 独立打分 **83**，两轮结论均 FAIL；用户已知并决定开工）
 - PLAN_GATE：**APPROVED**（用户明确进 DEVELOP，锁定基线开工；不是 Readiness 达标通过）
 - DEV_BASELINE：`PRODUCT_PLAN_V1.3`（Phase2 锁定基线，禁随意改 Plan；变更只走 Change C）
 - CHANGE_REQUEST：**B**（P1-3 批含 P2-7「扩 `/api/retry` 契约带 `data_root`」，属局部功能变化→只更新局部 Requirement/DoD，留 DEVELOP、不召 Sol Planner；用户 2026-09-15 明确「继续推进」「按分工表为准」，授权连续推进不再逐次问）
-- Stage ID（本阶段叫什么）：**DEVELOP-P1-2 全链收口**（P1-2 blocking 达成；P0-1／P0-2／P0-3 仍全清）。本链 supervisor 累计打回 **0/2**（复核三那次 FAIL 属 code-reviewer 打回，不计 supervisor 打回）。P0-3 链定格 1/2、P0-1 1/2、P0-2 0/2。**P0 交付已 push（c753b15）＋P1-2 交付已提交推送 `main`（92fa77e）**。
+- Stage ID（本阶段叫什么）：**DEVELOP-P1-3 全链收口**（P1-3 达成；P0-1／P0-2／P0-3 仍全清）。P1-3 本链 supervisor 累计打回 **0/2**（链内 4 次 FAIL 全出自 code-reviewer 或 QA，不计 supervisor 打回；supervisor 复检 08:52 **PASS／无 blocking**）。P0-3 链定格 1/2、P0-1 1/2、P0-2 0/2。**P0 交付已 push（c753b15）＋P1-2 交付已提交推送 `main`（92fa77e）＋HANDOFF 回写（3af2da7）；P1-3 交付本轮提交推送 `main`**。
 ---
 
 ## 一、当前的工作进展
@@ -24,15 +24,29 @@
 - **P0-3 返工二轮（2026-09-14）**：builder 首选改法新增 `publishOnlyRetry(run_id)`（约 `index.html:1098`）走 P0-2 已有 PUBLISH_ONLY 通路（retry-plan 取 plan/token→retry-batch confirm 单条，`run_ids:[id]`；非 PUBLISH_ONLY fail-closed 零执行）；三处接线（首屏 `#btnRecPublish`／行级 `data-retry-publish`／详情 failbox），只改 `index.html`。→ code-reviewer **PASS**（`docs/review/P0-3-STATE-ENTRY-REWORK2-REVIEW.md`；1×P2 术语残留不拦）→ qa **FAIL（新 P0：`QA-P03-RR2-001`）**（`docs/qa/P0-3-STATE-ENTRY-RETEST2-2026-09-14.md`）：静态全 PASS，但 tmp 真 handler 发现 `_diagnosis_item()` 把正常 `PUBLISH_BLOCKED`（展示 `FAIL`）字面判 mismatch，经 FR-13 降级门变 `NEEDS_HUMAN`，retry-plan `PUBLISH_ONLY eligible` 恒 0，前端链路实际不可达。属 QA 挂，不计 supervisor 打回。
 - **P0-3 语义修复（2026-09-14，仍 1/2）**：builder 只改 `app/server.py` 约 `:1339` 起 mismatch 判定一块——语义归一化（`display==FAIL` 时持久态属 FAIL 家族 `FAIL/PUBLISH_BLOCKED/TRANSCRIBE_FAILED/RAW_FAILED/MIRROR_FAILED/NORM_RENDER_FAILED` 即不算 mismatch，口径与 `_scan_disk_states` 一致；其余字面比较；真 mismatch 仍 fail-closed；零 DB/manifest/产物写）→ code-reviewer **PASS**（`docs/review/P0-3-SEMANTICS-FIX-REVIEW.md`；1×P2 provenance 加性注记；server 计数 `28/3` vs 报告 `+19/−3` 口径差已由 neat 加注待 supervisor 裁定）→ qa **PASS**（`docs/qa/P0-3-SEMANTICS-FIX-QA-2026-09-14.md`：`QA-P03-RR2-001` CLOSED——正常 `PUBLISH_BLOCKED→AUTO_PUBLISH/PUBLISH_ONLY/eligible=1/whisper=0`，真 mismatch 仍 `NEEDS_HUMAN/MANUAL_REVIEW`，`state.db` SHA-256 前后不变，静态回归全过；真实 whisper/batch 发布/HTTP 服务/真机 UI 未跑）。**→ supervisor 复检 2026-09-14 23:31 PASS（收口）**（复检节在 `docs/qa/P0-3-SEMANTICS-FIX-QA-2026-09-14.md` 尾：计数口径裁定 `28/3` ＝返工前 `19/3` ＋语义修复净增 9 行（`_FAIL_SEMANTICS`＋归一化分支＋8 个只读 provenance 字段），逐行归因无未申报内容→**属修复前快照口径、非失实、不打断口**；两账本 exit 0；三处对账一致；Phase Integrity 五查过；红线抽查过；无 blocking。遗留 2×P2 与「真实 whisper／batch 发布／HTTP 服务／真机 UI 未跑」作已知缺口不拦收口）。
 - **暂停前收尾（2026-09-14 23:27，neat-freak PASS）**：四份报告加注对齐（历史快照正文未动）、删 2 个 `.DS_Store`（仓根＋`docs/`）、`__pycache__` 本就为空、`git diff --check` 通过；未动业务/文档文件，未碰 `008林粒粒AI编程/`；`env.err`、`results/*.log` 保留。详见文末「收尾记一笔（neat-freak，2026-09-14本轮）」。
-- **账本（TM，01:05 P1-2 收口版）**：`DISPATCH-LOG` 35→**45** 行（本 P1-2 链 10 派：builder×4／code-reviewer×4／qa×2，全 `used=主`，模型与 runtime 逐字对分工表）；`TASK-MODEL-LOG` 48→**49** 行（本链任务级行 `DEVELOP-P1-2（…）` 由 builder 写初版→supervisor 校验→TM 判 **PASS**，`rework=0`＝本链 supervisor 打回 0 次口径）。两道校验 01:03 回跑 **exit 0**（TASK 49／DISPATCH 45）；supervisor 复检已独立校验、三处对账 10 行 0 不匹配。（此前 23:31 口径：DISPATCH 34→35、TASK 46→48。）
-- **工作树现状（2026-09-15 01:12，P1-2 已提交推送）**：commit **92fa77e**（9 files，+3904/−229）已 push `origin/main`（`d7540d8..92fa77e`），工作树**干净、与远端 0/0**。本次交付＝`app/index.html 155/17`＋`app/server.py 677/197`＋两账本＋`docs/review/P1-2-CONTRACT-CODE-REVIEW.md`＋`docs/qa/P1-2-CONTRACT-QA-2026-09-14.md`＋`tests/selftest_p1_2_contract.py`（379）＋`tests/selftest_p1_2_frontend.py`（41）。`git diff --check` 通过。**服务：8765 无监听。**
+- **账本（TM，08:56 P1-3 收口版）**：`DISPATCH-LOG` 45→**57** 行（本 P1-3 链 **业务 11 派**：builder×5／code-reviewer×4／qa×2 ＋ **supervisor 复检 1 行**，全 `used=主`，模型与 runtime 逐字对分工表；其中 builder 首派因平台 429 中断记 `FAIL` 并如实留痕）；`TASK-MODEL-LOG` 49→**50** 行（本链任务级行 `DEVELOP-P1-3（…）` 由 builder 写初版→supervisor 校验→TM 判 **PASS**，`rework=0`＝本链 supervisor 打回 0 次口径）。两道校验回跑 **exit 0**（TASK 50／DISPATCH 57）；supervisor 复检独立校验并加坏行负控、三处对账 0 不匹配。（此前 01:05 口径：DISPATCH 45、TASK 49。）**本链已报 token：QA 首轮约 111k、QA 复验约 170k（codex 侧）；本窗口各派未计数。**
+- **工作树现状（2026-09-15 08:52，P1-3 已提交前快照）**：7 改 ＋ 2 新（`app/index.html` 232/32、`app/server.py` 416/70、`tests/selftest_p1_2_contract.py` 413/0、`tests/selftest_p1_2_frontend.py` 346/1、`docs/handoff/HANDOFF.md` 30/17、`docs/model/DISPATCH-LOG.jsonl`＋12、`docs/model/TASK-MODEL-LOG.jsonl`＋1；新增 `docs/review/P1-3-SEMANTICS-CODE-REVIEW.md`、`docs/qa/P1-3-SEMANTICS-QA-2026-09-15.md`）；`git diff --check` 通过；无游离/未跟踪杂项；**扫描无密钥命中**。**服务：8765 无监听。** 上一提交 `3af2da7`（HANDOFF 回写）＝提交前 HEAD，与 `origin/main` 0/0。**注：supervisor 复检提过本行早期快照三个数字（231/32、347/1、＋6）有误，已按实测改正。**
 - **提交推送（TM，23:35）**：用户给分支名 `main` 后动 git——`git add` 只加申报的 12 个文件（`app/index.html`、`app/server.py`、HANDOFF、两账本、7 份新报告），提交前扫敏感（无命中），commit **c753b15**「DEVELOP P0-3收口…全P0清」，`git push origin main` → `b94845e..c753b15`；提交后工作树干净、`HEAD==origin/main` 逐字一致。
 - **DEVELOP-P1-2 全链收口（2026-09-15 01:05，本链 supervisor 0/2）**：用户「继续推进」后按 Plan 优先级取 **P1-2（blocking）任务身份与 API 契约加固**，共 **10 派**：builder 首版（严格类型层＋data_root/job_id 绑定＋字段一致＋候选版本锁＋部分更新安全＋错误脱敏，`server.py +547/−187`，自测 257/19）→ code-reviewer **PASS**（无 P0；2×P1 错误出口漏脱敏 `:4435`／`:5417`＋7×P2；仓内调用点 0 漏改）→ builder 返工（脱敏出口补全＋`/api/start` 出网闸门＋`_strip_paths`＋摘要白名单＋realpath 口径＋无参回 `job:null`＋`absent` 409；320/22）→ 复核二 **PASS 8/8**（新 P2-新1：数据目录框空时进度静默停表）→ builder 修 P2-新1（`_take_required_data_root`＋前端 `effectiveDataRoot`／`vocabJobDataRoot`＋人话兜底；337/34）→ **复核三 FAIL**（新 **P1-三1 阻断**：异步壳把 `ob_vault_root=None` 写回 params，笔记库框留空（界面明写"选填"）时核心动作 100% 失败；另 P2-三1 409 接管静默、P2-三2 测试假信心）→ builder 修复（缺键不写回＋409 接管人话＋9g 钉终态＋`isAbsRoot` 本地拦＋文案统一；379/41）→ 复核四 **PASS 5/5**（并验证 9g「有牙」：临时改回旧形态→rc=1；新发现 0×P0/0×P1/0×P2＋3×P3）→ qa 首轮 **FAIL**（业务 BUG＝0：contract 347/0＋前端 41/0＋回归 58/0＋D-22 脱敏扫描过；唯一 FAIL 是环境阻塞 `QA-ENV-HTTP-001`＝codex 沙箱禁 bind 临时端口）→ 放开沙箱补跑 **HTTP 33/33 PASS**、`QA-ENV-HTTP-001` CLOSED → **supervisor 复检 PASS**（三套自测 379/41/58 exit 0；审查意见逐条在位；P1-三1 独立真 HTTP 复验通过；两道校验 exit 0；三处对账 10 行 0 不匹配；五查过；无 blocking）。报告：`docs/review/P1-2-CONTRACT-CODE-REVIEW.md`（首轮＋复核二/三/四）、`docs/qa/P1-2-CONTRACT-QA-2026-09-14.md`（含 HTTP 补跑节＋supervisor 复检节）、新增测试 `tests/selftest_p1_2_contract.py`（379）／`selftest_p1_2_frontend.py`（41）。
 - **supervisor 非阻断待办（P1-2 收口时留给 TM）**：① QA 报告「## 结论」段仍有旧句「HTTP 部分未跑，不能推断为通过」（`:7`／`:52`），裁定为**低报文字残留、不阻断**，要求就地加注勘误指向 HTTP 补跑节——挂收尾 neat-freak 一并办；② HANDOFF 执行链本 10 派已由本节补记。
 - **P1-2 挂账（TM 定，不在本链修）**：复核方首轮 **P2-7**「前端 `/api/retry`（`index.html:1087`／`:1156`）不带 `data_root`，单条/批量重试目标取监听态而非本页目录」——属任务身份同源缺口，但需扩 `/api/retry` 契约（Change B 级），与 P1-3 同批处理更省；已记 `docs/review/P1-2-CONTRACT-CODE-REVIEW.md` backlog。P3 全部（首轮 5＋复核二 4＋复核三 3＋复核四 3）仍挂 backlog，按 V1.3 处置表分流。
 - **P1 编排顺序（TM 定，记一句原因）**：先做**代码类** P1-2（blocking）→ P1-3/P1-4/P1-5/P1-7（S）→ P1-6（M，视觉布局，用户追加反馈二原项）→ **P1-1（blocking）最后**。原因：P1-1 是真实规模/长视频/61 篇基准的重验证活，需真实 whisper 与长耗时，契约（P1-2）未固化前跑会重复实测；HANDOFF 已把「真实 whisper 未跑」记为已知缺口。用户如要换序，一句话即改。
 - **提交推送（TM，2026-09-15 01:12）**：用户答「main！」后动 git——`git add` 只加申报的 9 个文件，提交前扫敏感（无命中），commit **92fa77e**，`git push origin main` → `d7540d8..92fa77e`，提交后工作树干净、`HEAD==origin/main`。
-- **DEVELOP-P1-3 立项（2026-09-15 01:12，本链 0/2；CHANGE_REQUEST=B）**：P1-2 收口后按顺序续做 **P1-3「进度与批量语义修正」**（S，非 blocking），builder 已派（本窗口 `opencode-go/deepseek-v4.1-flash`）。范围＝①无目标不画 100%②运行中参数锁定③零目标/坏文件提示④失败统计统一；并吸收 V1.3 处置表里归 P1-3 的条目（`RERUN-PROGRESS P3-4/P3-5/P3-6`、`CANDIDATE-APPLY P3-2/P3-3/P3-4`、`CANDIDATE-UI2 P3-2`）＋挂账的 **P2-7**（前端 `/api/retry` 补 `data_root`，扩契约属 Change B，只更新局部 Requirement/DoD，不召 Sol Planner）。
+- **DEVELOP-P1-3 全链收口（2026-09-15 08:45，本链 supervisor 0/2）**：P1-2 收口后按顺序续做 **P1-3「进度与批量语义修正」**（S，非 blocking；`CHANGE_REQUEST=B`——P2-7 扩 `/api/retry` 契约只更新局部 Requirement/DoD，留 DEVELOP、不召 Sol Planner）。共 **11 派**：
+  - **① builder 首派（FAIL，429）**：跑到 7 分 46 秒因平台限流中断（无报告），把半成品留在工作树（约 +474/−82），其中 `index.html` 新函数 `vocabApplyPct` 未同步自测白名单 → `selftest_p1_2_frontend.py` 当时 **rc=1**（`ReferenceError`）。**如实记 FAIL 不掩盖**；恢复窗口第一件事就是查出这个半成品并续做。
+  - **② builder 续做（PASS）**：通读半成品判「大方向正确、4 处做歪或没做完」，保留其余、补齐七项（含 P2-7：`/api/retry` 带 `data_root`，跨目录 409 零执行、相对路径 400、缺键沿用旧行为），自测 427/68/58 全绿，反向证伪 13/13 咬住。
+  - **③ code-reviewer 首轮（PASS）**：无 P0/P1；4×P2＋9×P3；**独立复现反向证伪 4 条全 rc=1**；D-12 全量扫描 547 行 0 命中；报告 `docs/review/P1-3-SEMANTICS-CODE-REVIEW.md`。
+  - **④ builder 返工 P2-1／P2-2（PASS）**：只改 `index.html`＋自测（**server.py 0 改动**）——批量重试文案改为「需保持本页打开」（原文案承诺「可离开/后台继续」与事实相反，因该批是页面内循环）、摘掉共用锁定提示里的越界承诺、409/400 原因透传用户眼前＋本地前置门；自测 429/86/58。
+  - **⑤ code-reviewer 复核二（PASS）**：真起 `ThreadingHTTPServer` 实测 `/api/reapply` 同步语义成立（客户端 RST 后活儿仍跑完）；自抽 4 条反向证伪 rc=1、sha256 对上（server.py 哈希与首轮同＝后端 0 改动铁证）。
+  - **⑥ qa 独立 QA（PASS）**：无 P0/P1；合同 429/0＋前端 rc0＋词库 rc0＋**独立坏例 16/16**＋**随机端口真 HTTP rc0**（本轮 sandbox 由 TM 放宽为 workspace-write＋网络，**唯一目的是 bind 临时端口**，已记）；确认 1×P2（`QA-P13-P2-3-UNKNOWN-STATE`）＋1×P2 既有（`QA-P13-P2-4-REAPPLY-MUTEX`）；真机 UI 如实标 `NOT_VERIFIED`；约 111k tokens。
+  - **⑦ builder 返工 P2-3（PASS）**：五桶判据收敛为**唯一真源** `STATE_BUCKET`＋`_state_bucket()`（`server.py:1746-1800`），`_recovery_bucket`／`_reapply_result_bucket` 两链同源派生；`ok=True`＋未知 state → **failed**（原来落 success）；自测 439。
+  - **⑧ code-reviewer 复核三（PASS）**：AST 穷举独立确认**成功态清单无漏项**（`PUBLISH_ONLY` 确为 strategy 非 state）；反向证伪 A/B 方向相反且都有牙；新提一行级 P2-三1（`state=""` 口径）判「本批顺手修」。
+  - **⑨ builder 返工 P2-三1＋P3-新1（PASS）**：判据改 `if "state" in item:`（`""`／空白／`None` 全落 failed，**只有键不存在**才回落 ok）；删 `#batchLockHint` 越界尾句；自测 445/87/58。builder 并**主动更正**上一轮一处自陈失实（上轮报「`state=""`→failed」与当时代码相反）。
+  - **⑩ code-reviewer 复核四（PASS）**：**采纳 builder 口径并作废自己复核三的 `is not None` 建议**（会给 `None` 那档重造分叉，附反例）；AST 证缺键正常成功不误伤（生产形状零行为变更）；**勘误划掉一条假 P3**（tmp 残留系中断运行产物，非夹具泄漏）。
+  - **⑪ qa 复验（PASS）**：同链 resume 续 session；`QA-P13-P2-3` **CLOSED**（未知/空 state fail-closed、缺键仍按 ok 成功、`PUBLISHED` 正常）；无新 BUG；合同 445/前端 87/词库 rc0＋独立坏例与真 HTTP 19/19；两条反向证伪 rc=1 且还原 sha256 一致；`QA-P13-P2-4` 保持 OPEN 进 backlog；约 170k tokens。
+  - **⑫ supervisor 复检（2026-09-15 08:52）＝PASS／无 blocking／本链 0/2**：三处对账 **0 不匹配**（HANDOFF 11 派 ↔ DISPATCH-LOG L46-56 ↔ TASK-MODEL-LOG L50，逐行 role/model/runtime/result 与分工表逐字一致）；两账本校验 **exit 0**（TASK 50／DISPATCH 56，并用坏行负控验证校验器确实 exit 1，非空转）；实跑三套自测 445/87/58 rc=0；自写探针 **43/43 PASS**（六类 state 输入：`""`／空白／`None`／未知 → failed、`PUBLISHED` → success、**缺键 → success 不误伤存量**；14 个表内 state 两链同源）；抽检反向证伪 2/2 **rc=1** 且还原 sha256 与基线一致；五查过；红线过；`QA-P13-P2-4` 确认 OPEN＋进 backlog。**并裁定 builder 首派那条 FAIL(429)「该记、记法如实」**。非阻断待办：HANDOFF 早期快照数字（已由 TM 改正）、DISPATCH 补 supervisor 行（已补）、QA 报告行号漂移与「429 vs 445」并存（留 neat 加注）。复检节在 `docs/qa/P1-3-SEMANTICS-QA-2026-09-15.md:150` 起。
+  - **链内裁定留痕（TM）**：① 派单书曾把 `PUBLISH_ONLY` 举例为「已知成功态」，builder 核实**全仓只作 `strategy` 出现**后未入表 → **采纳 builder 口径**，TM 举例有误已更正；② 复核三给 `is not None`、builder 给 `"state" in item` → **技术分歧听 code-reviewer**，复核四已裁定采纳后者；③ P2-1／P2-2 属本批新引入且涉「文案与事实相反／新契约被静默吞掉」，**TM 判同批修**（Change A 级）；P2-3 属本链 ④ 范围自证不全，判同批修；P2-4（`/api/reapply` 运行中无互斥，**既有残留**，修复需改内部调用为 `internal=True`）**判 backlog 不返工**。
+- **DEVELOP-P1-3 立项（2026-09-15 01:12；已由上条收口）**：范围＝①无目标不画 100%②运行中参数锁定③零目标/坏文件提示④失败统计统一⑤elapsed/可离开提示（不做强制取消）⑥二选一不双空⑦吸收挂账 P2-7；并吸收 V1.3 处置表归 P1-3 的条目（`RERUN-PROGRESS P3-4/P3-5/P3-6`、`CANDIDATE-APPLY P3-2/P3-3/P3-4`、`CANDIDATE-UI2 P3-2`）。
 - **模型通道现状**：luna 2026-09-14 多次 capacity（首版那次 patch 落盘但尾部报错、返工三次零落盘）；sol 探针也无回包，属 codex 侧不稳、非本地登录问题。supervisor 已由用户切为 `opencode-go/muse-spark-1.3-contributor`（走本窗口），builder 切为 `opencode-go/deepseek-v4.1-flash`（走本窗口），以 `USER_MODEL_OVERRIDE.md` 为准。
 - **本窗口已做准备（暂停前，历史）**：P1-7 改名只读盘点（`index.html` 可见 4 处待改＋`server.py` 兼容 7 处不动）；`data/state.db` 仓根不存在已记账，待核 data_root 真源。工作树未提交未推送（以本节“工作树现状”行为准）。**服务现状：8765 当前无监听**（旧记 PID 12429 已不在，勿再引用该 PID）。
 - **Phase1 基线（继承）**：`docs/pm/PRODUCT_PLAN.md`=V1.3；16 条红字真相=用户自移视频、DB 全 QUEUED；HD-1~9 全=A；Readiness 89/83 未达 90 用户已知开工。Phase1 详情见本文后段各节与文末附录。
@@ -40,19 +54,18 @@
 ## 二、下一步的任务
 
 - **下一步（Next Single Action，按序）**：
-  1. ~~派 supervisor 复检 P0-3~~ **已办（23:31 PASS，P0-3 收口，全 P0 清）**。
-  2. ~~TM 汇总找人一次~~ **已办**：用户 2026-09-14 给分支名 `main`，P0 交付已 commit **c753b15** 并 push `origin/main`。
-  3. ~~P1-2 链~~ **已办（2026-09-15 01:05 supervisor PASS 收口）**：全 P0 清＋P1-2（blocking）达成，当前无未收口 P0。
-  4. **待用户拍板再动**：① P1-2 交付是否 commit/push 到 `main`（给分支名才动）；② 接着做哪个 P1（默认继续 P1-3）。
-  5. P1 顺序（TM 定，理由见「一、当前的工作进展」）：**P1-2（已收口）→ P1-3 → P1-4 → P1-5 → P1-7 → P1-6 → P1-1**（P1-1 真实规模/长视频/61 篇重验证最后跑）。P1-7 改名盘点已备好（`index.html` 可见 4 处待改＋`server.py` 兼容 7 处不动）。
+  1. ~~派 supervisor 复检 P0-3／P1-2~~ **已办**（23:31／01:05 均 PASS）。
+  2. ~~P1-3 链~~ **已办（2026-09-15 08:45 全链收口）**：11 派＋supervisor 复检，`QA-P13-P2-3` CLOSED，当前无未收口 P0/P1。
+  3. **P1-3 交付已提交推送 `main`**（用户已授权：今后 commit/push 默认走 `main`，不再逐次问）。
+  4. **下一个默认做 P1-4**（脱敏摘要复制 HD-2=A，S；用户如要换序一句话即改）。
+  5. P1 顺序（TM 定）：**P1-2（已收口）→ P1-3（已收口）→ P1-4 → P1-5 → P1-7 → P1-6 → P1-1**（P1-1 真实规模/长视频/61 篇重验证最后跑）。P1-7 改名盘点已备好（`index.html` 可见 4 处待改＋`server.py` 兼容 7 处不动）。
   6. 若要真机目检 P0/P1 交付：需先起服务（8765 现无监听，PORT 硬编码；改 `app/` 或 `src/` 后必须重启再验）；**自动化禁点真机主题开关**。
-  7. 经验／neat-freak 收尾只派一次（含 QA 报告「结论」段旧句勘误加注），等用户说收工再派。
+  7. 经验／neat-freak 收尾只派一次，等用户说收工再派。
 - **人要拍什么板（只问大事，小事不问直接推）**：
-  1. ~~P0 交付 commit/push~~ **已办**：用户定 `main`，commit **c753b15**（12 files，+762/−48）已 push `origin/main`。
-  2. ~~P1-2 交付是否提交推送~~ **已办（用户 2026-09-15 明确「main！」）**：commit **92fa77e**（9 files，+3904/−229）已 push `origin/main`。**今后用户已授权：commit/push 默认走 `main`，不再逐次问。**
-  3. ~~下一步做哪块~~ **已决（用户「继续推进」）**：按 Plan 优先级推进 P1；P1-2 已收口，默认下一个 **P1-3**（进度与批量语义修正，S）。
-  4. 是否换主用模型：**已裁定以分工表为准**；要换谁给精确 ID 才改表，我不自切。
-- **待排期 backlog（非阻塞）**：**P2-7**（前端 `/api/retry` 不带 `data_root`，需扩契约，Change B 级，建议与 P1-3 同批）；P1-2 链 P3 共 15 条（首轮 5＋复核二 4＋复核三 3＋复核四 3）＋P0-3 遗留 2×P2（provenance 加性字段、术语残留 `obhint:741`）；QA 报告「结论」段旧句待加注勘误（收尾 neat-freak 办）；22 条 P3 按 V1.3 处置表分流；`data/state.db` 真源待核；P1-7 改名盘点已备好等 builder；benchmark `results/*.log` 19 个保留不删；真实 whisper／真机 UI 未跑（各报告「未覆盖项」已如实标注）。
+  1. ~~P0/P1-2/P1-3 交付 commit/push~~ **已办**：`c753b15`／`92fa77e`／`3af2da7` 均已 push；P1-3 交付本轮提交。**今后默认推 `main`，不再问。**
+  2. ~~下一步做哪块~~ **已决**：按 Plan 优先级推进 P1；P1-3 已收口，**默认下一个 P1-4**。
+  3. 是否换主用模型：**以分工表为准**；要换谁给精确 ID 才改表，我不自切。
+- **待排期 backlog（非阻塞）**：**P1-3 链遗留**——`QA-P13-P2-4-REAPPLY-MUTEX`（运行中 `/api/reapply` 无后端互斥，**既有残留**；修法须把内部调用改 `internal=True` 再上锁，直接加锁会自锁；属局部功能变化，动前判 A/B）×1；code-reviewer 记的 P3（`.upper()` 轻微放宽、`10a4` 源码文本守卫脆性、注释溯源标记、`V25_POSTPASS` receipt 态未入表且**日后改 fail-closed 必须同批决定其归属**、`_recovery_job_read` 硬编码 `interrupted=1`、九处「按 state 归类各写一套」清单）×若干。**P1-2 链 P3 共 15 条**＋**P0-3 遗留 2×P2**（provenance 加性字段、术语残留 `obhint:741`）；22 条 P3 按 V1.3 处置表分流；`data/state.db` 真源待核；benchmark `results/*.log` 19 个保留不删；**真实 whisper／真机 UI 未跑**（各报告「未覆盖项」已如实标注；本链 QA 真机预检标 `NOT_VERIFIED`，未写「真机 QA 已启用」）。
 
 ## 三、注意事项及相关规矩（本项目专用）
 

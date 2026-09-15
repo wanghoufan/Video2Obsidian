@@ -29,6 +29,16 @@ FUNCS = [
     "resumeVocabApplyPoll", "sameDataRoot", "applyVocabCandidates",
     "reapplyPayload", "setCandidateControls", "candidateCheckboxes",
     "candidateGroupCheckboxes", "syncCandidateSelectAll", "loadVocabCandidates",
+    # P1-3 新增/被新断言用到的函数（缺一个就会 ReferenceError → rc=1）
+    "vocabApplyPct", "vocabApplyElapsedText", "vocabApplyStatsText",
+    "vocabApplyLockText", "retryBody",
+    # P1-3/CANDIDATE-UI2 P3-2 范围二选一（安全默认）
+    "recScopeVal", "recScopeLabel", "syncRecScope", "recoverHint",
+    # P1-3/RERUN-PROGRESS P3-4 主进度条无目标不画满
+    "renderProgress", "stageStep",
+    # P1-3 返工（P2-1/P2-2）：批量重试的文案与失败原因透传
+    "retryRootHint", "retryRun", "retryAllFailed", "failedRuns", "isFailedRun",
+    "filenameForRunId",
 ]
 
 
@@ -114,11 +124,38 @@ function route(match, res, method){ ROUTES.push({match: match, res: res, method:
 function tick(){ return new Promise(function(r){ setTimeout(r, 0); }); }
 // refresh 用到的其它函数：桩里只做最小实现（本测试关心的是它的调用时序与 URL）
 var lastLock = null, lastFetchAt = 0, refreshing = false;
+var longInInput = 0;   // 真源码里的模块变量（renderProgress 读它）
 function renderTape(){} function renderRuns(){} function renderLock(){}
-function say(){} function loadVocab(){} function loadPresets(){}
+function loadVocab(){} function loadPresets(){}
+// P1-3：say 要能验（人话提示＝验收点），不再空实现
+var SAYS = [];
+function say(t){ SAYS.push(String(t == null ? "" : t)); }
+// P1-3/P2-2：toast 也记一份（批量重试收尾会 toast）；真实现要 document.body，桩里不做
+var TOASTS = [];
+function toast(t){ TOASTS.push(String(t == null ? "" : t)); }
+// failedRuns / filenameForRunId 读的模块变量（真源码里是 var cache={runs:[]} /
+// var detailsByRun={}，桩里按同结构复现）
+var cache = {runs: []};
+var detailsByRun = {};
+// P1-3/CANDIDATE-UI2 P3-2：recScope 单选桩（只实现被测函数用到的那几种选择器）
+var RADIOS = [{value: "sel", checked: true}, {value: "all", checked: false}];
+var document = {
+  querySelector: function(sel){
+    if(sel.indexOf('input[name="recScope"]:checked') >= 0){
+      for(var i = 0; i < RADIOS.length; i++){ if(RADIOS[i].checked) return RADIOS[i]; }
+      return null;
+    }
+    if(sel.indexOf('input[name="recScope"][value="sel"]') >= 0) return RADIOS[0];
+    return null;
+  },
+  querySelectorAll: function(){ return []; }
+};
 // pollVocabApplyStatus 不返回 promise（fetch 链自带 .catch），必须显式冲刷微任务
 async function poll(){ pollVocabApplyStatus(); await tick(); await tick(); }
 async function flush(){ await tick(); await tick(); }
+// 递归 .then 链（批量重试逐个 fetch→then→advance→step）要多轮冲刷；
+// await 一次 tick 会排空微任务队列，这里多给几轮，避免 node 时序差异
+async function settle(n){ for(var i = 0; i < n; i++){ await tick(); } }
 var FAILS = [];
 function ck(name, cond, extra){
   if(cond){ console.log("PASS " + name); }
@@ -131,6 +168,8 @@ function reset(){
   vocabApplyFailStreak = 0; vocabApplyStartedAt = 0; vocabCandidatesRevision = null;
   effectiveDataRoot = "";   // 真源码里的模块变量（P2-新1）
   FETCH_QUEUE = []; TIMERS = 0; ROUTES = [];
+  SAYS = []; RADIOS = [{value: "sel", checked: true}, {value: "all", checked: false}];
+  TOASTS = []; cache = {runs: []}; detailsByRun = {};
 }
 
 // ------------------------------------------------------------------ S1 本页 job 全程钉住
@@ -503,8 +542,314 @@ async function s7(){
       el("btnCandidateApply").disabled]);
 }
 
+// ---------------- S8 P1-3：无目标不画满 / 运行中参数锁定 / 双空安全默认 / retry 带目录
+async function s8(){
+  // 8a 无目标终态（零目标）：进度条不画满、不画绿满，文案点明零目标
+  reset();
+  renderVocabApplyFinal({state: "done", total: 0, done: 0, imported: 2,
+    rerun_old: false,
+    message: "已导入2条；本次没有可重跑的已完成任务（零目标，未重跑任何稿件）",
+    summary: {success: 0, skipped: 0, failed: 0, total: 0, needs_human: 0, interrupted: 0},
+    stats: {total: 0, done: 0, success: 0, failed: 0, skipped: 0, needs_human: 0,
+            interrupted: 0, counted: 0, balanced: true}});
+  ck("S8a 零目标终态不画满（宽度 0%，旧形态是 100%）",
+     el("candidateApplyFill").style.width === "0%",
+     el("candidateApplyFill").style.width);
+  ck("S8a 零目标终态文案点明「零目标／不画满」",
+     (REC.text["candidateApplyText"] || "").indexOf("零目标") >= 0,
+     REC.text["candidateApplyText"]);
+  ck("S8a 汇总按后端同一口径展示（重跑目标 0 篇）",
+     (REC.text["candidateApplyText"] || "").indexOf("重跑目标 0 篇") >= 0,
+     REC.text["candidateApplyText"]);
+
+  // 8b 对照：真有目标且跑完 → 才允许 100%（证明 8a 不是「永远 0%」的恒真断言）
+  reset();
+  renderVocabApplyFinal({state: "done", total: 4, done: 4, imported: 1,
+    rerun_old: true, message: "已导入1条；重跑成功3篇，跳过1篇",
+    summary: {success: 3, skipped: 1, failed: 0, total: 4, needs_human: 0, interrupted: 0},
+    stats: {total: 4, done: 4, success: 3, failed: 0, skipped: 1, needs_human: 0,
+            interrupted: 0, counted: 4, balanced: true}});
+  ck("S8b 有目标跑完才 100%（对照）",
+     el("candidateApplyFill").style.width === "100%",
+     el("candidateApplyFill").style.width);
+  ck("S8b 失败统计逐条可复算（4=3+1+0+0+0）",
+     (REC.text["candidateApplyText"] || "").indexOf("可复算：4=3+1+0+0+0") >= 0,
+     REC.text["candidateApplyText"]);
+
+  // 8c 运行中：真实进度＋已用时＋可离开＋本次锁定的参数（页面＝实际执行）
+  reset();
+  renderVocabApplyProgress({state: "running", stage: "rerunning", rerun_old: true,
+    total: 4, done: 1, elapsed_seconds: 65, indices_count: 3,
+    current_filename: "a.mp4"});
+  var t8c = REC.text["candidateApplyText"] || "";
+  ck("S8c 运行中按真实进度画 25%",
+     el("candidateApplyFill").style.width === "25%",
+     el("candidateApplyFill").style.width);
+  ck("S8c 显示已用时", t8c.indexOf("已用时 65s") >= 0, t8c);
+  ck("S8c 提示可离开且回来仍能看到进度", t8c.indexOf("可离开本页面") >= 0, t8c);
+  ck("S8c 显示本次锁定的参数（rerun_old＋目标候选数）",
+     t8c.indexOf("本次锁定") >= 0 && t8c.indexOf("目标候选 3 条") >= 0, t8c);
+
+  // 8d 运行中锁定：控件禁用＋写原因；别的批量链跑完（显式 lock=false）也解不开本页的锁
+  reset();
+  vocabApplyRunning = true;
+  setCandidateControls(true, false);
+  ck("S8d 运行中策略/范围/批量入口一律禁用",
+     el("candidateRerunOld").disabled === true
+     && el("candidateOnlyNew").disabled === true
+     && el("candidateSelectAll").disabled === true
+     && el("recScopeSel").disabled === true && el("recScopeAll").disabled === true
+     && el("btnRecTranscribe").disabled === true && el("btnRecReuse").disabled === true
+     && el("btnRecPublish").disabled === true,
+     [el("candidateRerunOld").disabled, el("recScopeSel").disabled]);
+  ck("S8d 运行中就地说清为什么不能改",
+     (REC.text["batchLockHint"] || "").indexOf("已锁定") >= 0,
+     REC.text["batchLockHint"]);
+  ck("S8d lock=false 也解不开运行中的锁（不白等一次后端 409）",
+     el("btnCandidateApply").disabled === true);
+
+  // 8e 终态解除锁定（跑完才能改下一次的参数）
+  reset();
+  vocabApplyRunning = false;
+  setCandidateControls(true, false);
+  ck("S8e 跑完后控件放开、锁定提示清空",
+     el("candidateRerunOld").disabled === false && el("recScopeAll").disabled === false
+     && el("btnRecTranscribe").disabled === false
+     && (REC.text["batchLockHint"] || "") === "",
+     [el("candidateRerunOld").disabled, REC.text["batchLockHint"]]);
+
+  // 8f 策略二选一（重跑老稿／只入库）双空 → 提交前回到安全一侧（只入库）
+  reset();
+  el("inData").value = "/tmp/p13-fake-root";
+  vocabCandidatesRevision = "REV-1";
+  el("candidateRerunOld").checked = false;
+  el("candidateOnlyNew").checked = false;
+  route("/api/vocab/candidates/apply",
+        {status: 202, json: {ok: true, job_id: "job-P"}}, "POST");
+  route("/api/vocab/candidates/apply/status", {status: 200, json: {ok: true, job: {
+      job_id: "job-P", state: "running", stage: "importing", rerun_old: false,
+      data_root: "/tmp/p13-fake-root", total: 0, done: 0}}});
+  applyVocabCandidates();
+  await flush(); await flush();
+  var post8f = lastCall("/api/vocab/candidates/apply", "POST");
+  ck("S8f 双空不提交空语义：明确回到安全一侧（只入库）",
+     el("candidateOnlyNew").checked === true && el("candidateRerunOld").checked === false,
+     [el("candidateOnlyNew").checked, el("candidateRerunOld").checked]);
+  ck("S8f 页面显示与实际执行一致（提交体 rerun_old:false）",
+     !!post8f && post8f.body.indexOf('"rerun_old":false') >= 0, post8f && post8f.body);
+  ck("S8f 双空给人话原因（不静默换语义）",
+     SAYS.join(" | ").indexOf("不能都不选") >= 0, SAYS);
+
+  // 8g 409 锁定回显：把「本次锁住的参数」解析成人话（页面参数＝后台那次）
+  ck("S8g 409 锁定回显解析（rerun_old＋目标候选数）",
+     vocabApplyLockText({locked_params: {rerun_old: true, indices: [0, 1]}})
+       .indexOf("重跑老稿") >= 0
+     && vocabApplyLockText({locked_params: {rerun_old: true, indices: [0, 1]}})
+       .indexOf("目标候选 2 条") >= 0,
+     vocabApplyLockText({locked_params: {rerun_old: true, indices: [0, 1]}}));
+  ck("S8g 没有锁定信息时不编造（回空串）", vocabApplyLockText({}) === "",
+     vocabApplyLockText({}));
+
+  // 8h 范围二选一（recScope）双空 → 回到安全一侧并写人话
+  reset();
+  RADIOS[0].checked = false; RADIOS[1].checked = false;
+  var v8h = recScopeVal();
+  ck("S8h 范围双空回到安全一侧（当前所选任务）",
+     v8h === "sel" && RADIOS[0].checked === true, [v8h, RADIOS[0].checked]);
+  ck("S8h 范围双空给人话原因",
+     (REC.text["recoverHint"] || "").indexOf("不能为空") >= 0,
+     REC.text["recoverHint"]);
+  ck("S8h 范围选定后不被改写（不误伤已有选择）",
+     (function(){ RADIOS[1].checked = true; RADIOS[0].checked = false;
+                  return recScopeVal() === "all"; })());
+
+  // 8i P2-7：/api/retry 必须带本页数据目录（框优先，其次生效目录，都没有才不带）
+  reset();
+  el("inData").value = "/tmp/p12-fake-rootA";
+  var b8i = retryBody("run-1");
+  ck("S8i 重试请求带本页数据目录（旧形态不带）",
+     b8i.data_root === "/tmp/p12-fake-rootA" && b8i.run_id === "run-1", b8i);
+  reset();
+  el("inData").value = "";
+  effectiveDataRoot = DEFAULT_ROOT;
+  ck("S8i 框留空时用生效目录（与 apply 同口径）",
+     retryBody("run-1").data_root === DEFAULT_ROOT, retryBody("run-1"));
+  reset();
+  el("inData").value = "";
+  effectiveDataRoot = "";
+  ck("S8i 两处都没有时不发 data_root（后端按监听目录走旧行为）",
+     !("data_root" in retryBody("run-1")), retryBody("run-1"));
+
+  // 8j 主进度条：无目标（total=0）不画满——哪怕「正在跑这一个」
+  reset();
+  renderProgress({current: {run_id: "r1", filename: "a.mp4", stage: "听写",
+                            stage_started_at: new Date().toISOString()},
+                  queue: {pending: 0, done: 0, failed: 0, total: 0}});
+  ck("S8j 无目标三段全 0%（旧的灰条会满格＝画满）",
+     el("progFillOk").style.width === "0%" && el("progFillFail").style.width === "0%"
+     && el("progFillPending").style.width === "0%",
+     [el("progFillOk").style.width, el("progFillFail").style.width,
+      el("progFillPending").style.width]);
+  ck("S8j 无目标但正在跑：文案仍说明在跑什么（不静默）",
+     (REC.text["progText"] || "").indexOf("正在") >= 0, REC.text["progText"]);
+  // 8j2 对照：真有目标才按实际推进（证明 8j 不是恒 0%）
+  reset();
+  renderProgress({current: null, queue: {pending: 0, done: 3, failed: 1, total: 4}});
+  ck("S8j2 有目标按实际推进（成功 75%／失败 25%）",
+     el("progFillOk").style.width === "75%" && el("progFillFail").style.width === "25%",
+     [el("progFillOk").style.width, el("progFillFail").style.width]);
+}
+
+// ------------- S9 P1-3 返工：批量重试的「能不能离开」文案＋失败原因不再被静默吞掉
+// P2-1 对应 9a/9b（反向证伪：把文案改回「可离开本页面，稍后回来仍能看到结果」→ rc=1）
+// P2-2 对应 9c/9d/9e/9f（反向证伪：noteBad 退回只 badN++、retryBody 去掉本地门 → rc=1）
+var S9_ROOT_A = "/tmp/p12-fake-rootA", S9_ROOT_B = "/tmp/p12-fake-rootB";
+function retryCalls(){
+  var out = [];
+  for(var i = 0; i < REC.calls.length; i++){
+    if(REC.calls[i].method === "POST"
+       && REC.calls[i].url.indexOf("/api/retry") === 0) out.push(REC.calls[i]);
+  }
+  return out;
+}
+function twoFailed(){
+  cache.runs = [{run_id: "run-1", status: "FAILED", source_filename: "a.mp4"},
+                {run_id: "run-2", status: "FAILED", source_filename: "b.mp4"}];
+}
+async function s9(){
+  // 9a 批量重试是**页面内循环**：不许承诺「可离开/后台继续」，必须说「保持本页打开」
+  reset();
+  el("inData").value = S9_ROOT_A;
+  twoFailed();
+  route("/api/retry", {status: 202, json: {ok: true}}, "POST");
+  retryAllFailed();
+  var first = SAYS[SAYS.length - 1] || "";
+  ck("9a 首条文案不承诺可离开（旧形态：可离开本页面，稍后回来仍能看到结果）",
+     first.indexOf("可离开") < 0, first);
+  ck("9a 首条文案明说需保持本页打开（与真实行为逐字对得上）",
+     first.indexOf("需保持本页打开") >= 0 && first.indexOf("不会继续重试") >= 0, first);
+  await settle(6);
+  var all9a = SAYS.join(" | ");
+  ck("9a 逐条进度文案同样不提可离开",
+     all9a.indexOf("可离开") < 0, SAYS);
+  ck("9a 逐条进度文案说清离开的后果（剩余不再排队）",
+     all9a.indexOf("离开则剩余任务不会再排队") >= 0, SAYS);
+  ck("9a 真发出两条重试并报 2/2（文案没换掉实际行为）",
+     retryCalls().length === 2 && all9a.indexOf("已排队 2/2") >= 0,
+     [retryCalls().length, SAYS]);
+
+  // 9b 共用锁定提示（错词重跑/重新成稿/批量重试三链同用）不得替用户承诺能离开
+  reset();
+  vocabApplyRunning = true;
+  setCandidateControls(true, false);
+  var hint9b = REC.text["batchLockHint"] || "";
+  ck("9b 共用锁定提示仍写明锁定范围（三链都成立的真话，不许删）",
+     hint9b.indexOf("已锁定") >= 0 && hint9b.indexOf("本次不改") >= 0
+     && hint9b.indexOf("跑完再改") >= 0, hint9b);
+  ck("9b 共用锁定提示不再代办「可离开」（两条链结论相反）",
+     hint9b.indexOf("可离开") < 0, hint9b);
+  // 9b1 P3-新1：尾句「进度条会显示已用时」只对**错词重跑**成立——重新成稿是同步
+  //      fetch（无进度条）、批量重试只在 say 行里报 n/N（也无已用时），属越界指针。
+  ck("9b1 共用锁定提示不得再指进度条/已用时（只对单链成立的越界指针）",
+     hint9b.indexOf("进度条") < 0 && hint9b.indexOf("已用时") < 0, hint9b);
+  // 9b2 对照：错词重跑那条是**服务端后台任务**（202＋job_id，重载可接管），
+  //     「可离开」属实 → 必须仍在，证明 9a/9b 不是一刀切删掉真话
+  reset();
+  renderVocabApplyProgress({state: "running", stage: "rerunning", rerun_old: true,
+    total: 2, done: 1, elapsed_seconds: 5});
+  ck("9b2 对照：错词重跑进度条仍保留「可离开」（服务端任务，属实）",
+     (REC.text["candidateApplyText"] || "").indexOf("可离开本页面") >= 0,
+     REC.text["candidateApplyText"]);
+
+  // 9c P2-2：跨目录 409（本页新增的拒绝出口）必须把人话原因透出来
+  reset();
+  el("inData").value = S9_ROOT_B;
+  twoFailed();
+  route("/api/retry", {status: 409, json: {ok: false,
+    error: "这次重试针对的是另一个数据目录（零执行，未重排任何任务）；"
+         + "请先核对页面上方的数据目录与当前监听的目录是否一致，避免误操作别的目录"}},
+    "POST");
+  retryAllFailed();
+  await settle(6);
+  var say9c = SAYS.join(" | "), hint9c = REC.text["recoverHint"] || "";
+  ck("9c 失败不再只显示一个数字（收尾说「失败 N 个」并指向原因）",
+     say9c.indexOf("失败 2 个") >= 0 && say9c.indexOf("原因见下方提示") >= 0, SAYS);
+  ck("9c 后端人话原因落到首屏恢复区（旧形态零回显）",
+     hint9c.indexOf("另一个数据目录") >= 0, hint9c);
+  ck("9c 回显不含真实数据目录（D-12，前后端都不吐路径）",
+     hint9c.indexOf(S9_ROOT_B) < 0 && say9c.indexOf(S9_ROOT_B) < 0,
+     [hint9c, say9c]);
+
+  // 9d 404（任务不存在）同样透出，不因代码不同而静默
+  reset();
+  el("inData").value = S9_ROOT_A;
+  cache.runs = [{run_id: "run-1", status: "FAILED"}];
+  route("/api/retry", {status: 404, json: {ok: false, error: "任务不存在，请刷新后重试"}},
+        "POST");
+  retryAllFailed();
+  await settle(6);
+  ck("9d 404 也回显原因（不是只看到「失败请求 1」）",
+     (REC.text["recoverHint"] || "").indexOf("任务不存在") >= 0,
+     REC.text["recoverHint"]);
+
+  // 9e 部分成功：成功的照常计入已排队，失败的原因照样透出（互不顶掉）
+  reset();
+  el("inData").value = S9_ROOT_A;
+  cache.runs = [{run_id: "run-1", status: "FAILED"},
+                {run_id: "run-2", status: "FAILED"},
+                {run_id: "run-3", status: "FAILED"}];
+  FETCH_QUEUE.push({status: 202, json: {ok: true}});
+  FETCH_QUEUE.push({status: 409, json: {ok: false,
+    error: "这次重试针对的是另一个数据目录（零执行，未重排任何任务）"}});
+  FETCH_QUEUE.push({status: 202, json: {ok: true}});
+  retryAllFailed();
+  await settle(8);
+  ck("9e 部分成功：已排队 2/3 且失败原因仍回显",
+     SAYS.join(" | ").indexOf("已排队 2/3") >= 0
+     && (REC.text["recoverHint"] || "").indexOf("另一个数据目录") >= 0,
+     [SAYS, REC.text["recoverHint"]]);
+
+  // 9f P2-2 本地前置门：框里是相对路径 → 整批零请求（旧形态 N 条都白撞后端 400）
+  reset();
+  el("inData").value = "relative/x";
+  effectiveDataRoot = "";
+  twoFailed();
+  retryAllFailed();
+  await settle(4);
+  ck("9f 非法目录：一个请求都不发（白跑被本地拦下）",
+     retryCalls().length === 0, retryCalls().length);
+  ck("9f 非法目录：人话口径与后端 400 同句（数据目录须为绝对路径）",
+     SAYS.join(" | ").indexOf("数据目录须为绝对路径") >= 0
+     && (REC.text["recoverHint"] || "").indexOf("数据目录须为绝对路径") >= 0,
+     [SAYS, REC.text["recoverHint"]]);
+  ck("9f retryBody 非法目录回 null（不被当成「不带 data_root」放行）",
+     retryBody("run-1") === null, retryBody("run-1"));
+
+  // 9g 单条重试同一道门；9h 对照：目录合法时照常发，不误伤正常路径
+  reset();
+  el("inData").value = "relative/x";
+  effectiveDataRoot = "";
+  var n9g = REC.calls.length;
+  retryRun("run-1");
+  await settle(2);
+  ck("9g 单条重试遇相对目录：不发请求且给人话",
+     REC.calls.length === n9g && SAYS.join(" | ").indexOf("重试未发起") >= 0,
+     [REC.calls.length - n9g, SAYS]);
+
+  reset();
+  el("inData").value = S9_ROOT_A;
+  route("/api/retry", {status: 202, json: {ok: true}}, "POST");
+  retryRun("run-1");
+  await settle(3);
+  ck("9h 对照：目录合法时单条重试照常 POST 且带 data_root",
+     retryCalls().length === 1
+     && retryCalls()[0].body.indexOf('"data_root":"' + S9_ROOT_A + '"') >= 0,
+     retryCalls().map(function(c){ return c.body; }));
+}
+
 (async function(){
   await s1(); await s2(); await s3(); await s4(); await s5(); await s6(); await s7();
+  await s8(); await s9();
   if(FAILS.length){ console.log("FRONT FAIL " + FAILS.length + ": " + FAILS.join(" | "));
                     process.exit(1); }
   console.log("FRONT ALL PASS");

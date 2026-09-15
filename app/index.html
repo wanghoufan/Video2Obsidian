@@ -232,7 +232,8 @@ header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
         <button class="mini" id="btnRecReuse" title="范围见下方「重新成稿范围」；只重排整理与成稿，whisper 0次，库内改过的笔记跳过、已发布的不覆盖">从已有文字重新成稿（范围：当前所选任务；whisper 0次）</button>
         <button class="mini" id="btnRecPublish" title="范围：当前所选任务；只重新入库，whisper 0次，只写不存在的新笔记，不覆盖">仅重新入库（范围：当前所选任务；whisper 0次）</button>
       </div>
-      <div class="hint" id="recScopeRow">重新成稿范围：<label><input type="radio" name="recScope" value="sel" checked> 当前所选任务</label> <label><input type="radio" name="recScope" value="all"> 全部已完成任务</label></div>
+      <div class="hint" id="recScopeRow">重新成稿范围：<label><input type="radio" id="recScopeSel" name="recScope" value="sel" checked> 当前所选任务</label> <label><input type="radio" id="recScopeAll" name="recScope" value="all"> 全部已完成任务</label></div>
+      <div class="hint warn" id="batchLockHint"></div>
       <div class="hint" id="recoverHint"></div>
     </div>
     <div id="runsHead" class="hint" style="display:none"></div>
@@ -826,10 +827,13 @@ function renderProgress(w){
   if(isNaN(total))total=pending+done+failed;
   if(total<0)total=0;
   // UX2-P1-8：分段进度（绿成功／红失败／灰排队），失败不再计入成功，100%仅当排队0且失败0
+  // P1-3/RERUN-PROGRESS P3-4：total=0（无候选/未开始/空闲）时三段一律 0%——
+  // 空态不许画满，更不许画成绿色 100% 让人误认恢复成功；「当前在跑哪一个」
+  // 由下方阶段条（#stageBarWrap）与文案说明，不靠主条满格示意。
   var okPct=total>0?Math.round(done*100/total):0;
   var failPct=total>0?Math.round(failed*100/total):0;
   if(okPct+failPct>100){okPct=Math.min(okPct,100);failPct=Math.max(0,100-okPct);}
-  var pendPct=Math.max(0,100-okPct-failPct);
+  var pendPct=total>0?Math.max(0,100-okPct-failPct):0;
   el("progFillOk").style.width=okPct+"%";
   el("progFillFail").style.width=failPct+"%";
   el("progFillPending").style.width=pendPct+"%";
@@ -1081,11 +1085,34 @@ function copyText(t, opts){
     navigator.clipboard.writeText(t).then(done,fallback);
   }else fallback();
 }
+// P2-2：数据目录非法时的本地人话——与后端 400（`数据目录须为绝对路径，请点浏览重选`）
+// 及 apply 侧同一口径，只此一处写死，不另造第二套说法。
+function retryRootHint(){
+  return "数据目录须为绝对路径，请点「浏览」重选（或清空该框改用默认外置测试目录）";
+}
+// P1-3/P2-7：送 /api/retry 的请求体——带上**本页生效数据目录**（框优先，其次
+// 后端学到的生效目录）。后端按同一 realpath 校验，跨目录一律 409 人话零执行，
+// 不再让「重试」悄悄作用到当前监听目录。
+// P2-2：本地先按 isAbsRoot 拦一遍明显非法的目录（相对路径/非字符串）：这种值
+// 到后端必然 400，白跑一趟。返回 null＝本地拦下，由调用方出人话、不发请求。
+// 两处都没有值＝沿用旧行为（不带 data_root，后端按当前监听目录走），不算非法。
+function retryBody(run_id){
+  var typed=String(dataRoot()||"").trim();
+  var learned=String(effectiveDataRoot||"").trim();
+  var root=typed||learned;          // 框优先，其次生效目录；只看「有值」的那一个
+  if(root&&!isAbsRoot(root))return null;
+  var p={run_id:run_id};
+  if(root)p.data_root=root;
+  return p;
+}
 function retryRun(run_id){
   var fn=filenameForRunId(run_id);
+  // P2-2：非法目录本地就拦，不发这个必然被拒的请求，并把原因说给用户听
+  var body=retryBody(run_id);
+  if(!body){say("重试未发起："+retryRootHint()+"。","err");return;}
   say("正在重试 "+fn+"…");
   fetch("/api/retry",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({run_id:run_id})})
+    body:JSON.stringify(body)})
   .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
   .then(function(x){
     if(x.code===202){say("已重新排队："+fn+"，只重跑这一个","ok");toast("已重新排队："+fn,"ok");}
@@ -1139,26 +1166,62 @@ function publishOnlyRetry(run_id){
 }
 // UX2-P1-2/FR-14：一键重试全部失败（逐个调已有 /api/retry，幂等；前端给“N/total 已排队”进度）
 // 唯一入口＝首屏 #recoverBox「重新转写全部失败」（范围＝全部失败任务）；后端 /api/retry 未改
+// P2-1：这是**页面内循环**——「已排队」只在这一次请求成功后成立；离开/刷新页面不会把
+// 剩下的任务继续入队，所以文案只承诺「需保持本页打开」，绝不写「后台继续/可离开」。
+// P2-2：每个失败都把后端人话原因透出来（首个原因落首屏恢复区），不再只报一个失败数字。
 function retryAllFailed(){
   var list=failedRuns();
-  if(!list.length){say("当前没有失败任务可重试。","warn");return;}
+  // P1-3 零目标：给明确人话，不让用户以为“按钮没反应”
+  if(!list.length){say("当前没有失败任务可重试（零目标，未排队任何任务）。","warn");return;}
+  // P2-2：整批共用同一个数据目录，非法就在本地拦下——不让 N 个请求都白撞后端 400
+  if(!retryBody(list[0].run_id)){
+    say("本批重试未发起："+retryRootHint()+"。","err");
+    recoverHint(retryRootHint()+"；本次没有重新排队任何任务。","err");
+    return;
+  }
   if(!confirm("重试全部失败 "+list.length+" 个吗？\n会逐个重新排队（幂等，成功任务不受影响）。"))return;
-  var total=list.length, okN=0, badN=0, i=0;
-  say("正在重试全部失败：0/"+total+" 已排队…");
+  var total=list.length, okN=0, badN=0, i=0, badWhy="";
+  // P1-3：批量重试窗口内冻结本次执行参数（目标集合＝当时这份失败清单）
+  setCandidateControls(false,true);
+  say("正在重试全部失败：0/"+total+" 已排队…需保持本页打开：离开或刷新后，剩下没排上的不会继续重试（已排上的会照常跑完）。");
+  // P2-2：失败原因不再只堆一个数字——留首个后端人话，收尾回显到首屏恢复区
+  function noteBad(why){
+    badN++;
+    why=String(why||"").trim()||"请求没送达（网络中断）";
+    if(!badWhy)badWhy=why;
+  }
+  function advance(){
+    i++;
+    say("正在重试全部失败："+i+"/"+total+" 已排队…（需保持本页打开，离开则剩余任务不会再排队）");
+    step();
+  }
   function step(){
     if(i>=total){
-      say("重试全部失败完成：已排队 "+okN+"/"+total+(badN?("，失败请求 "+badN):"")+"。","ok");
+      if(badN){
+        say("重试全部失败完成：已排队 "+okN+"/"+total+"，失败 "+badN+" 个（原因见下方提示）。","warn");
+        recoverHint("本批有 "+badN+" 个没排上（首个原因："+badWhy+"）。这些任务没有被重新排队，可修正后重试。","warn");
+      }else say("重试全部失败完成：已排队 "+okN+"/"+total+"。","ok");
       toast("已排队 "+okN+"/"+total+" 个失败任务","ok");
+      setCandidateControls(true,false);
       refresh();
       return;
     }
     var rid=list[i].run_id;
+    var body=retryBody(rid);
+    if(!body){   // 中途目录被改成非绝对路径：本地拦，不白跑请求（P2-2）
+      noteBad(retryRootHint()+"（本次未重排）");
+      advance();
+      return;
+    }
     fetch("/api/retry",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({run_id:rid})})
+      body:JSON.stringify(body)})
     .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
-    .then(function(x){if(x.code===202)okN++;else badN++;})
-    .catch(function(){badN++;})
-    .then(function(){i++;say("正在重试全部失败："+i+"/"+total+" 已排队…");step();});
+    .then(function(x){
+      if(x.code===202)okN++;
+      else noteBad((x.o&&x.o.error)||("请求被拒（HTTP "+x.code+"）"));
+    })
+    .catch(function(){noteBad("");})
+    .then(advance);
   }
   step();
 }
@@ -1202,15 +1265,20 @@ function reapplyOne(run_id){
 // FR-14/D-19：批量「从已有文字重新成稿」（范围＝全部已完成任务）的唯一入口是首屏 #recoverBox 的范围选择
 function reapplyAll(){
   if(!confirm("从已有文字重新成稿：范围＝全部已完成任务。\nwhisper 0次（只重排整理与成稿，原文不动）；你在库内改过的笔记会被跳过，已发布的笔记不覆盖。"))return;
-  say("正在全部重跑…");
+  // P1-3/RERUN-PROGRESS P3-6（只做提示部分，不做强制取消）：这条是**同步**重跑，
+  // 本页会一直等到跑完，所以不写「回来能看到本次汇总」，只承诺「跑完不丢、可刷新看状态」。
+  say("正在全部重跑…（本页会等到跑完；也可离开页面，后台会继续跑完，回来刷新即可看任务状态）");
+  // P1-3：批量重跑窗口内冻结本次执行参数（范围＝全部已完成任务、目标集合＝当时快照）
+  setCandidateControls(false,true);
   fetch("/api/reapply",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify(reapplyPayload({all:true}))})
   .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
   .then(function(x){
     if(x.code===200){say(String((x.o&&x.o.message)||"全部重跑完成"),"ok");toast(String((x.o&&x.o.message)||"全部重跑完成"),"ok");}
     else say("全部重跑失败："+((x.o&&x.o.error)||x.code),"err");
+    setCandidateControls(true,false);
     refresh();
-  }).catch(function(e){say("全部重跑请求失败："+e,"err");});
+  }).catch(function(e){say("全部重跑请求失败："+e,"err");setCandidateControls(true,false);});
 }
 var loadedVocabEntries=[];
 var vocabGroupLabels={programming:"预置-编程",crypto:"预置-币圈",finance:"预置-金融",user:"我自己加的"};
@@ -1267,11 +1335,29 @@ var effectiveDataRoot="";
 // R2：轮询容错——单次/短暂失败不停表；连续失败或超时上限才停，且必须给人话提示。
 var vocabApplyFailStreak=0,vocabApplyStartedAt=0;
 var VOCAB_APPLY_MAX_FAIL=8,VOCAB_APPLY_MAX_MS=10*60*1000;
-function setCandidateControls(on){
-  el("btnCandidateApply").disabled=!on||vocabApplyRunning;
-  el("candidateSelectAll").disabled=!on;
-  el("candidateRerunOld").disabled=!on;
-  el("candidateOnlyNew").disabled=!on;
+function setCandidateControls(on, lock){
+  // P1-3/RERUN-PROGRESS P3-5 运行中参数锁定：批量任务跑起来后，本次执行参数
+  // （范围、策略入口、rerun_old、目标集合）一律冻结——控件禁用＋就地写明原因，
+  // 后端对同窗口内的变更请求也会 409 人话拒绝（两层，谁都别想静默换参数）。
+  // 锁定判定 = 显式锁定 or 本页这次错词重跑仍在跑（取或）：别的批量链跑完时
+  // 传 lock=false 也解不开正在跑的错词重跑的锁（否则控件会先放开、白等一次 409）。
+  var locked=!!lock||!!vocabApplyRunning;
+  el("btnCandidateApply").disabled=!on||locked;
+  el("candidateSelectAll").disabled=!on||locked;
+  el("candidateRerunOld").disabled=!on||locked;
+  el("candidateOnlyNew").disabled=!on||locked;
+  candidateCheckboxes().forEach(function(c){c.disabled=locked;});
+  candidateGroupCheckboxes().forEach(function(c){c.disabled=locked;});
+  el("recScopeSel").disabled=locked;
+  el("recScopeAll").disabled=locked;
+  el("btnRecTranscribe").disabled=locked;
+  el("btnRecReuse").disabled=locked;
+  el("btnRecPublish").disabled=locked;
+  // P2-1：这句由「服务端后台任务」（错词重跑/重新成稿）与「页面内循环」（批量重试）
+  // 共用，两边的“能不能离开/有没有进度条”结论都相反，所以这里**只说锁定这件事**（对
+  // 三条链都成立），不承诺离开、也不指进度条；每条链自己的 say/进度行才写它成立与否
+  // （错词重跑那条可离开＋已用时是真的，见 renderVocabApplyProgress；P3-新1）。
+  el("batchLockHint").textContent=locked?"批量任务进行中：本次执行参数（范围、策略、rerun_old、目标集合）已锁定，本次不改，跑完再改。":"";
 }
 function loadVocabCandidates(){
   var q="/api/vocab/candidates";
@@ -1284,7 +1370,20 @@ function loadVocabCandidates(){
     vocabCandidatesRevision=(o.candidates_revision&&o.candidates_revision!=="absent")?o.candidates_revision:null;
     // P2-新1：同一份回包既给版本也给生效目录——两者同源，保证「能提交」即「查得到进度」
     if(o.data_root)effectiveDataRoot=String(o.data_root);
-    if(!o.has_candidates){box.innerHTML='<div class="hint">暂无待审候选，去跑一次AI审查生成清单（找编排者要提示词）</div>';setCandidateControls(false);all.checked=false;return;}
+    // P1-3/CANDIDATE-APPLY P3-4：清单**缺失**（还没生成过）与**腐坏**（有文件但读不出）
+    // 必须分开说——腐坏不能被塞进“暂无待审候选”把证据藏起来。
+    if(!o.has_candidates){
+      var cstate=String(o.candidates_state||"");
+      var cmsg=String(o.candidates_state_message||"");
+      if(cstate==="corrupt"){
+        box.innerHTML='<div class="hint err">'+esc(cmsg||"待审清单文件损坏或格式不对（读不出来）：请重新跑一次 AI 审查覆盖它；损坏内容不会被应用，也不会重跑任何稿件。")+'</div>';
+      }else if(cstate==="missing"){
+        box.innerHTML='<div class="hint">'+esc(cmsg||"还没有待审清单（文件不存在）：先跑一次 AI 审查生成清单。")+'</div>';
+      }else{
+        box.innerHTML='<div class="hint">暂无待审候选，去跑一次AI审查生成清单（找编排者要提示词）</div>';
+      }
+      setCandidateControls(false);all.checked=false;return;
+    }
     var labels={high:"高置信度",medium:"中置信度",low:"低置信度"}, h="";
     ["high","medium","low"].forEach(function(level){
       var items=(o.candidates&&o.candidates[level])||[];
@@ -1318,28 +1417,88 @@ function vocabApplySetText(text,cls){
 function renderVocabApplyProgress(s){
   el("candidateApplyProgress").style.display="";
   var total=Number(s.total||0),done=Number(s.done||0);
-  var pct=total>0?Math.min(100,Math.floor(done*100/total)):0;
   el("candidateApplyFill").style.background="var(--green)";
-  el("candidateApplyFill").style.width=pct+"%";
+  el("candidateApplyFill").style.width=vocabApplyPct(s)+"%";
+  var lock=vocabApplyLockText(s);
   if(s.stage==="rerunning"&&total>0){
-    vocabApplySetText("已处理 "+done+"/"+total+(s.current_filename?"（当前："+s.current_filename+"）":""));
+    vocabApplySetText("已处理 "+done+"/"+total+(s.current_filename?"（当前："+s.current_filename+"）":"")
+      +vocabApplyElapsedText(s)+lock+" · 可离开本页面，稍后回来仍能看到进度（本版不提供中途强制取消）");
   }else{
-    vocabApplySetText(s.rerun_old===false?"正在导入词库（老稿不动）…":"正在导入错词并准备重跑…");
+    vocabApplySetText((s.rerun_old===false?"正在导入词库（老稿不动）…":"正在导入错词并准备重跑…")
+      +vocabApplyElapsedText(s)+lock+" · 可离开本页面，稍后回来仍能看到进度");
   }
+}
+// P1-3/RERUN-PROGRESS P3-4「无目标不画 100%」：进度百分比只按**本次真实重跑目标**
+// 算。没有目标（total<=0：没勾候选/没可重跑稿件/只入库不重跑）时一律 0%，
+// 绝不画满 100% 让用户误以为“都恢复成功了”。
+function vocabApplyPct(s){
+  var total=Number((s&&s.total)||0);
+  if(!(total>0))return 0;
+  var done=Number((s&&s.done)||0);
+  return Math.max(0,Math.min(100,Math.floor(done*100/total)));
+}
+// P1-3（RERUN-PROGRESS P3-6 的「部分做」）：长任务显示已用时＋可离开提示；
+// 后端已给 elapsed_seconds，缺失时按 started_at 自算，都没有就不显示。
+function vocabApplyElapsedText(s){
+  var sec=Number((s&&s.elapsed_seconds)||0);
+  if(!(sec>0)){
+    var t0=Date.parse(String((s&&s.started_at)||""));
+    if(!isNaN(t0))sec=Math.max(0,Math.round((Date.now()-t0)/1000));
+  }
+  return sec>0?(" · 已用时 "+sec+"s"):"";
+}
+// P1-3/CANDIDATE-APPLY P3-2：终态统计用后端同一口径（stats 五桶），
+// 页面不再自己另算一套 —— 前端展示与后端汇总必须能对上。
+function vocabApplyStatsText(s){
+  var st=(s&&s.stats)||null;
+  var sum=(s&&s.summary)||{};
+  var ok=Number((st?st.success:sum.success)||0);
+  var skip=Number((st?st.skipped:sum.skipped)||0);
+  var bad=Number((st?st.failed:sum.failed)||0);
+  var human=Number((st?st.needs_human:sum.needs_human)||0);
+  var intr=Number((st?st.interrupted:sum.interrupted)||0);
+  var total=Number((st?st.total:sum.total)||0);
+  var txt="重跑目标 "+total+" 篇：成功 "+ok+"，跳过 "+skip+"，失败 "+bad;
+  if(human)txt+="，待人工 "+human;
+  if(intr)txt+="，中断 "+intr;
+  if(total>0&&ok+skip+bad+human+intr===total)txt+="（可复算："+total+"="+ok+"+"+skip+"+"+bad+"+"+human+"+"+intr+"）";
+  return txt;
+}
+// P1-3/RERUN-PROGRESS P3-5「页面参数＝实际执行参数」：把**本次锁住的那套参数**
+// 写成一句人话（rerun_old ＋ 目标候选数），而不是用户此刻控件上的值。
+// 两个来源同口径：status 的 rerun_old/indices_count；409 的 locked_params。
+function vocabApplyLockText(s){
+  var raw=(s&&s.locked_params)?s.locked_params:null;
+  var rerun=raw?(raw.rerun_old):(s?s.rerun_old:undefined);
+  if(rerun!==true&&rerun!==false)return "";
+  var n=null;
+  if(raw&&raw.indices)n=raw.indices.length;
+  else if(!raw&&s&&s.indices_count!=null&&!isNaN(Number(s.indices_count)))n=Number(s.indices_count);
+  return "（本次锁定："+(rerun?"重跑老稿":"只入库、不重跑老稿")
+    +(n==null?"":("，目标候选 "+n+" 条"))+"）";
 }
 function renderVocabApplyFinal(s){
   el("candidateApplyProgress").style.display="";
   var sum=s.summary||{};
   if(s.state==="failed"){
     el("candidateApplyFill").style.background="var(--red)";
-    el("candidateApplyFill").style.width="100%";
-    vocabApplySetText(String(s.error||s.message||"处理失败，请重试"),"err");
+    // 失败也按真实进度画，不再硬拉满 100%（无目标时就是 0%）
+    el("candidateApplyFill").style.width=vocabApplyPct(s)+"%";
+    vocabApplySetText(String(s.error||s.message||"处理失败，请重试")+vocabApplyElapsedText(s),"err");
     return;
   }
   el("candidateApplyFill").style.background="var(--green)";
-  el("candidateApplyFill").style.width="100%";
-  var msg=String(s.message||("完成：导入"+(s.imported||0)+"条；重跑成功"+(sum.success||0)+"篇/跳过"+(sum.skipped||0)+"篇/失败"+(sum.failed||0)+"篇"));
-  vocabApplySetText(msg,(sum.failed||0)>0?"warn":"ok");
+  el("candidateApplyFill").style.width=vocabApplyPct(s)+"%";
+  var msg=String(s.message||("完成：导入"+(s.imported||0)+"条"));
+  var statsTxt=vocabApplyStatsText(s);
+  if(msg.indexOf("重跑目标")<0)msg+=" · "+statsTxt;
+  if(!(Number(s.total||0)>0)&&msg.indexOf("零目标")<0){
+    msg+="（本次没有需要重跑的稿件，进度条不画满，避免误认为“全部恢复成功”）";
+  }
+  msg+=vocabApplyElapsedText(s);
+  // 严重度与展示同口径：优先读后端 stats.failed，缺了才回落 summary.failed
+  var failN=Number((s.stats&&s.stats.failed!=null)?s.stats.failed:((sum&&sum.failed)||0));
+  vocabApplySetText(msg,failN>0?"warn":"ok");
   var det=s.details||[];
   if(det.length){
     var lines=[];det.forEach(function(d){lines.push((d.accepted?'保留':'拒收')+'：'+(d.wrong||('索引'+d.index))+(d.right?' → '+d.right:'')+(d.reason?'（'+d.reason+'）':''));});
@@ -1365,6 +1524,8 @@ function vocabApplyStatusQuery(){
 function vocabApplyDropPoll(reason){
   vocabApplyStopPoll();vocabApplyRunning=false;
   el("btnCandidateApply").disabled=false;
+  // P1-3：本次任务已不在跑 → 解除参数锁定（按候选清单是否真的读到了决定可控性）
+  setCandidateControls(candidateCheckboxes().length>0);
   if(reason)vocabApplySetText(reason,"warn");
 }
 // P2-三1：任何“接管不了/查不到”的出口都必须复原按钮并给人话，
@@ -1377,6 +1538,8 @@ function vocabApplyFinish(s){
   vocabApplyJobId=(s&&s.job_id)||vocabApplyJobId;
   vocabApplyStopPoll();vocabApplyRunning=false;
   el("btnCandidateApply").disabled=false;
+  // P1-3：终态即解除参数锁定（下一次提交可以改范围/rerun_old/目标集合）
+  setCandidateControls(candidateCheckboxes().length>0);
   renderVocabApplyFinal(s);
   loadVocab();loadVocabCandidates();refresh();
 }
@@ -1392,6 +1555,8 @@ function vocabApplyNotePollFailure(err){
     return;  // 单次/短暂失败不停表，继续轮询
   }
   vocabApplyStopPoll();vocabApplyRunning=false;el("btnCandidateApply").disabled=false;
+  // P1-3：本页不再推进这次任务 → 解除参数锁定，让用户能改参数/重提交
+  setCandidateControls(candidateCheckboxes().length>0);
   // M4：停表原因文案必须准确（连续失败 vs 累计超时）
   var why=(vocabApplyFailStreak>=VOCAB_APPLY_MAX_FAIL)
     ? ("进度读取连续失败"+vocabApplyFailStreak+"次")
@@ -1433,6 +1598,8 @@ function pollVocabApplyStatus(){
     vocabApplyFailStreak=0;
     if(s.state==="running"){
       vocabApplyRunning=true;el("btnCandidateApply").disabled=true;
+      // P1-3：接管到进行中的任务 → 同样冻结本次执行参数
+      setCandidateControls(true);
       renderVocabApplyProgress(s);
       vocabApplyStartTimer();
       return;
@@ -1482,6 +1649,8 @@ function resumeVocabApplyPoll(){
     if(s.state==="running"){
       vocabApplyJobId=s.job_id||vocabApplyJobId;
       vocabApplyRunning=true;el("btnCandidateApply").disabled=true;
+      // P1-3：接管到进行中的任务 → 同样冻结本次执行参数
+      setCandidateControls(true);
       vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
       renderVocabApplyProgress(s);
       vocabApplyStartTimer();
@@ -1501,7 +1670,15 @@ function sameDataRoot(a,b){
 }
 function applyVocabCandidates(){
   var ids=candidateCheckboxes().filter(function(c){return c.checked;}).map(function(c){return Number(c.getAttribute("data-candidate-index"));});
-  if(!ids.length){el("vCandidate").textContent="先勾选至少一条待审候选";el("vCandidate").className="vhint err";return;}
+  // P1-3/CANDIDATE-APPLY P3-3 零目标：给明确人话（不是“按钮没反应”，也不建空任务）
+  if(!ids.length){
+    if(!candidateCheckboxes().length){
+      el("vCandidate").textContent="当前没有可勾选的待审候选（零目标，未执行任何导入与重跑）：先跑一次 AI 审查生成清单，或点「刷新」重读。";
+    }else{
+      el("vCandidate").textContent="没有勾选任何待审候选（零目标，未执行任何导入与重跑）：请先勾选至少一条再点「错词重跑」。";
+    }
+    el("vCandidate").className="vhint err";return;
+  }
   if(!vocabCandidatesRevision){
     el("vCandidate").textContent="候选清单还没读到版本，先点「刷新」重载待审清单再提交（防应用到错的候选）";
     el("vCandidate").className="vhint err";return;
@@ -1518,26 +1695,39 @@ function applyVocabCandidates(){
     el("vCandidate").textContent="数据目录须为绝对路径，请点「浏览」重选（或清空该框改用默认外置测试目录）再提交";
     el("vCandidate").className="vhint err";return;
   }
+  // P1-3/CANDIDATE-UI2 P3-2：策略二选一（重跑老稿／只入库）**不允许双空就提交**。
+  // 双空在语义上等于「只入库」但页面上看不出范围，容易被当成「没选=照旧重跑」；
+  // 这里明确回到安全一侧（只入库＝不重跑、不动库内笔记）并写人话，绝不静默换语义。
+  if(!el("candidateRerunOld").checked&&!el("candidateOnlyNew").checked){
+    el("candidateOnlyNew").checked=true;
+    say("「重跑老稿／只入库」不能都不选，已回到安全一侧：只入库（不重跑，不动库内笔记）。","warn");
+  }
   var rerunOld=el("candidateRerunOld").checked;
   if(!confirm(rerunOld?"导入所选错词并重跑全部已完成任务吗？\n转写0次，改过的笔记会按 No-Clobber 跳过。":"只导入所选错词，不重跑老稿吗？\n老稿保持不动，新视频会自动应用。"))return;
   el("btnCandidateApply").disabled=true;vocabApplyRunning=true;
   vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
   vocabApplyJobId=null;
   el("vCandidate").textContent="";el("vCandidate").className="vhint";
-  renderVocabApplyProgress({state:"running",stage:"importing",rerun_old:rerunOld,total:0,done:0});
+  setCandidateControls(true);   // P1-3：提交即冻结本次执行参数（范围/rerun_old/目标集合）
+  // P1-3：提交即冻结本次执行参数；首帧就把「本次锁定的目标集合」按实际提交的
+  // 条数画出来（页面显示＝实际执行，不等后端回包才开始一致）。
+  renderVocabApplyProgress({state:"running",stage:"importing",rerun_old:rerunOld,total:0,done:0,started_at:new Date().toISOString(),indices_count:ids.length});
   fetch("/api/vocab/candidates/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(reapplyPayload({indices:ids,rerun_old:rerunOld,candidates_revision:vocabCandidatesRevision,data_root:submitRoot}))})
   .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
   .then(function(x){
     var o=x.o||{};
     if(x.code===202){vocabApplyJobId=o.job_id||null;vocabApplyStartTimer();pollVocabApplyStatus();return;}
     if(x.code===409&&o.running){   // 已有任务在跑：先落人话再接管（接管失败也必须留话，P2-三1）
-      vocabApplySetText(String(o.error||"已有一次任务在进行中，请等它跑完再试"),"warn");
+      // P1-3/P3-5：把「本次锁住的参数」一并回显，页面参数与实际执行的那次一致
+      vocabApplySetText(String(o.error||"已有一次任务在进行中，请等它跑完再试")+vocabApplyLockText(o),"warn");
       resumeVocabApplyPoll();return;
     }
     vocabApplyRunning=false;el("btnCandidateApply").disabled=false;
+    setCandidateControls(candidateCheckboxes().length>0);
     vocabApplySetText(String(o.error||o.message||("处理失败："+x.code)),"err");
   }).catch(function(e){
     vocabApplyRunning=false;el("btnCandidateApply").disabled=false;
+    setCandidateControls(candidateCheckboxes().length>0);
     vocabApplySetText("错词重跑请求失败："+e,"err");
   });
 }
@@ -1926,12 +2116,22 @@ el("clearModal").onclick=function(e){if(e.target===el("clearModal"))el("clearMod
 // FR-14 统一恢复入口（首屏可见；三种后果＋作用范围＋whisper成本；详情仅留当前任务上下文快捷）
 function recoverHint(t,cls){el("recoverHint").textContent=t;el("recoverHint").className="hint "+(cls||"");}
 // FR-14/D-19：批量入口唯一——「重新转写全部失败」与「重新成稿（范围＝全部已完成）」都只在本框内选择范围
+// P1-3/CANDIDATE-UI2 P3-2：范围二选一**不允许双空**——被清空时回到安全一侧
+// （「当前所选任务」＝不误伤全库），并把原因写成页面人话，绝不静默按别的范围执行。
 function recScopeVal(){
   var n=document.querySelector('input[name="recScope"]:checked');
-  return n?n.value:"sel";
+  if(n)return n.value;
+  var safe=document.querySelector('input[name="recScope"][value="sel"]');
+  if(safe)safe.checked=true;
+  recoverHint("重新成稿范围不能为空，已回到安全的一侧：当前所选任务（不会动到全库）。","warn");
+  return "sel";
 }
 function recScopeLabel(){return recScopeVal()==="all"?"全部已完成任务":"当前所选任务";}
 function syncRecScope(){
+  if(!document.querySelector('input[name="recScope"]:checked')){
+    var safe=document.querySelector('input[name="recScope"][value="sel"]');
+    if(safe)safe.checked=true;
+  }
   el("btnRecReuse").textContent="从已有文字重新成稿（范围："+recScopeLabel()+"；whisper 0次）";
 }
 Array.prototype.forEach.call(document.querySelectorAll('input[name="recScope"]'),function(n){n.onchange=syncRecScope;});

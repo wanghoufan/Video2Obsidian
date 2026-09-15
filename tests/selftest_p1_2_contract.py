@@ -1430,6 +1430,418 @@ def part9_rework_guards(server):
         shutil.rmtree(noroot, ignore_errors=True)
 
 
+# ------------------------------------------------------------------ 10 P1-3 语义守卫
+#
+# 七项：①无目标不画 100%（统计/接口层口径）②运行中参数锁定（后端 fail-closed）
+# ③零目标/坏文件提示分开 ④失败统计统一可复算 ⑤长任务 elapsed ⑥范围二选一不得双空
+# （前端单选桩在 selftest_p1_2_frontend.py S8h）⑦P2-7 /api/retry 带 data_root。
+
+def part10_p13_semantics(server):
+    root_a = build_root_a(server)
+    root_b = tempfile.mkdtemp(prefix="p12_p13_b_")
+    noroot = make_data_root(server, "P13N", [OK_SPEC])
+    assert_tmp(root_a, "part10.A")
+    assert_tmp(root_b, "part10.B")
+    assert_tmp(noroot, "part10.noroot")
+    saved_job = server._vocab_apply_job
+    saved_listener = dict(server._listener)
+    saved_done = set(server._worker_done)
+    try:
+        # ---- 10a 失败统计统一可复算（CANDIDATE-APPLY P3-2）
+        items = [{"ok": True},
+                 {"ok": False, "state": "FAILED"},
+                 {"ok": False, "skipped_user_edited": True},
+                 {"ok": False, "state": "NEEDS_HUMAN"},
+                 {"ok": False, "state": "INTERRUPTED"},
+                 {"ok": False, "state": "WEIRD_UNKNOWN"}]
+        st = server._reapply_stats(items, total=6)
+        check("10a 五桶之和 == total（逐条可复算）",
+              st["success"] + st["failed"] + st["skipped"] + st["needs_human"]
+              + st["interrupted"] == st["total"] == 6, st)
+        check("10a 跳过/待人工/中断各归各桶（不重复计入失败）",
+              st["success"] == 1 and st["skipped"] == 1 and st["needs_human"] == 1
+              and st["interrupted"] == 1 and st["failed"] == 2, st)
+        check("10a 未知 state / 坏条目 fail-closed 记失败（不静默丢弃）",
+              st["failed"] == 2
+              and server._reapply_result_bucket(None) == "failed"
+              and server._reapply_result_bucket("x") == "failed")
+        old_failed = sum(1 for it in items if not it.get("ok"))
+        check("10a 对照：旧口径 failed=not ok 会算成 5（少 3 桶，汇总对不上）",
+              old_failed == 5 and st["failed"] == 2, (old_failed, st))
+        check("10a balanced 自检（counted!=total 时为假）",
+              st["balanced"] is True
+              and server._reapply_stats([{"ok": True}], total=3)["balanced"] is False)
+
+        # ---- 10a3 两链同源（QA-P13-P2-3-UNKNOWN-STATE）
+        # 判据只许有**一处真源**：同一 state 在两条链必须落同一语义桶；
+        # 且 ok=True ＋ 未知 state 必须 fail-closed 进 failed（旧形态判 success）。
+        same_source = True
+        for _s in sorted(server.STATE_BUCKET):
+            _sem = server._state_bucket(_s)
+            if server._RECOVERY_BUCKET_NAMES[_sem] != server._recovery_bucket(_s):
+                same_source = False
+            if server._reapply_result_bucket({"ok": True, "state": _s}) != _sem:
+                same_source = False
+        check("10a3 全部已知 state：恢复链与重跑链归类逐字同源（同一张表）",
+              same_source, sorted(server.STATE_BUCKET))
+        check("10a3 「有牙」①：ok=True ＋ 未知 state 判 failed（fail-closed，不许升成功）",
+              server._reapply_result_bucket({"ok": True, "state": "WEIRD_UNKNOWN"})
+              == "failed"
+              and server._reapply_result_bucket({"ok": True, "state": "TYPO_STATE"})
+              == "failed", None)
+        check("10a3 「有牙」②：已知合法成功态仍算 success（防过度修正）",
+              all(server._reapply_result_bucket({"ok": True, "state": _s}) == "success"
+                  for _s in server.DONE_STATES)
+              and server._reapply_result_bucket({"ok": True, "state": "SUCCEEDED"})
+              == "success", server.DONE_STATES)
+        check("10a3 未知 state 在恢复链同为失败桶（两链口径一致，不是各说各话）",
+              server._recovery_bucket("WEIRD_UNKNOWN") == "still_failed"
+              and server._state_bucket("WEIRD_UNKNOWN") == "failed")
+        # 存量重跑结果本身不带 state（真源＝ok 标志＋跳过标记），不许被 fail-closed 误伤
+        check("10a3 无 state 的既有条目仍按 ok 标志判（正常成功不被误伤）",
+              server._reapply_result_bucket({"ok": True, "run_id": "r"}) == "success"
+              and server._reapply_result_bucket({"ok": False, "run_id": "r"}) == "failed")
+
+        # ---- 10a4 P2-三1：判据是「**键在不在**」，不是「值真不真」
+        # 旧写法 `if str(item.get("state") or "").strip():` 把「键存在但值为空串/纯空白/None」
+        # 与「压根没给 state 键」混为一类 → {"ok":True,"state":""} 落到 success，而
+        # `_recovery_bucket("")` 落 still_failed，**两链仍不同源**（review 复核三 P2-三1）。
+        check("10a4 {\"ok\":True,\"state\":\"\"} → failed（显式空 state 不许升成成功）",
+              server._reapply_result_bucket({"ok": True, "state": ""}) == "failed", None)
+        check("10a4 显式空白/None 同样以键为准走表 → failed（不回落 ok）",
+              server._reapply_result_bucket({"ok": True, "state": "   "}) == "failed"
+              and server._reapply_result_bucket({"ok": True, "state": None}) == "failed", None)
+        check("10a4 显式空/坏 state 与恢复链同源（不是各说各话）",
+              server._state_bucket("") == "failed"
+              and server._recovery_bucket("") == "still_failed"
+              and server._RECOVERY_BUCKET_NAMES[server._state_bucket("")]
+              == server._recovery_bucket(""), None)
+        check("10a4 对照：{\"ok\":True}（**没有** state 键）→ 仍 success（防误伤）",
+              server._reapply_result_bucket({"ok": True}) == "success", None)
+        st_empty = server._reapply_stats(
+            [{"ok": True, "state": ""}, {"ok": True}], total=2)
+        check("10a4 掺入显式空 state 后仍可复算（五桶之和==total，balanced 真）",
+              st_empty["failed"] == 1 and st_empty["success"] == 1
+              and st_empty["counted"] == st_empty["total"] == 2
+              and st_empty["balanced"] is True, st_empty)
+        st_mix = server._reapply_stats(
+            [{"ok": True, "state": "WEIRD_UNKNOWN"}, {"ok": True},
+             {"ok": False, "state": "FAILED"}], total=3)
+        check("10a3 掺入未知 state 后仍可复算（total==五桶之和，balanced 真）",
+              st_mix["success"] == 1 and st_mix["failed"] == 2
+              and st_mix["counted"] == st_mix["total"] == 3
+              and st_mix["balanced"] is True, st_mix)
+        # 出口字段名锁死（前端 app/index.html 已按这些键消费）：只许同源，不许改名
+        check("10a3 五桶出口字段名不变（success/failed/skipped/needs_human/interrupted）",
+              server._REAPPLY_BUCKETS == ("success", "failed", "skipped",
+                                          "needs_human", "interrupted")
+              and server.FIVE_BUCKETS == server._REAPPLY_BUCKETS
+              and server.RECOVERY_BUCKETS == ("recovered", "still_failed", "skipped",
+                                              "needs_human", "interrupted"), None)
+        # 源头单点守卫：两个 bucket 函数体内不许再各写一套 state 字面量 if 链
+        _src = _server_source()
+
+        def _fn_body(name):
+            _i = _src.index("def %s(" % name)
+            _j = _src.find("\ndef ", _i + 1)
+            return _src[_i:_j if _j > 0 else len(_src)]
+
+        check("10a3 判据单点：两个 bucket 函数都从 `_state_bucket` 派生",
+              "_state_bucket(" in _fn_body("_recovery_bucket")
+              and "_state_bucket(" in _fn_body("_reapply_result_bucket"), None)
+        check("10a3 旧形态特征已清零：bucket 函数体内不再有 state 字面量 if 链",
+              all(_tok not in _fn_body("_recovery_bucket")
+                  for _tok in ('"SUCCEEDED"', '"SKIPPED"', '"NEEDS_HUMAN"',
+                               '"INTERRUPTED"'))
+              and '"SKIPPED"' not in _fn_body("_reapply_result_bucket"), None)
+        check("10a3 真源只定义一处（STATE_BUCKET 全文唯一赋值）",
+              _src.count("STATE_BUCKET = {") == 1, _src.count("STATE_BUCKET = {"))
+        # 10a4 源头守卫：判据必须是「state 键在不在」，旧的值真值写法（`or ""`＋strip）已清零
+        _body_reapply = _fn_body("_reapply_result_bucket")
+        check("10a4 判据单点：函数体按「键存在」判断（值真值写法已清零）",
+              '"state" in ' in _body_reapply
+              and 'str(item.get("state") or "")' not in _body_reapply, None)
+
+        # ---- 10a2 批量恢复五桶同口径（同一条可复算等式）
+        job = {"total": 4, "results": [{"state": "SUCCEEDED"}, {"state": "SKIPPED"},
+                                       {"state": "NEEDS_HUMAN"}]}
+        server._recovery_apply_counts(job)
+        check("10a2 批量恢复五桶可复算（未落盘的剩余目标记中断）",
+              job["recovered"] == 1 and job["skipped"] == 1 and job["needs_human"] == 1
+              and job["still_failed"] == 0 and job["interrupted"] == 1
+              and job["counted"] == job["total"] == 4 and job["balanced"] is True, job)
+        check("10a2 done=已落盘逐项数（不被 interrupted 拉到 total，进度不虚满）",
+              job["done"] == 3, job)
+        check("10a2 未知 state 进失败桶（fail-closed）",
+              server._recovery_bucket("WHATEVER") == "still_failed"
+              and server._recovery_bucket(None) == "still_failed")
+        job2 = {"total": 1, "results": [{"state": "SUCCEEDED"},
+                                        {"state": "FAILED"}]}
+        server._recovery_apply_counts(job2)
+        check("10a2 逐项多于登记总数时 total 抬到可复算之和（绝不小于各桶之和）",
+              job2["total"] == 2 and job2["counted"] == 2 and job2["balanced"] is True,
+              job2)
+
+        # ---- 10b 批量任务状态：counted/balanced/elapsed 可读
+        jobs_dir = os.path.join(root_a, "data", "recovery_jobs")
+        os.makedirs(jobs_dir, exist_ok=True)
+        digest = server._recovery_root_digest(root_a)
+        with open(os.path.join(jobs_dir, "rec-p13run.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"job_id": "rec-p13run", "state": "RUNNING",
+                       "data_root_digest": digest, "total": 3,
+                       "started_at": "2026-09-15T00:00:00Z",
+                       "results": [{"run_id": "r1", "state": "SUCCEEDED"},
+                                   {"run_id": "r2", "state": "FAILED"}]}, fh)
+        code, res = server._handle_retry_batch_status(
+            {"data_root": [root_a], "job_id": ["rec-p13run"]})
+        check("10b 未终态 job 仍按既有语义降级中断", code == 200
+              and res.get("state") == "INTERRUPTED", (code, res))
+        check("10b 汇总恒可复算：total == recovered+still_failed+skipped+needs_human+interrupted",
+              res.get("total") == (res.get("recovered", 0) + res.get("still_failed", 0)
+                                   + res.get("skipped", 0) + res.get("needs_human", 0)
+                                   + res.get("interrupted", 0)), res)
+        check("10b 未落盘剩余目标记中断（3=1成功+1失败+1中断）",
+              res.get("recovered") == 1 and res.get("still_failed") == 1
+              and res.get("interrupted") == 1, res)
+        check("10b balanced 自检＋counted==total＋done=逐项数",
+              res.get("balanced") is True and res.get("counted") == res.get("total")
+              and res.get("done") == 2, res)
+        with open(os.path.join(jobs_dir, "rec-p13done.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"job_id": "rec-p13done", "state": "SUCCEEDED",
+                       "data_root_digest": digest, "total": 2,
+                       "started_at": "2026-09-15T00:00:00Z",
+                       "finished_at": "2026-09-15T00:01:30Z",
+                       "results": [{"run_id": "r1", "state": "SUCCEEDED"},
+                                   {"run_id": "r2", "state": "FAILED"}]}, fh)
+        code, res = server._handle_retry_batch_status(
+            {"data_root": [root_a], "job_id": ["rec-p13done"]})
+        check("10b 终态汇总可复算（2=1+1+0+0+0）",
+              res.get("total") == 2 and res.get("recovered") == 1
+              and res.get("still_failed") == 1 and res.get("balanced") is True, res)
+        check("10b 长任务 elapsed_seconds 可读（90s，由两端时间戳算）",
+              res.get("elapsed_seconds") == 90, res.get("elapsed_seconds"))
+        check("10b 坏/缺时间戳回 0（不抛异常也不编时长）",
+              server._elapsed_seconds("not-a-time") == 0
+              and server._elapsed_seconds(None, None) == 0
+              and server._elapsed_seconds("2026-09-15T00:00:00Z",
+                                          "2026-09-15T00:00:00Z") == 0)
+
+        # ---- 10c 候选清单三态：缺失与腐坏必须分开（CANDIDATE-APPLY P3-4）
+        code, g = server._handle_vocab_candidates_get({"data_root": [noroot]})
+        missing_msg = str(g.get("candidates_state_message") or "")
+        check("10c 无清单 -> missing（不是 corrupt）",
+              code == 200 and g.get("candidates_state") == "missing"
+              and g.get("source_exists") is False
+              and g.get("has_candidates") is False, g)
+        cpath = os.path.join(noroot, "vocab-candidates.json")
+        with open(cpath, "w", encoding="utf-8") as fh:
+            fh.write("{ 这不是 JSON")
+        bad_hash = sha(cpath)
+        code, g2 = server._handle_vocab_candidates_get({"data_root": [noroot]})
+        corrupt_msg = str(g2.get("candidates_state_message") or "")
+        check("10c 腐坏文件 -> corrupt 且 source_exists=True",
+              code == 200 and g2.get("candidates_state") == "corrupt"
+              and g2.get("source_exists") is True, g2)
+        check("10c 腐坏与缺失文案必须不同（腐坏证据不被空态吞掉）",
+              missing_msg != corrupt_msg and "损坏" in corrupt_msg,
+              (missing_msg, corrupt_msg))
+        check("10c 腐坏不冒充空态（文案里没有「暂无待审候选」）",
+              "暂无待审候选" not in corrupt_msg, corrupt_msg)
+        check("10c 对照：腐坏时 has_candidates=False（旧口径下页面只能显示「暂无」）",
+              g2.get("has_candidates") is False)
+        check("10c 读坏文件不改文件（No-Clobber）", sha(cpath) == bad_hash)
+        with open(cpath, "w", encoding="utf-8") as fh:
+            fh.write('{"not": "a list"}')
+        code, g3 = server._handle_vocab_candidates_get({"data_root": [noroot]})
+        check("10c 内容不是数组也算 corrupt（不是 ok）",
+              g3.get("candidates_state") == "corrupt", g3)
+        write_candidates(noroot, [{"wrong": "三态错词", "right": "三态正词",
+                                   "confidence": "high"}])
+        code, g4 = server._handle_vocab_candidates_get({"data_root": [noroot]})
+        check("10c 正常清单 -> ok 且有候选",
+              g4.get("candidates_state") == "ok"
+              and g4.get("has_candidates") is True, g4)
+
+        # ---- 10d 零目标：人话而非裸键名（CANDIDATE-APPLY P3-3）
+        rev = server._vocab_candidates_revision(noroot)
+        before = tree_snapshot(noroot)
+        job_snap = server._vocab_apply_job
+        code, res = server._handle_vocab_candidates_apply(body({
+            "data_root": noroot, "indices": [], "rerun_old": False,
+            "candidates_revision": rev}))
+        check("10d 空 indices -> 400 人话（不是「不能为空数组」裸键名）",
+              code == 400 and "没有勾选任何待审候选" in res.get("error", "")
+              and "不能为空数组" not in res.get("error", ""), (code, res))
+        code, res = server._run_vocab_candidates_apply({
+            "data_root": noroot, "indices": [], "rerun_old": False,
+            "candidates_revision": rev})
+        check("10d （同步入口）空 indices -> 400 同口径",
+              code == 400 and "没有勾选任何待审候选" in res.get("error", ""),
+              (code, res))
+        check("10d 零目标零执行零写盘",
+              server._vocab_apply_job is job_snap and tree_snapshot(noroot) == before)
+        code, res = server._handle_retry_plan_post(body({
+            "data_root": noroot, "run_ids": []}))
+        check("10d 批量预览空选择 -> 400 人话（不是裸键名）",
+              code == 400 and "没有要恢复的任务" in res.get("error", "")
+              and "不能为空数组" not in res.get("error", ""), (code, res))
+
+        # ---- 10d2 零目标重跑文案：词入库了但无可重跑稿件，必须说清
+        root_nt = make_data_root(server, "P13NT", [{"run_id": "run-queued",
+                                                    "status": "QUEUED"}])
+        assert_tmp(root_nt, "part10.notarget")
+        try:
+            write_candidates(root_nt, [{"wrong": "零目标错词", "right": "零目标正词",
+                                        "confidence": "high"}])
+            code, res = server._run_vocab_candidates_apply({
+                "data_root": root_nt, "indices": [0], "rerun_old": True,
+                "candidates_revision": server._vocab_candidates_revision(root_nt)})
+            check("10d2 入库成功但无可重跑稿件 -> 200",
+                  code == 200 and res.get("ok"), (code, res))
+            msg = str(res.get("message") or "")
+            check("10d2 明说「没有可重跑的已完成任务」",
+                  "没有可重跑的已完成任务" in msg, msg)
+            check("10d2 不再用「重跑成功0篇」冒充跑过（旧文案）",
+                  "重跑成功0篇" not in msg, msg)
+            stats = res.get("stats") or {}
+            check("10d2 stats.total=0 且五桶之和为 0（不画满的依据）",
+                  stats.get("total") == 0
+                  and sum(int(stats.get(k) or 0) for k in
+                          ("success", "failed", "skipped", "needs_human",
+                           "interrupted")) == 0
+                  and stats.get("balanced") is True, stats)
+        finally:
+            shutil.rmtree(root_nt, ignore_errors=True)
+
+        # ---- 10e 运行中参数锁定（RERUN-PROGRESS P3-5）：后端 fail-closed
+        root_lock = make_data_root(server, "P13LK", [OK_SPEC])
+        assert_tmp(root_lock, "part10.lock")
+        try:
+            write_candidates(root_lock, [{"wrong": "锁定错词", "right": "锁定正词",
+                                          "confidence": "high"}])
+            rev_lock = server._vocab_candidates_revision(root_lock)
+            server._vocab_apply_job = {
+                "job_id": "vocab-apply-lock", "state": "running", "stage": "importing",
+                "data_root": root_lock, "rerun_old": True,
+                "candidates_revision": rev_lock, "request_indices": [0, 1],
+                "started_at": server._utc_now_iso(), "finished_at": None,
+                "total": 0, "done": 0, "current_filename": None, "imported": 0,
+                "summary": {}, "stats": None, "error": None,
+                "message": "", "result": None}
+            lock_before = tree_snapshot(root_lock)
+            # 故意带「过期版本 + 另一套参数」：旧逻辑会先撞版本锁，新逻辑必须先锁定
+            code, res = server._handle_vocab_candidates_apply(body({
+                "data_root": root_lock, "indices": [0], "rerun_old": False,
+                "candidates_revision": "deadbeefdeadbeef"}))
+            check("10e 运行中提交 -> 409 人话（零执行）",
+                  code == 409 and res.get("running") is True
+                  and "已锁定" in res.get("error", ""), (code, res))
+            check("10e 锁定检查先于版本锁（不报「清单已变化」）",
+                  "候选清单已变化" not in res.get("error", ""), res)
+            lp = res.get("locked_params") or {}
+            check("10e 同目录回显冻结参数（rerun_old/目标集合＝那次任务的）",
+                  lp.get("rerun_old") is True
+                  and list(lp.get("indices") or []) == [0, 1], lp)
+            check("10e 运行中变更零执行零写盘",
+                  tree_snapshot(root_lock) == lock_before
+                  and not os.path.exists(os.path.join(root_lock, "vocab-user.json")))
+            code, res_b = server._handle_vocab_candidates_apply(body({
+                "data_root": root_b, "indices": [0], "rerun_old": False,
+                "candidates_revision": "deadbeefdeadbeef"}))
+            check("10e 别目录 409 不回显别处的冻结参数（D-12）",
+                  code == 409 and "locked_params" not in res_b
+                  and root_lock not in json.dumps(res_b, ensure_ascii=False), res_b)
+            code, sres = server._handle_vocab_apply_status(
+                {"data_root": [root_lock], "job_id": ["vocab-apply-lock"]})
+            jobout = (sres or {}).get("job") or {}
+            check("10e 运行中状态回 elapsed_seconds＋indices_count（页面＝实际执行）",
+                  code == 200 and isinstance(jobout.get("elapsed_seconds"), int)
+                  and jobout.get("indices_count") == 2
+                  and jobout.get("rerun_old") is True, jobout)
+            server._vocab_apply_job = dict(server._vocab_apply_job, state="done")
+            code, res = server._handle_vocab_candidates_apply(body({
+                "data_root": root_lock, "indices": [0], "rerun_old": False,
+                "candidates_revision": "deadbeefdeadbeef"}))
+            check("10e 终态后锁解除（改为命中版本锁，不再是锁定 409）",
+                  code == 409 and "候选清单已变化" in (res or {}).get("error", ""),
+                  (code, res))
+        finally:
+            server._vocab_apply_job = saved_job
+            shutil.rmtree(root_lock, ignore_errors=True)
+
+        # ---- 10f P2-7 /api/retry 带 data_root：跨目录 fail-closed、同目录不误伤
+        server._listener["running"] = True
+        server._listener["data_root"] = root_a
+        done_before = set(server._worker_done)
+        code, res = server._handle_retry_post(body({
+            "run_id": "run-retry", "data_root": root_b}))
+        check("10f 跨目录重试 -> 409 人话且不回两个真实路径",
+              code == 409 and "另一个数据目录" in res.get("error", "")
+              and root_a not in json.dumps(res, ensure_ascii=False)
+              and root_b not in json.dumps(res, ensure_ascii=False), (code, res))
+        check("10f 跨目录重试零执行（未改工作队列）",
+              set(server._worker_done) == done_before)
+        for label, bad in (("布尔", True), ("相对路径", "relative/x"), ("数组", ["x"])):
+            code, res = server._handle_retry_post(body({
+                "run_id": "run-retry", "data_root": bad}))
+            check("10f data_root=%s -> 400 人话零执行" % label,
+                  code == 400 and bool(res.get("error"))
+                  and root_a not in res.get("error", ""), (label, code, res))
+        # ---- 10g P2-2 前后端一致：前端 retryBody 的本地门只拦「有值但非绝对路径」，
+        #      正是因为它复用的这句 400 人话；空串/缺键在后端是合法旧行为，本地不许拦。
+        code, res = server._handle_retry_post(body({
+            "run_id": "run-retry", "data_root": "relative/x"}))
+        check("10g 相对路径 400 文案＝前端本地门同一句（数据目录须为绝对路径）",
+              code == 400 and "数据目录须为绝对路径" in res.get("error", ""),
+              (code, res))
+        code, res = server._handle_retry_post(body({
+            "run_id": "run-retry", "data_root": ""}))
+        check("10g 空串 data_root 仍按旧行为放行（前端本地门因此不拦空值）",
+              code == 202 and res.get("ok"), (code, res))
+        code, res = server._handle_retry_post(body({
+            "run_id": "run-retry", "data_root": root_a}))
+        check("10f 同目录重试 -> 202（正常路径不被误伤）",
+              code == 202 and res.get("ok"), (code, res))
+        link_lk = os.path.join(os.path.dirname(root_a),
+                               os.path.basename(root_a) + "-rlk")
+        try:
+            if os.path.lexists(link_lk):
+                os.remove(link_lk)
+            os.symlink(root_a, link_lk)
+            code, res = server._handle_retry_post(body({
+                "run_id": "run-retry", "data_root": link_lk}))
+            check("10f 符号链接指向同一目录不算跨目录（realpath 口径）",
+                  code == 202, (code, res))
+        finally:
+            try:
+                if os.path.lexists(link_lk):
+                    os.remove(link_lk)
+            except OSError:
+                pass
+        code, res = server._handle_retry_post(body({"run_id": "run-retry"}))
+        check("10f 不带 data_root 沿用旧行为（按监听目录，向后兼容）",
+              code == 202, (code, res))
+        code, res = server._handle_retry_post(body({
+            "run_id": "run-does-not-exist", "data_root": root_a}))
+        # 合成库里没有 Single Instance 锁 → open_db 抛错被既有 best-effort 分支吞掉
+        # （注释明写「DB 暂时不可读则仍允许重试，worker 下轮会记原因，不拦」）；
+        # 真库持锁时会先回 404。这里只守「不泄漏路径 + 只回 202/404」。
+        check("10f 同目录但 run 不存在：只回 202/404 且错误出口不含真实路径",
+              code in (202, 404)
+              and root_a not in json.dumps(res, ensure_ascii=False), (code, res))
+    finally:
+        server._vocab_apply_job = saved_job
+        server._listener.clear()
+        server._listener.update(saved_listener)
+        server._worker_done.clear()
+        server._worker_done.update(saved_done)
+        shutil.rmtree(root_a, ignore_errors=True)
+        shutil.rmtree(root_b, ignore_errors=True)
+        shutil.rmtree(noroot, ignore_errors=True)
+
+
 def main():
     print("tmp 根：%s" % TMP_ROOT)
     server = load_server()
@@ -1442,6 +1854,7 @@ def main():
     part7_regression(server)
     part8_http_contract(server)
     part9_rework_guards(server)
+    part10_p13_semantics(server)
     if FAILS:
         print("\nSELFTEST FAIL %d/%d：%s" % (len(FAILS), CHECKS[0], FAILS))
         return 1

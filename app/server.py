@@ -214,14 +214,15 @@ def _take_str(params: dict, key: str, default=_MISSING, *,
 
 
 def _take_str_list(params: dict, key: str, *, allow_empty=False,
-                   max_items=500) -> list:
+                   max_items=500, empty_msg: str = "") -> list:
     if key not in params:
         raise ParamError("缺少 %s（字符串数组）" % key)
     value = params[key]
     if not isinstance(value, list):
         raise _bad(key, "字符串数组", value)
     if not allow_empty and not value:
-        raise ParamError("%s 不能为空数组" % key)
+        # P1-3 零目标：调用方可给一句人话，不再把裸键名丢给用户
+        raise ParamError(empty_msg or ("%s 不能为空数组" % key))
     if len(value) > max_items:
         raise ParamError("%s 项数过多（上限 %d）" % (key, max_items))
     out = []
@@ -233,14 +234,15 @@ def _take_str_list(params: dict, key: str, *, allow_empty=False,
 
 
 def _take_int_list(params: dict, key: str, *, allow_empty=False,
-                   max_items=500, minimum=None) -> list:
+                   max_items=500, minimum=None, empty_msg: str = "") -> list:
     if key not in params:
         raise ParamError("缺少 %s（整数数组）" % key)
     value = params[key]
     if not isinstance(value, list):
         raise _bad(key, "整数数组", value)
     if not allow_empty and not value:
-        raise ParamError("%s 不能为空数组" % key)
+        # P1-3 零目标：调用方可给一句人话，不再把裸键名丢给用户
+        raise ParamError(empty_msg or ("%s 不能为空数组" % key))
     if len(value) > max_items:
         raise ParamError("%s 项数过多（上限 %d）" % (key, max_items))
     out = []
@@ -1740,6 +1742,105 @@ RECOVERY_AUTO_STRATEGY = {
     "AUTO_PUBLISH": "PUBLISH_ONLY",
 }
 RECOVERY_JOB_FINAL = frozenset({"SUCCEEDED", "FAILED", "SKIPPED", "NEEDS_HUMAN"})
+
+# ------------------------------------------- P1-3 五桶语义唯一真源（两链共用）
+#
+# 问题（QA-P13-P2-3-UNKNOWN-STATE）：批量恢复 `_recovery_bucket` 与存量重跑
+# `_reapply_result_bucket` 各写一套判据——`ok=True` ＋ 未知 state 在重跑侧算成功、
+# 在恢复侧算失败，同一批结果两处口径不同，「失败统计统一可复算」只做到表面闭环。
+#
+# 约定：`STATE_BUCKET` 是**唯一真源**，两条链都从它派生，谁也不许再自写 if 链；
+# 表外的 state（含空值）一律 fail-closed 落 failed，绝不静默升成成功；成功态直接
+# 取自既有完成态枚举 `DONE_STATES`（PUBLISHED／RENDER_ONLY）＋恢复链成功态
+# SUCCEEDED，失败家族取自既有 `FAIL_STATES`（FAIL／PUBLISH_BLOCKED），表里查得到
+# 就一定有桶，查不到就一定是失败桶，没有第三条路。
+# `source_location_blocked` 是「需重新指定源目录」的**标记**（可与其他桶重叠），
+# 不属于这个划分，不参与求和。
+BUCKET_SUCCESS = "success"
+BUCKET_FAILED = "failed"
+BUCKET_SKIPPED = "skipped"
+BUCKET_NEEDS_HUMAN = "needs_human"
+BUCKET_INTERRUPTED = "interrupted"
+FIVE_BUCKETS = (BUCKET_SUCCESS, BUCKET_FAILED, BUCKET_SKIPPED,
+                BUCKET_NEEDS_HUMAN, BUCKET_INTERRUPTED)
+
+STATE_BUCKET = {
+    **{state: BUCKET_SUCCESS for state in DONE_STATES},
+    **{state: BUCKET_FAILED for state in FAIL_STATES},
+    "SUCCEEDED": BUCKET_SUCCESS,       # 恢复链逐项成功态（_exec_* 回的就是它）
+    "SKIPPED": BUCKET_SKIPPED,         # 已存在/不适用：明确「没做，不算失败」
+    "SKIP": BUCKET_SKIPPED,            # 监听 worker 同一语义的旧拼写
+    "NEEDS_HUMAN": BUCKET_NEEDS_HUMAN,
+    "INTERRUPTED": BUCKET_INTERRUPTED,
+    "FAILED": BUCKET_FAILED,
+    "TRANSCRIBE_FAILED": BUCKET_FAILED,   # 磁盘 manifest 里的细分失败态
+    "RAW_FAILED": BUCKET_FAILED,
+    "MIRROR_FAILED": BUCKET_FAILED,
+    "NORM_RENDER_FAILED": BUCKET_FAILED,
+}
+# 两链对外字段名不同（存量重跑 success/failed、批量恢复 recovered/still_failed），
+# 只做名字映射；判据仍只有上面那一张表。
+_RECOVERY_BUCKET_NAMES = {
+    BUCKET_SUCCESS: "recovered",
+    BUCKET_FAILED: "still_failed",
+    BUCKET_SKIPPED: "skipped",
+    BUCKET_NEEDS_HUMAN: "needs_human",
+    BUCKET_INTERRUPTED: "interrupted",
+}
+RECOVERY_BUCKETS = tuple(_RECOVERY_BUCKET_NAMES[key] for key in FIVE_BUCKETS)
+
+
+def _state_bucket(state) -> str:
+    """唯一真源：state 文本 → 语义桶；未知名/空值一律 failed（fail-closed）。"""
+    return STATE_BUCKET.get(str(state or "").strip().upper(), BUCKET_FAILED)
+
+
+def _recovery_bucket(state) -> str:
+    """逐项归类（派生自唯一真源 `_state_bucket`）：任何 state 必落且只落一个桶。"""
+    return _RECOVERY_BUCKET_NAMES[_state_bucket(state)]
+
+
+def _recovery_bucket_counts(results) -> dict:
+    counts = {key: 0 for key in RECOVERY_BUCKETS}
+    for item in (results or []):
+        state = item.get("state") if isinstance(item, dict) else None
+        counts[_recovery_bucket(state)] += 1
+    return counts
+
+
+def _recovery_apply_counts(job: dict) -> dict:
+    """把五桶与可复算字段写回 job（就地），供终态与查询两侧同一口径。
+
+    - `done` ＝ **已落盘逐项数**（真实进度，运行中也单调可读）；
+    - 五桶按 `_recovery_bucket` 归类已落盘结果；登记总数里**还没落盘**的剩余目标
+      一律记入 `interrupted`（服务重启/半截的真含义就是「这些单位没跑完」）；
+    - `counted` ＝ 五桶之和，终态恒满足
+      `total == recovered + still_failed + skipped + needs_human + interrupted`；
+    - 若逐项结果多于登记总数（老 job / 手工改过的文件），以实际逐项为准把 total
+      抬到可复算之和，绝不让 total 小于各桶之和；
+    - 收尾自检 `balanced = (counted == total)`，页面与接口都读它。
+    """
+    results = job.get("results")
+    counts = _recovery_bucket_counts(results)
+    counted = sum(counts.values())
+    processed = len(results) if isinstance(results, list) else 0
+    try:
+        total = int(job.get("total") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    if total > counted:
+        counts["interrupted"] += total - counted
+    elif total < counted:
+        total = counted
+    job.update(counts)
+    counted = sum(counts.values())
+    job["total"] = total
+    job["counted"] = counted
+    job["done"] = processed
+    job["balanced"] = counted == total
+    return job
+
+
 # P1-2 字段一致（RERUN-PROGRESS P3-1）：results[] 每条都带同一组键，任何分支
 # 都不缺键；未能归类的额外键统一进 extra 对象，前端可按固定契约解释部分失败。
 RECOVERY_RESULT_FIELDS = (
@@ -1880,7 +1981,10 @@ def _handle_retry_plan_post(body: bytes) -> tuple[int, dict]:
     try:
         params = _body_json(body)
         data_root = _take_data_root(params, DEFAULT_DATA_ROOT)
-        run_ids = _take_str_list(params, "run_ids")
+        # P1-3 零目标：空 run_ids 给一句人话，不丢裸键名 `run_ids 不能为空数组`
+        run_ids = _take_str_list(
+            params, "run_ids",
+            empty_msg="没有要恢复的任务（零目标，零执行）：请先在列表里勾选任务再预览")
         _reject_duplicates(run_ids, "run_ids")
         snap_id = _take_str(params, "diagnosis_snapshot_id", "",
                             allow_empty=True)
@@ -2185,7 +2289,9 @@ def _handle_retry_batch_post(body: bytes) -> tuple[int, dict]:
         "token_digest": digest, "state": "RUNNING",
         "total": len(run_ids), "done": 0, "recovered": 0, "still_failed": 0,
         "source_location_blocked": 0, "skipped": 0, "needs_human": 0,
-        "interrupted": 0, "whisper_calls": 0,
+        # P1-3 可复算自检：刚建 job 时逐项结果为 0，只有「本来就零目标」才 balanced
+        "interrupted": 0, "whisper_calls": 0, "counted": 0,
+        "balanced": len(run_ids) == 0,
         "started_at": _diag_now(), "finished_at": None, "error": None,
         "results": [], "current": None,
     }
@@ -2241,15 +2347,11 @@ def _handle_retry_batch_post(body: bytes) -> tuple[int, dict]:
                     "reason": "执行异常：%s" % (_err_text(exc),),
                     "finished_at": _diag_now()}, gate_ok=False)
         job["results"].append(entry)
-        job["done"] = len(job["results"])
         job["whisper_calls"] = sum(int(r.get("whisper_calls") or 0)
                                    for r in job["results"])
-        # D-4/D-9 可复算：汇总恒等于逐项 recompute
-        job["recovered"] = sum(1 for r in job["results"] if r.get("state") == "SUCCEEDED")
-        job["still_failed"] = sum(1 for r in job["results"] if r.get("state") == "FAILED")
-        job["skipped"] = sum(1 for r in job["results"] if r.get("state") == "SKIPPED")
-        job["needs_human"] = sum(1 for r in job["results"]
-                                 if r.get("state") == "NEEDS_HUMAN")
+        # D-4/D-9 可复算：五桶由唯一归类函数复算，恒等于逐项 recompute；
+        # `done` 同步为逐项计数（= 各桶之和），total 独立登记供自检。
+        _recovery_apply_counts(job)
         try:
             _recovery_atomic_write(job_path, job)
         except OSError:
@@ -2279,17 +2381,24 @@ def _recovery_job_read(data_root: str, job_id: str) -> tuple[int, dict]:
     except FileNotFoundError:
         return 404, {"ok": False, "error": "批量任务不存在（可能跨目录），请检查数据目录"}
     except (OSError, ValueError) as exc:
-        # 半文件/不可读 → INTERRUPTED，不自动续跑
+        # 半文件/不可读 → INTERRUPTED，不自动续跑。
+        # P1-3 统计统一：原始目标数已读不出来，按「至少 1 个未跑完单位」记；
+        # done=0（读到 0 条逐项）＋ counted=1（1 条计入中断）＋ balanced=True。
         return 200, {"ok": True, "job_id": job_id, "state": "INTERRUPTED",
-                     "total": 0, "done": 0, "recovered": 0, "still_failed": 0,
+                     "total": 1, "done": 0, "recovered": 0, "still_failed": 0,
                      "source_location_blocked": 0, "skipped": 0,
                      "needs_human": 0, "interrupted": 1,
+                     "counted": 1, "balanced": True,
                      "results": [], "current": None,
+                     "elapsed_seconds": 0,
                      "error": "任务文件不完整，标为中断（不自动续跑）：%s"
                               % (_err_text(exc),)}
     if not isinstance(job, dict):
         return 200, {"ok": True, "job_id": job_id, "state": "INTERRUPTED",
-                     "interrupted": 1, "results": [],
+                     "total": 1, "done": 0, "recovered": 0, "still_failed": 0,
+                     "skipped": 0, "needs_human": 0, "interrupted": 1,
+                     "counted": 1, "balanced": True,
+                     "results": [], "current": None, "elapsed_seconds": 0,
                      "error": "任务文件不是对象，标为中断（不自动续跑）"}
     # P1-2/D-9 目录绑定：job 自带的 data_root 摘要必须与本次请求的数据目录一致，
     # 否则一律结构化失败且不返回任务内容（防串目录/被搬过来的 job 文件）。
@@ -2304,13 +2413,13 @@ def _recovery_job_read(data_root: str, job_id: str) -> tuple[int, dict]:
         return 409, {"ok": False, "job_id": job_id,
                      "error": "该任务属于另一个数据目录（零渲染），请核对数据目录后重查"}
     if str(job.get("state")) not in RECOVERY_JOB_FINAL and job.get("state") != "DONE_PARTIAL":
-        # 未终态（服务重启遗留 RUNNING）→ INTERRUPTED，不自动续跑；尽力持久化
+        # 未终态（服务重启遗留 RUNNING）→ INTERRUPTED，不自动续跑；尽力持久化。
+        # P1-3：`interrupted` 由 `_recovery_apply_counts` 按「登记目标 − 已落盘逐项」
+        # 复算（不再 `or 1` 硬塞），所以 job 级状态与单位计数不再互相打架。
         job = dict(job)
         job["state"] = "INTERRUPTED"
-        job["interrupted"] = sum(1 for r in (job.get("results") or [])
-                                 if not isinstance(r, dict) or str(r.get("state"))
-                                 not in RECOVERY_JOB_FINAL) or 1
         job["error"] = "服务重启前未终态，标为中断（不自动续跑），重新诊断后新建计划"
+        _recovery_apply_counts(job)
         try:
             _recovery_atomic_write(path, job)
         except OSError:
@@ -2318,6 +2427,11 @@ def _recovery_job_read(data_root: str, job_id: str) -> tuple[int, dict]:
     out = dict(job)
     # P1-2 字段一致：老 job 文件也按固定契约返回 results[]
     out["results"] = _normalize_recovery_results(job.get("results"))
+    # P1-3 统计统一：老 job 文件也走同一归类函数复算，终态恒满足
+    # total == recovered + still_failed + skipped + needs_human + interrupted
+    _recovery_apply_counts(out)
+    out["elapsed_seconds"] = _elapsed_seconds(job.get("started_at"),
+                                             job.get("finished_at"))
     out["ok"] = True
     return 200, out
 
@@ -3151,14 +3265,33 @@ def _vocab_candidates_path(data_root: str) -> str:
                         VOCAB_CANDIDATES_FILENAME)
 
 
-def _load_vocab_candidates(data_root: str) -> list:
-    """读 AI 审查候选；文件缺失、损坏或不是数组时返回空清单。"""
+def _vocab_candidates_read(data_root: str) -> tuple:
+    """读 AI 审查候选：返回 `(state, message, items)`，state ∈ ok/missing/corrupt。
+
+    P1-3/CANDIDATE-APPLY P3-4：**一次读取、一处判定**——把「文件不存在（missing）」
+    与「文件在但读不出/不是数组（corrupt）」分开，供页面分别提示。旧实现把两者
+    都吞成空清单，页面只能显示「暂无待审候选」，腐坏证据被隐藏。
+    """
+    path = _vocab_candidates_path(data_root)
+    if not os.path.isfile(path):
+        return "missing", "还没有待审清单（文件不存在）：先在 AI 审查里生成一份", []
     try:
-        with open(_vocab_candidates_path(data_root), "r", encoding="utf-8") as fh:
+        with open(path, "r", encoding="utf-8") as fh:
             raw = json.load(fh)
     except (OSError, ValueError, UnicodeDecodeError):
-        return []
-    return raw if isinstance(raw, list) else []
+        return ("corrupt",
+                "待审清单文件损坏或格式不对（读不出来）："
+                "请重新跑一次 AI 审查覆盖它，损坏内容不会被应用", [])
+    if not isinstance(raw, list):
+        return ("corrupt",
+                "待审清单内容不是数组（格式不对）："
+                "请重新跑一次 AI 审查覆盖它，损坏内容不会被应用", [])
+    return "ok", "", raw
+
+
+def _load_vocab_candidates(data_root: str) -> list:
+    """读 AI 审查候选；文件缺失、损坏或不是数组时返回空清单（判定同 `_vocab_candidates_read`）。"""
+    return _vocab_candidates_read(data_root)[2]
 
 
 def _mark_vocab_candidates_imported(data_root: str, indices: set) -> None:
@@ -3210,8 +3343,11 @@ def _candidate_view(index: int, item) -> dict:
 def _handle_vocab_candidates_get(query: dict) -> tuple[int, dict]:
     data_root = (query.get("data_root") or [DEFAULT_DATA_ROOT])[0] or DEFAULT_DATA_ROOT
     data_root = normalize_path(data_root) or DEFAULT_DATA_ROOT
+    # P1-3/CANDIDATE-APPLY P3-4：缺失（还没生成过）与腐坏（有文件但读不出）
+    # 必须分开展示，不能都塞进「暂无待审候选」把腐坏证据藏起来。
+    cand_state, state_message, raw_candidates = _vocab_candidates_read(data_root)
     groups = {"high": [], "medium": [], "low": []}
-    for index, item in enumerate(_load_vocab_candidates(data_root)):
+    for index, item in enumerate(raw_candidates):
         if isinstance(item, dict) and item.get("imported"):
             continue
         view = _candidate_view(index, item)
@@ -3220,9 +3356,11 @@ def _handle_vocab_candidates_get(query: dict) -> tuple[int, dict]:
                  "candidates": groups,
                  "count": sum(len(items) for items in groups.values()),
                  "has_candidates": bool(sum(len(items) for items in groups.values())),
+                 "candidates_state": cand_state,
+                 "candidates_state_message": state_message,
                  # P1-2 候选版本锁：POST apply 必须回传同一指纹，漂移即 409 零执行
                  "candidates_revision": _vocab_candidates_revision(data_root),
-                 "source_exists": os.path.isfile(_vocab_candidates_path(data_root))}
+                 "source_exists": cand_state != "missing"}
 
 
 def _candidate_detail(index, item, accepted: bool, reason: str = "") -> dict:
@@ -3263,7 +3401,12 @@ def _run_vocab_candidates_apply(params: dict,
         rerun_old = _take_bool(params, "rerun_old", True)
         # 严格 int 且非 bool（true/1.5/"3"/null 一律 400）；越界与重复仍走逐条
         # 拒收明细（既有行为，前端按 details 统一解释）。
-        indices = _take_int_list(params, "indices")
+        # P1-3 零目标（CANDIDATE-APPLY P3-3）：空数组=没勾任何候选，给一句人话，
+        # 不再把裸键名 `indices 不能为空数组` 丢给用户。
+        indices = _take_int_list(
+            params, "indices",
+            empty_msg="没有勾选任何待审候选（零目标，零执行）："
+                      "请先勾选至少一条候选再点「错词重跑」")
         vault_s = _take_str(params, "ob_vault_root", "", allow_empty=True) or None
         want_revision = _take_str(params, "candidates_revision", "")
     except ParamError as exc:
@@ -3351,11 +3494,16 @@ def _run_vocab_candidates_apply(params: dict,
                          "error": "词库注册失败，已回滚未生效：%s" % (_err_text(exc),),
                          "details": details}
     if not imported:
+        # P1-3 统计统一：零导入也是零目标，同样按五桶口径回（页面不另算一套）
+        empty_stats = _reapply_stats([], total=0)
         return 200, {"ok": True, "data_root": data_root, "imported": 0,
                      "revision": revision, "details": details,
                      "effective_revision": _effective_vocab_revision(data_root, entries),
-                     "codesummary": "导入0条/重跑成功0篇/跳过0篇/失败0篇",
-                     "message": "没有候选通过校验，未导入；未执行重跑"}
+                     "summary": {"success": 0, "skipped": 0, "failed": 0,
+                                 "total": 0, "needs_human": 0, "interrupted": 0},
+                     "stats": empty_stats,
+                     "codesummary": "导入0条/重跑总数0篇/成功0篇/跳过0篇/失败0篇",
+                     "message": "没有候选通过校验，未导入（零目标，未执行重跑）"}
     candidate_mark_error = ""
     try:
         _mark_vocab_candidates_imported(
@@ -3366,12 +3514,16 @@ def _run_vocab_candidates_apply(params: dict,
         message = "已导入%d条；未重跑老稿，老稿未动" % imported
         if candidate_mark_error:
             message += "。" + candidate_mark_error
+        no_rerun_stats = _reapply_stats([], total=0)
         return 200, {"ok": not candidate_mark_error, "data_root": data_root,
                      "imported": imported, "rerun_old": False,
                      "revision": revision, "details": details,
                      "effective_revision": _effective_vocab_revision(data_root, entries),
                      "reapply": None,
-                     "summary": {"success": 0, "skipped": 0, "failed": 0},
+                     "summary": {"success": 0, "skipped": 0, "failed": 0,
+                                 "total": 0, "needs_human": 0,
+                                 "interrupted": 0},
+                     "stats": no_rerun_stats,
                      "candidate_mark_error": candidate_mark_error,
                      "codesummary": "导入%d条/重跑成功0篇/跳过0篇/失败0篇；老稿未动"
                      % imported,
@@ -3392,39 +3544,60 @@ def _run_vocab_candidates_apply(params: dict,
         summary = {}
     if not isinstance(results, list):
         results = []
-    success = sum(1 for item in results
-                  if isinstance(item, dict) and item.get("ok")
-                  and not item.get("skipped") and not item.get("skipped_user_edited"))
-    skipped = sum(1 for item in results
-                  if isinstance(item, dict)
-                  and (item.get("skipped") or item.get("skipped_user_edited")))
-    failed = sum(1 for item in results
-                 if isinstance(item, dict) and not item.get("ok")
-                 and not item.get("skipped"))
-    if not results and isinstance(summary.get("total"), int):
-        success = int(summary.get("ok") or 0)
-        skipped = int(summary.get("skipped_user_edited") or 0)
-        failed = int(summary.get("failed") or 0)
+    # P1-3 统计统一（CANDIDATE-APPLY P3-2）：**不再这里另算一套** ——
+    # 逐项归类只认 `_reapply_result_bucket`，五桶之和可复算等于 total。
+    if results:
+        stats = _reapply_stats(results, total=len(results))
+    elif isinstance(summary.get("total"), int):
+        # 老响应没有 results：按 summary 同口径折算（键名映射写在一处）
+        stats = {key: int(summary.get(key) or 0) for key in _REAPPLY_BUCKETS}
+        stats["total"] = int(summary.get("total") or 0)
+        stats["done"] = sum(stats[key] for key in _REAPPLY_BUCKETS)
+        stats["counted"] = stats["done"]
+        stats["balanced"] = stats["counted"] == stats["total"]
+    else:
+        stats = _reapply_stats([], total=0)
+    success = stats["success"]
+    skipped = stats["skipped"]
+    failed = stats["failed"]
+    needs_human = stats["needs_human"]
+    interrupted = stats["interrupted"]
     rerun_ok = reapply_code == 200 and bool(reapply.get("ok")) and failed == 0
-    message = "已导入%d条；重跑成功%d篇，跳过%d篇" % (imported, success, skipped)
-    if failed:
-        message += "，失败%d篇" % failed
-    if not rerun_ok:
-        message += "。词已入库，但重跑失败，请检查失败明细后重试"
+    zero_target = stats["total"] <= 0
+    if zero_target:
+        # P1-3/CANDIDATE-APPLY P3-3 零目标：词入库了，但**没有可重跑的已完成任务**。
+        # 旧文案写成「重跑成功0篇，跳过0篇」，看着像「重跑跑过且全成功」。
+        message = ("已导入%d条；本次没有可重跑的已完成任务（零目标，未重跑任何稿件）"
+                   % imported)
+        if not rerun_ok:
+            message += "；重跑接口这次没跑成，请稍后重试"
+    else:
+        message = "已导入%d条；重跑成功%d篇，跳过%d篇" % (imported, success, skipped)
+        if failed:
+            message += "，失败%d篇" % failed
+        if needs_human or interrupted:
+            message += "，待人工%d篇，中断%d篇" % (needs_human, interrupted)
+        if not rerun_ok:
+            message += "。词已入库，但重跑失败，请检查失败明细后重试"
     if candidate_mark_error:
         message += "。" + candidate_mark_error
     if not vault_s:
         message += "。未给笔记库，库内笔记未更新"
     operation_ok = rerun_ok and not candidate_mark_error
-    codesummary = "导入%d条/重跑成功%d篇/跳过%d篇/失败%d篇" % (
-        imported, success, skipped, failed)
+    codesummary = ("导入%d条/重跑总数%d篇/成功%d篇/跳过%d篇/失败%d篇/待人工%d篇/中断%d篇"
+                   % (imported, stats["total"], success, skipped, failed,
+                      needs_human, interrupted))
     return 200, {"ok": operation_ok, "data_root": data_root, "imported": imported,
                  "rerun_old": True,
                  "revision": revision, "effective_revision":
                  _effective_vocab_revision(data_root, entries),
                  "details": details,
-                 "reapply": reapply, "summary": {"success": success,
-                 "skipped": skipped, "failed": failed},
+                 "reapply": reapply,
+                 "summary": {"success": success, "skipped": skipped,
+                             "failed": failed, "total": stats["total"],
+                             "needs_human": needs_human,
+                             "interrupted": interrupted},
+                 "stats": stats,
                  "candidate_mark_error": candidate_mark_error,
                  "codesummary": codesummary,
                  "message": message}
@@ -3473,7 +3646,16 @@ def _vocab_apply_worker(job_id: str, params: dict) -> None:
                 "success": int(s.get("success") or 0),
                 "skipped": int(s.get("skipped") or 0),
                 "failed": int(s.get("failed") or 0),
+                "total": int(s.get("total") or 0),
+                "needs_human": int(s.get("needs_human") or 0),
+                "interrupted": int(s.get("interrupted") or 0),
             }
+        # P1-3 统计统一：把后端唯一口径的 stats 原样带给页面，页面不再自己另算
+        st = obj.get("stats")
+        if isinstance(st, dict):
+            job["stats"] = {k: st.get(k) for k in
+                            ("total", "done", "success", "failed", "skipped",
+                             "needs_human", "interrupted", "counted", "balanced")}
         job["current_filename"] = None
         if code == 200:
             job["state"] = "done"
@@ -3486,6 +3668,30 @@ def _vocab_apply_worker(job_id: str, params: dict) -> None:
             job["state"] = "failed"
             job["error"] = str(obj.get("error") or "处理失败，请刷新后重试")
             job["message"] = job["error"]
+
+
+def _vocab_apply_locked_response(job: dict, want_root: str = "") -> tuple:
+    """P1-3 运行中参数锁定：统一的 409 人话 + 冻结参数回显（零执行、零写盘）。
+
+    只有**同一个数据目录**的调用方才拿得到 `locked_params`（本次真正锁住的范围／
+    rerun_old／目标候选集合）；别目录的调用方只回人话＋任务编号，不回显别处的
+    参数（D-12 口径：不把别目录的路径与参数透给页面）。
+    """
+    job_root = normalize_path(job.get("data_root"))
+    same = bool(want_root) and bool(job_root) and (
+        os.path.realpath(want_root) == os.path.realpath(job_root))
+    out = {"ok": False, "running": True, "job_id": job.get("job_id"),
+           "error": "已有一次错词重跑在进行中，本次参数已锁定（零执行，"
+                    "未导入、未标记、未重跑）：范围、rerun_old、"
+                    "目标候选集合都按那次任务的参数走，"
+                    "请等它跑完（进度条会显示已用时，可离开页面稍后回来）"
+                    "再改参数重新提交"}
+    if same:
+        out["locked_params"] = {"rerun_old": job.get("rerun_old"),
+                                "candidates_revision": job.get("candidates_revision"),
+                                "indices": list(job.get("request_indices") or []),
+                                "total": job.get("total"), "done": job.get("done")}
+    return 409, out
 
 
 def _handle_vocab_candidates_apply(body: bytes) -> tuple[int, dict]:
@@ -3501,7 +3707,11 @@ def _handle_vocab_candidates_apply(body: bytes) -> tuple[int, dict]:
         # P2-新1：异步入口同口径——必须显式带 data_root（否则 400，不建 job）
         data_root = _take_required_data_root(params)
         rerun_old = _take_bool(params, "rerun_old", True)
-        indices = _take_int_list(params, "indices")
+        # P1-3 零目标（CANDIDATE-APPLY P3-3）：空数组给一句人话，不丢裸键名
+        indices = _take_int_list(
+            params, "indices",
+            empty_msg="没有勾选任何待审候选（零目标，零执行）："
+                      "请先勾选至少一条候选再点「错词重跑」")
         vault_s = _take_str(params, "ob_vault_root", "", allow_empty=True) or None
         want_revision = _take_str(params, "candidates_revision", "")
     except ParamError as exc:
@@ -3509,6 +3719,13 @@ def _handle_vocab_candidates_apply(body: bytes) -> tuple[int, dict]:
     if not want_revision:
         return 400, {"ok": False,
                      "error": "缺少候选清单版本 candidates_revision（请刷新待审清单后重试）"}
+    # P1-3 运行中参数锁定（RERUN-PROGRESS P3-5）：本次执行参数在运行窗口内冻结。
+    # 检查必须**先于**版本锁与任何写入：运行中的请求一律 409 人话 + 零执行 +
+    # 零写盘，且把冻结的参数原样回给页面，杜绝“静默按新参数再跑一遍”。
+    with _state_lock:
+        cur = _vocab_apply_job
+        if isinstance(cur, dict) and cur.get("state") == "running":
+            return _vocab_apply_locked_response(cur, data_root)
     # 候选版本锁：同步入口先判，漂移即 409 且零执行（不建 job、不写盘）
     cur_revision = _vocab_candidates_revision(data_root)
     if cur_revision == RECOVERY_CANDIDATES_ABSENT:
@@ -3533,9 +3750,8 @@ def _handle_vocab_candidates_apply(body: bytes) -> tuple[int, dict]:
     with _state_lock:
         cur = _vocab_apply_job
         if isinstance(cur, dict) and cur.get("state") == "running":
-            return 409, {"ok": False, "running": True,
-                         "job_id": cur.get("job_id"),
-                         "error": "已有一次错词重跑在进行中，请等它跑完再试"}
+            # 竞态兜底：早先那次检查之后被别人抢先起了任务，同样锁定拒绝
+            return _vocab_apply_locked_response(cur, data_root)
         _vocab_apply_seq += 1
         job_id = "vocab-apply-%d-%d" % (_vocab_apply_seq,
                                         int(threading.get_ident() % 100000))
@@ -3546,13 +3762,17 @@ def _handle_vocab_candidates_apply(body: bytes) -> tuple[int, dict]:
             "data_root": data_root,
             "rerun_old": rerun_old,
             "candidates_revision": want_revision,
+            # P1-3：冻结参数留档，供 409 把「本次锁定的目标集合」原样回给页面
+            "request_indices": list(indices),
             "started_at": _utc_now_iso(),
             "finished_at": None,
             "total": 0,
             "done": 0,
             "current_filename": None,
             "imported": 0,
-            "summary": {"success": 0, "skipped": 0, "failed": 0},
+            "summary": {"success": 0, "skipped": 0, "failed": 0,
+                        "total": 0, "needs_human": 0, "interrupted": 0},
+            "stats": None,
             "error": None,
             "message": "正在导入错词…",
             "result": None,
@@ -3617,13 +3837,21 @@ def _handle_vocab_apply_status(query: dict) -> tuple[int, dict]:
         "data_root": job.get("data_root"),
         "rerun_old": job.get("rerun_old"),
         "candidates_revision": job.get("candidates_revision"),
+        # P1-3/RERUN-PROGRESS P3-5：把「本次真正锁定的目标集合大小」回给页面，
+        # 页面显示的就是实际在跑的参数（rerun_old＋目标候选数）。
+        "indices_count": len(job.get("request_indices") or []),
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
+        # P1-3：长任务可理解性（RERUN-PROGRESS P3-6）——页面据此显示已用时
+        # 与「可离开页面稍后回来」；本版不提供任意进行中任务的强制取消。
+        "elapsed_seconds": _elapsed_seconds(job.get("started_at"),
+                                            job.get("finished_at")),
         "total": job.get("total"),
         "done": job.get("done"),
         "current_filename": job.get("current_filename"),
         "imported": job.get("imported"),
         "summary": job.get("summary"),
+        "stats": job.get("stats"),
         "error": job.get("error"),
         "message": job.get("message"),
         "codesummary": result.get("codesummary"),
@@ -4083,6 +4311,37 @@ def _utc_now_iso() -> str:
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z")
     )
+
+
+def _elapsed_seconds(started_at, finished_at=None) -> int:
+    """任务已用时（秒）。终态取 finished-started，运行中取 now-started。
+
+    P1-3（RERUN-PROGRESS P3-6）：长任务页面要显示 elapsed，让用户知道
+    「还在跑、可以离开页面稍后回来」，而不是误判卡死。时间戳坏/缺失回 0，
+    不抛异常也不编造时长。
+    """
+    import datetime
+
+    def _parse(value):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    begin = _parse(started_at)
+    if begin is None:
+        return 0
+    end = _parse(finished_at) if finished_at else None
+    if end is None:
+        end = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        delta = (end - begin).total_seconds()
+    except TypeError:
+        return 0
+    return max(0, int(delta))
 
 
 def _worker_record(item: dict) -> None:
@@ -4783,22 +5042,45 @@ def _handle_stop_post(body: bytes) -> tuple[int, dict]:
 
 
 def _handle_retry_post(body: bytes) -> tuple[int, dict]:
-    """UX-P0-4/P1-1：单 run 重跑，幂等（同 run 去重，不产生重复任务）。"""
+    """UX-P0-4/P1-1：单 run 重跑，幂等（同 run 去重，不产生重复任务）。
+
+    P1-3/P2-7 契约扩展：可选 `data_root`（严格取参层 `_take_data_root`）。
+      - 缺键/空串 → 沿用旧行为，取当前监听目录（向后兼容）；
+      - 非字符串/相对路径 → 400 人话，零执行；
+      - 显式给了且与当前监听目录不是同一 realpath → 409 人话零执行，
+        绝不静默按监听目录重排（防误操作别的目录 / 跨目录串任务）。
+    """
     try:
         params = json.loads(body.decode("utf-8")) if body.strip() else {}
     except (ValueError, UnicodeDecodeError):
         return 400, {"ok": False, "error": "请求体须为 JSON 对象，点重试再试一次"}
     if not isinstance(params, dict):
         return 400, {"ok": False, "error": "请求体须为 JSON 对象，点重试再试一次"}
+    # 严格取参：坏类型/相对路径先 400，再谈有没有监听（参数错了不给任何执行机会）
+    try:
+        want_root = _take_data_root(params, "", "data_root")
+    except ParamError as exc:
+        return 400, {"ok": False, "error": str(exc)}
     run_id = str(params.get("run_id") or "").strip()
     if not run_id:
         return 400, {"ok": False, "error": "缺少任务编号，请刷新后点重试"}
     with _state_lock:
         running = bool(_listener.get("running"))
         cur = dict(_worker["current"]) if _worker.get("current") else None
-        data_root = _listener.get("data_root")
+        listener_root = normalize_path(_listener.get("data_root"))
     if not running:
         return 400, {"ok": False, "error": "监听未启动，先点开始监听再点重试"}
+    if want_root:
+        # 目录身份按 realpath 判：符号链接/尾斜杠/`..` 指向同一目录不算跨目录
+        if not listener_root or os.path.realpath(want_root) != os.path.realpath(
+                listener_root):
+            return 409, {"ok": False,
+                         "error": "这次重试针对的是另一个数据目录（零执行，未重排任何任务）；"
+                                  "请先核对页面上方的数据目录与当前监听的目录是否一致，"
+                                  "避免误操作别的目录"}
+        data_root = want_root
+    else:
+        data_root = listener_root
     if cur and cur.get("run_id") == run_id:
         return 202, {"ok": True, "run_id": run_id, "state": "RUNNING",
                      "message": "该任务正在处理，无需重复操作"}
@@ -5271,6 +5553,59 @@ def _handle_note(query: dict) -> tuple[int, dict]:
 
 REAPPLY_ELIGIBLE = ("RENDER_ONLY", "PUBLISHED", "PUBLISH_BLOCKED")
 
+# ------------------------------------------------- P1-3 终态统计唯一口径
+#
+# 问题（CANDIDATE-APPLY P3-2）：同一批结果在两处算出不同的 failed——
+# `_reapply_all` 的 summary 把 `not ok`（含 skipped）全算 failed，而
+# `_run_vocab_candidates_apply` 又自己算一遍（`not ok and not skipped`），
+# 于是「跳过」既可能算失败也可能不算，页面汇总不可复算。
+#
+# 约定：逐项归类只有**一个真源** `_state_bucket`（见文件上部「五桶语义唯一真源」），
+# 本链与批量恢复链共用；五桶互斥且完备，
+#   total == success + failed + skipped + needs_human + interrupted
+# 未知 state / 坏条目一律并进 failed（fail-closed 计入失败，不静默丢弃）。
+_REAPPLY_BUCKETS = FIVE_BUCKETS
+
+
+def _reapply_result_bucket(item) -> str:
+    """逐项归类（派生自唯一真源 `_state_bucket`）：任何输入都必落且只落一个桶。
+
+    优先级：显式标记（skipped／interrupted／needs_human）> state > ok 标志。
+    **state 键存在就以它为准**（含空串／纯空白／None）→ 一律走 `_state_bucket()`，
+    表外（含空值）落 failed（fail-closed），与恢复链同源：未知 state 即使 `ok=True`
+    也判 failed，不许升成成功。存量重跑结果本身**压根不带 state 键**（真源是
+    ok 标志＋跳过标记），故**只有键不存在**时才按 ok 判，不误伤正常成功。
+    """
+    if not isinstance(item, dict):
+        return BUCKET_FAILED
+    if item.get("skipped") or item.get("skipped_user_edited"):
+        return BUCKET_SKIPPED
+    if item.get("interrupted"):
+        return BUCKET_INTERRUPTED
+    if item.get("needs_human"):
+        return BUCKET_NEEDS_HUMAN
+    # 判据是「键在不在」，不是「值真不真」：state="" / "   " / None 都算**显式给了**
+    # （旧写法 `str(... or "").strip()` 把这三者与「缺键」混为一类，于是空串被当成功，
+    #  与 `_recovery_bucket("")`＝still_failed 不同源）。
+    if "state" in item:
+        return _state_bucket(item.get("state"))
+    return BUCKET_SUCCESS if item.get("ok") else BUCKET_FAILED
+
+
+def _reapply_stats(results, total=None) -> dict:
+    """按唯一真源派生的逐项归类复算汇总；total 独立传入时给出 balanced 自检。"""
+    items = list(results or [])
+    counts = {key: 0 for key in _REAPPLY_BUCKETS}
+    for item in items:
+        counts[_reapply_result_bucket(item)] += 1
+    counted = sum(counts.values())
+    expect = len(items) if total is None else int(total)
+    out = {"total": expect, "done": counted}
+    out.update(counts)
+    out["counted"] = counted
+    out["balanced"] = counted == expect
+    return out
+
 
 def _open_rw(data_root: str):
     """读写开中央库：锁在手走 store 门，否则直连（同进程，busy 等待）。
@@ -5609,9 +5944,11 @@ def _reapply_all(data_root: str, vault_s, progress_cb=None) -> tuple[int, dict]:
     targets = [rid for rid, v in disk.items()
                if isinstance(v, dict) and v.get("state") in REAPPLY_ELIGIBLE]
     if not targets:
+        empty_stats = _reapply_stats([], total=0)
         return 200, {"ok": True, "data_root": data_root, "results": [],
                      "summary": {"total": 0, "ok": 0,
                                  "skipped_user_edited": 0, "failed": 0},
+                     "stats": empty_stats,
                      "message": "没有可重跑的已完成任务"}
     # R3：只在需要回传进度时查一次 run→文件名 映射；None 时保持旧路径零多余查询
     fn_map = {}
@@ -5653,17 +5990,26 @@ def _reapply_all(data_root: str, vault_s, progress_cb=None) -> tuple[int, dict]:
                                              or _name(rid))})
             except Exception:
                 pass
-    summary = {"total": len(results),
-               "ok": sum(1 for r in results if r.get("ok")),
-               "skipped_user_edited": sum(
-                   1 for r in results if r.get("skipped_user_edited")),
-               "failed": sum(1 for r in results if not r.get("ok"))}
+    # P1-3 统计统一：五桶由唯一归类函数复算，`failed` 不再把「跳过」算进去
+    # （旧口径 `not ok` 会把 user-edited 跳过同时算 ok 又算 failed，汇总对不上）。
+    stats = _reapply_stats(results, total=total)
+    summary = {"total": stats["total"],
+               "ok": stats["success"],
+               "skipped_user_edited": stats["skipped"],
+               "failed": stats["failed"],
+               "needs_human": stats["needs_human"],
+               "interrupted": stats["interrupted"],
+               "counted": stats["counted"],
+               "balanced": stats["balanced"]}
+    message = "重跑 %d 个：成功 %d，库内你改过跳过 %d，失败 %d" % (
+        summary["total"], summary["ok"], summary["skipped_user_edited"],
+        summary["failed"])
+    if summary["needs_human"] or summary["interrupted"]:
+        message += "，待人工 %d，中断 %d" % (summary["needs_human"],
+                                            summary["interrupted"])
     return 200, {"ok": True, "data_root": data_root, "results": results,
-                 "summary": summary,
-                 "message": "重跑 %d 个：成功 %d，库内你改过跳过 %d，失败 %d"
-                            % (summary["total"], summary["ok"],
-                               summary["skipped_user_edited"],
-                               summary["failed"])}
+                 "summary": summary, "stats": stats,
+                 "message": message}
 
 
 def _handle_reapply_post(body: bytes, progress_cb=None) -> tuple[int, dict]:

@@ -1,0 +1,11 @@
+# Windows 端副本（本目录整体拷过去即为新仓库根内容）
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+data/
+.DS_Store
+*.log
+third_party/

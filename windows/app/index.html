@@ -1,0 +1,2564 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>懒得笔记 · 本地视频自动转文字</title>
+<style>
+:root{
+  --bg:#10181A; --panel:#18262A; --panel2:#142024;
+  --text:#D8E4DE; --dim:#8FA5A0; --line:#274044;
+  --orange:#E07B39; --green:#7FB069; --red:#C65D4E; --yellow:#D9A441;
+  --input-bg:#0C1214;
+  --title-font:"Songti SC","Noto Serif SC",serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+}
+:root[data-theme="light"]{
+  --bg:#F4F1E8; --panel:#FBF9F3; --panel2:#ECE7D8;
+  --text:#1A1A18; --dim:#6B6A60; --line:#D8D2C0;
+  --orange:#C8402A; --green:#3A6B7C; --red:#B03028; --yellow:#8A6D1B;
+  --input-bg:#FFFFFF;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px}
+header.top{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--line);background:var(--panel2)}
+header.top h1{font-family:var(--title-font);font-size:20px;margin:0;letter-spacing:2px}
+header.top h1 .v2o{color:var(--orange)}
+header.top .meta{font-family:var(--mono);font-size:12px;color:var(--dim)}
+header.top .lock{margin-left:auto;font-family:var(--mono);font-size:12px;padding:4px 12px;border:1px solid var(--line);border-radius:20px}
+header.top .lock.on{color:var(--green);border-color:var(--green)}
+header.top .lock.off{color:var(--dim)}
+header.top .theme{font-family:var(--mono);font-size:12px;padding:4px 12px;border:1px solid var(--line);border-radius:20px;background:transparent;color:var(--text);cursor:pointer}
+/* FR-10/HD-9=A：普通文档流顶部横条（不 sticky、不可收起）；FR-11 两列栅格 */
+main{display:block;padding:12px 20px;max-width:1280px;margin:0 auto}
+.cols{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:12px;align-items:start}
+@media (max-width:960px){.cols{grid-template-columns:1fr}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0}
+section h2{font-size:13px;color:var(--dim);margin:0 0 10px;font-weight:600}
+.flowbar{display:flex;align-items:center;gap:10px;padding:6px 12px;margin:0 0 12px}
+.flowbar::before{content:"懒得笔记 · 本机磁带";font-family:var(--mono);font-size:10px;color:var(--orange);letter-spacing:2px;flex:0 0 auto}
+#tape{display:flex;flex:1 1 auto;gap:6px;flex-wrap:wrap;align-items:center;min-width:0}
+.seg{display:inline-flex;align-items:baseline;gap:6px;margin:0;padding:3px 8px;background:var(--panel2);border:1px solid var(--dim);border-radius:4px}
+.seg .nm{font-size:12px}
+.seg .sttxt{font-size:11px;color:var(--dim)}
+.seg.ok{border-color:var(--green)} .seg.ok .nm,.seg.ok .sttxt{color:var(--green)}
+.seg.warn{border-color:var(--orange)} .seg.warn .nm,.seg.warn .sttxt{color:var(--orange)}
+.seg.err{border-color:var(--red)} .seg.err .nm,.seg.err .sttxt{color:var(--red)}
+label.flab{display:block;font-size:12px;color:var(--text);margin:8px 0 4px}
+label.flab .req{color:var(--orange)}
+.pathrow{display:flex;gap:6px;margin-bottom:2px}
+.pathrow input{flex:1 1 auto;background:var(--input-bg);border:1px solid var(--line);color:var(--text);
+  border-radius:4px;padding:7px 10px;font-family:var(--mono);font-size:12px;min-width:0}
+.pathrow input.bad{border-color:var(--red)}
+.pathrow input.good{border-color:var(--green)}
+.pathrow button{flex:0 0 auto;background:transparent;border:1px solid var(--line);color:var(--text);
+  border-radius:4px;padding:7px 10px;cursor:pointer;font-size:12px;font-family:var(--mono)}
+.vhint{font-size:12px;margin:2px 0 6px;min-height:16px}
+.vhint.err{color:var(--red)} .vhint.ok{color:var(--green)} .vhint.warn{color:var(--yellow)}
+details.adv{margin:6px 0;border:1px dashed var(--line);border-radius:4px;padding:6px 8px}
+details.adv summary{cursor:pointer;color:var(--dim);font-size:12px}
+.controls{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.controls button{background:var(--orange);border:none;color:#fff;font-weight:700;
+  border-radius:4px;padding:7px 16px;cursor:pointer;font-size:13px}
+.controls button.ghost{background:transparent;border:1px solid var(--line);color:var(--text);font-weight:400}
+.controls button:disabled{opacity:.55;cursor:not-allowed}
+.controls button.ready{box-shadow:0 0 0 2px var(--green)}
+.controls button:active{transform:translateY(1px)}
+.hint{font-size:12px;color:var(--dim);margin:0 0 6px}
+.hint.err{color:var(--red)} .hint.ok{color:var(--green)} .hint.warn{color:var(--yellow)}
+#liveBar{display:none;margin:0 0 8px;padding:8px 10px;border-radius:6px;font-size:12px;
+  background:rgba(127,176,105,.12);border:1px solid var(--green);color:var(--green)}
+#preview{font-size:12px;color:var(--dim);margin:0 0 6px;word-break:break-all}
+#longHint{font-size:12px;color:var(--yellow);margin:0 0 6px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{color:var(--dim);text-align:left;font-weight:600;padding:6px;border-bottom:1px solid var(--line)}
+td{padding:6px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12px;word-break:break-all}
+tbody tr{cursor:pointer} tbody tr:hover td{background:var(--panel2)}
+tbody tr.sel td{background:var(--panel2)}
+.st-ok{color:var(--green)} .st-bad{color:var(--red)} .st-warn{color:var(--orange)}
+.empty{padding:24px 12px;color:var(--dim);line-height:2}
+.empty b{color:var(--text)}
+.empty ol{margin:8px 0;padding-left:20px}
+.kv{font-size:12px;line-height:2}
+.kv .k{color:var(--dim)} .kv .v{font-family:var(--mono);word-break:break-all}
+.kv .failbox{margin:8px 0;padding:8px 10px;border:1px solid var(--red);border-radius:6px;background:rgba(198,93,78,.08)}
+.kv .failbox .r{color:var(--red);font-weight:700}
+.kv .failbox .n{color:var(--text)}
+.kv .evbox{margin:8px 0;padding:8px 10px;border:1px solid var(--line);border-radius:6px}
+.kv .evbox .evh{font-size:12px;color:var(--dim);margin-bottom:6px}
+.kv .ev{white-space:pre-wrap;word-break:break-all;font-family:var(--mono);font-size:11px;line-height:1.7;margin:0;color:var(--text);max-height:min(50vh,420px);overflow:auto}
+.kv button,.mini{font-size:12px;padding:4px 10px;border-radius:4px;border:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}
+.kv button.go{background:var(--orange);border:none;color:#fff;font-weight:700}
+footer{max-width:1280px;margin:0 auto;padding:0 20px 20px;color:var(--dim);font-size:11px;font-family:var(--mono)}
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:50}
+.modal.open{display:block}
+.box{max-width:560px;margin:8vh auto;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}
+.box h3{margin:0 0 8px;font-size:14px}
+.crumbs{font-family:var(--mono);font-size:12px;color:var(--dim);margin-bottom:8px;word-break:break-all}
+.crumbs a{color:var(--orange);cursor:pointer;text-decoration:none}
+.dirs{max-height:40vh;overflow:auto;border:1px solid var(--line);border-radius:4px}
+.dirs div{padding:8px 10px;font-family:var(--mono);font-size:12px;cursor:pointer;border-bottom:1px solid var(--line)}
+.dirs div:hover{background:var(--panel2)}
+.box .row{display:flex;gap:8px;margin-top:10px}
+.box .row button{flex:1;background:var(--orange);border:none;color:#fff;font-weight:700;border-radius:4px;padding:8px;cursor:pointer}
+.box .row button.ghost{background:transparent;border:1px solid var(--line);color:var(--text);font-weight:400}
+#browseInfo{font-size:12px;margin:6px 0}
+#browseInfo.warn{color:var(--yellow)}
+#progress{margin:0 0 10px;padding:8px 10px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;font-size:12px}
+#progText{font-size:12px;margin-bottom:6px;word-break:break-all}
+#progStageText{font-size:12px;color:var(--dim);margin:6px 0 4px;word-break:break-all}
+.bar{height:8px;background:var(--input-bg);border:1px solid var(--line);border-radius:4px;overflow:hidden;margin-bottom:4px;display:flex}
+#progFillOk{height:100%;width:0%;background:var(--green);transition:width .3s}
+#progFillFail{height:100%;width:0%;background:var(--red);transition:width .3s}
+#progFillPending{height:100%;width:0%;background:var(--dim);opacity:.45;transition:width .3s}
+#progStageFill{height:100%;width:0%;background:var(--orange);transition:width .3s}
+#candidateApplyProgress{margin:6px 0}
+#candidateApplyFill{height:100%;width:0%;background:var(--green);transition:width .3s}
+.stageNote{font-size:11px;color:var(--dim)}
+#toasts{position:fixed;right:16px;bottom:16px;z-index:99;display:flex;flex-direction:column;gap:8px}
+.toast{padding:10px 14px;border-radius:6px;font-size:13px;max-width:360px;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.3)}
+.toast.ok{background:rgba(127,176,105,.95);color:#10231a}
+.toast.err{background:rgba(198,93,78,.95);color:#fff}
+.copybtn{margin-left:6px}
+.notebox{margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel2)}
+.notebox pre{white-space:pre-wrap;word-break:break-all;font-family:var(--sans);font-size:12px;max-height:40vh;overflow:auto;margin:6px 0 0}
+.obdis{color:var(--dim);cursor:not-allowed;text-decoration:none}
+header.top .lock.warn{color:var(--yellow);border-color:var(--yellow)}
+.mini.go,.outrow .mini.go{background:var(--orange);border:none;color:#fff;font-weight:700}
+.runsheadbtns{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}
+.runsheadbtns button{font-size:12px;padding:4px 10px;border-radius:4px;border:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}
+.runsheadbtns button.go{background:var(--orange);border:none;color:#fff;font-weight:700}
+/* FR-12 完成区计数/展开；FR-15 标题区隐藏开关（只改视图过滤，不删数据） */
+.hidetoggle{margin-left:8px;font-size:12px;font-weight:400;color:var(--text);cursor:pointer;white-space:nowrap}
+.hidetoggle input{vertical-align:-2px}
+#completedBar{margin:6px 0}
+#completedBar button{font-size:12px;padding:4px 10px;border-radius:4px;border:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}
+.notestatus{margin:6px 0;padding:6px 8px;border-radius:4px;font-size:12px;word-break:break-all;line-height:1.6}
+.notestatus.warn{background:rgba(217,164,65,.14);border:1px solid var(--yellow);color:var(--yellow)}
+.notestatus.ok{color:var(--dim)}
+.btnrow{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.outrow{display:flex;gap:6px;align-items:center;justify-content:flex-start;flex-wrap:nowrap}
+.outrow .mini,.outrow .obbtn{flex:0 0 auto;height:24px;line-height:22px;padding:0 10px;font-size:12px;
+  border-radius:4px;border:1px solid var(--line);background:transparent;color:var(--text);
+  cursor:pointer;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;box-sizing:border-box}
+.outrow a.obbtn{cursor:pointer}
+.obhint{font-size:11px;color:var(--dim);margin-top:2px;line-height:1.5}
+#queueLine{font-size:12px;color:var(--dim);margin-top:4px}
+#vocabBox{margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel2)}
+#vocabBox h3{margin:0 0 6px;font-size:13px}
+#vocabList{font-size:12px;font-family:var(--mono);margin-bottom:6px}
+#vocabListDetails{margin:6px 0;border:1px dashed var(--line);border-radius:5px;padding:6px 8px}
+#vocabListDetails>summary{cursor:pointer;color:var(--text);font-size:12px}
+#vocabFilter{width:100%;margin:6px 0;background:var(--input-bg);border:1px solid var(--line);color:var(--text);border-radius:4px;padding:6px 8px;font-size:12px}
+#vocabList .vocabGroup{margin:5px 0;border-top:1px dashed var(--line)}
+#vocabList .vocabGroup>summary{cursor:pointer;color:var(--dim);padding:4px 0}
+#presetBox{margin:2px 0 6px;font-size:12px}
+#presetBox .presetRow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:3px 0;border-bottom:1px dashed var(--line)}
+#presetBox label{cursor:pointer;white-space:nowrap}
+#presetBox .mini{margin-left:4px}
+#presetBox .presetEntries{flex:1 0 100%;margin:2px 0 4px;padding:4px 8px;border-left:2px solid var(--line);max-height:180px;overflow:auto}
+#presetBox .presetEntries .pentry{font-family:var(--mono);padding:2px 0;word-break:break-all}
+#vocabList .vrow{display:flex;gap:6px;align-items:center;padding:3px 0;border-bottom:1px dashed var(--line)}
+#vocabList .vrow span{flex:1;word-break:break-all}
+#candidateBox{margin-top:8px;padding:8px;border:1px dashed var(--line);border-radius:5px;background:var(--input-bg)}
+#candidateBox h4{margin:0 0 5px;font-size:12px;color:var(--text)}
+#candidateBox .candHead{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px}
+#candidateBox .candHead label{font-size:12px;white-space:nowrap}
+#candidateBox .candGroup{margin:5px 0}.candGroup summary{cursor:pointer;color:var(--dim);font-size:12px}
+#candidateBox .candGroupHead{color:var(--text);cursor:pointer}
+#candidateBox .candRow{display:flex;gap:5px;align-items:flex-start;padding:3px 0;border-top:1px dashed var(--line);font-size:12px;line-height:1.5}
+#candidateBox .candRow input{margin-top:4px}.candText{flex:1;word-break:break-all}.candEvidence{color:var(--dim);font-size:11px}
+#candidateBox .candEvidenceDetails{margin-top:2px;color:var(--dim);font-size:11px}
+#recoverBox{margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel2)}
+#recoverBox h3{margin:0 0 6px;font-size:13px}
+#longPanel{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:60;display:none}
+#longPanel.open{display:block}
+#longPanel .box{max-width:640px}
+#longPanelText{max-height:min(70vh,560px);overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:12px;font-family:var(--mono);border:1px solid var(--line);border-radius:4px;padding:8px;background:var(--input-bg)}
+</style>
+</head>
+<body>
+<header class="top">
+  <h1><span class="v2o">懒得笔记</span> 本地视频自动转文字</h1>
+  <span class="meta">本地运行 · 数据默认在外置测试目录</span>
+  <span class="lock off" id="lock">● 未监听</span>
+  <button class="theme" id="btnTheme" title="切换深色/浅色">◐ 浅色</button>
+</header>
+<main>
+  <section class="flowbar" aria-label="流程状态条">
+    <div id="tape"></div>
+  </section>
+  <div class="cols">
+  <section>
+    <h2>处理任务<label class="hidetoggle" for="hideDoneChk" title="只隐藏本页完成列表的显示，不改任何业务数据；按数据目录分区记住，可随时取消恢复"><input type="checkbox" id="hideDoneChk"> 隐藏已完成</label></h2>
+    <div id="liveBar"></div>
+    <label class="flab" for="inInput">视频文件夹 <span class="req">（必填）</span></label>
+    <div class="pathrow">
+      <input id="inInput" placeholder="如 /Users/你的名字/Movies/待转写">
+      <button data-browse="inInput" title="浏览目录">浏览</button>
+    </div>
+    <div class="vhint" id="vInput"></div>
+    <label class="flab" for="inVault">笔记库目录（选填，不填也能转）</label>
+    <div class="pathrow">
+      <input id="inVault" placeholder="如 /Users/你的名字/笔记库，不填则只存数据目录">
+      <button data-browse="inVault" title="浏览目录">浏览</button>
+    </div>
+    <div class="vhint" id="vVault"></div>
+    <details class="adv" id="advBox">
+      <summary>高级（一般不用点开）</summary>
+      <label class="flab" for="inData">数据目录（一般不用改）</label>
+      <div class="pathrow">
+        <input id="inData" placeholder="默认外置测试目录，一般不用改">
+        <button data-browse="inData" title="浏览目录">浏览</button>
+      </div>
+      <div class="vhint" id="vData"></div>
+    </details>
+    <div class="controls">
+      <button id="btnStart">开始监听</button>
+      <button class="ghost" id="btnStop" style="display:none">停止</button>
+      <button class="ghost" id="btnRefresh">刷新</button>
+      <button class="ghost" id="btnClear">清空本目录任务</button>
+      <button class="ghost" id="btnNewData" style="display:none">一键换新数据目录</button>
+    </div>
+    <p class="hint" id="msg">每 5 秒自动轮询状态。</p>
+    <p class="hint" id="editHint" style="display:none"></p>
+    <p class="hint"><button class="mini" id="btnViewLong" style="display:none">查看已复制内容</button></p>
+    <p class="hint" id="preview"></p>
+    <p class="hint warn" id="longHint" style="display:none"></p>
+    <p class="hint" id="worker"></p>
+    <div id="progress"><div id="progText">空闲：暂无排队视频</div><div class="bar"><div id="progFillOk"></div><div id="progFillFail"></div><div id="progFillPending"></div></div><div id="queueLine"></div><div id="progStageText" style="display:none"></div><div class="bar" id="stageBarWrap" style="display:none"><div id="progStageFill"></div></div><div class="stageNote" id="stageNote" style="display:none">步骤进度非精确百分比，仅表示当前在哪一步</div></div>
+    <div id="recoverBox">
+      <h3>恢复与重试（首屏统一入口）</h3>
+      <div class="hint">批量恢复动作只在本框内；详情区只留「当前任务」的上下文快捷操作。每个动作都标明作用范围与 whisper 成本。</div>
+      <div class="btnrow">
+        <button class="mini go" id="btnRecTranscribe" title="范围：全部失败任务；会重新转写，whisper 会跑，有时间成本">重新转写全部失败（范围：全部失败任务；whisper 会跑，有成本）</button>
+        <button class="mini" id="btnRecReuse" title="范围见下方「重新成稿范围」；只重排整理与成稿，whisper 0次，库内改过的笔记跳过、已发布的不覆盖">从已有文字重新成稿（范围：当前所选任务；whisper 0次）</button>
+        <button class="mini" id="btnRecPublish" title="范围：当前所选任务；只重新入库，whisper 0次，只写不存在的新笔记，不覆盖">仅重新入库（范围：当前所选任务；whisper 0次）</button>
+      </div>
+      <div class="hint" id="recScopeRow">重新成稿范围：<label><input type="radio" id="recScopeSel" name="recScope" value="sel" checked> 当前所选任务</label> <label><input type="radio" id="recScopeAll" name="recScope" value="all"> 全部已完成任务</label></div>
+      <div class="hint warn" id="batchLockHint"></div>
+      <div class="hint" id="recoverHint"></div>
+    </div>
+    <div id="runsHead" class="hint" style="display:none"></div>
+    <div id="runsWrap"><table>
+      <thead><tr><th>任务</th><th>来源</th><th>状态</th><th>输出</th><th>更新时间</th><th>操作</th></tr></thead>
+      <tbody id="runs"></tbody>
+    </table></div>
+    <div id="completedBar" class="hint" style="display:none"></div>
+    <div class="empty" id="empty" style="display:none"></div>
+    <div id="vocabBox">
+      <h3>词汇（错词→正词，新转写自动应用；错词至少2字，2-3字短词二次确认）</h3>
+      <div class="hint" id="vocRev"></div>
+      <div id="presetBox"></div>
+      <div class="vhint" id="vPreset"></div>
+      <div id="candidateBox">
+        <h4>待审清单（AI 找到的疑似错词）</h4>
+        <div class="candHead"><label><input type="checkbox" id="candidateSelectAll"> 全选</label><button class="mini" id="btnCandidateApply" disabled title="范围：勾选的候选；先改词库，再对全部已完成稿件重新成稿（whisper 0次）">错词重跑（范围：勾选的候选；whisper 0次）</button><label><input type="checkbox" id="candidateRerunOld" disabled> 已跑过的也重跑</label><label><input type="checkbox" id="candidateOnlyNew" checked disabled> 只对新视频生效</label></div>
+        <div id="candidateApplyProgress" style="display:none">
+          <div class="bar"><div id="candidateApplyFill"></div></div>
+          <div class="hint" id="candidateApplyText"></div>
+        </div>
+        <div id="candidateList"><div class="hint">正在读取待审清单…</div></div>
+        <div class="vhint" id="vCandidate"></div>
+      </div>
+      <details id="vocabListDetails">
+        <summary id="vocabListSummary">已导入词库（0条）</summary>
+        <input id="vocabFilter" type="search" placeholder="筛选错词或正词（空即显示全部）">
+        <div id="vocabList"></div>
+      </details>
+      <div class="pathrow">
+        <input id="vocWrong" placeholder="错词（转写里听错的样子）">
+        <input id="vocRight" placeholder="正词（你想要的样子）">
+        <button id="btnVocAdd" title="添加错→正对子">添加</button>
+      </div>
+      <div class="vhint" id="vVoc"></div>
+    </div>
+  </section>
+  <section>
+    <h2>选中任务详情</h2>
+    <div class="kv" id="lineage"><span class="k">点击左侧任意一行查看详情。</span></div>
+  </section>
+  </div>
+</main>
+<div class="modal" id="modal"><div class="box">
+  <h3>选择目录</h3>
+  <div class="crumbs" id="crumbs"></div>
+  <div id="browseInfo"></div>
+  <div class="dirs" id="bdirs"></div>
+  <div class="row">
+    <button id="btnPick">选定当前目录</button>
+    <button class="ghost" id="btnClose">关闭</button>
+  </div>
+</div></div>
+<div class="modal" id="clearModal"><div class="box">
+  <h3>清空本目录任务（先看清代价）</h3>
+  <div id="clearCost" style="font-size:13px;line-height:1.9;white-space:pre-wrap;word-break:break-all"></div>
+  <div class="hint" id="clearMsg" style="margin-top:8px"></div>
+  <div class="row">
+    <button class="ghost" id="btnClearCancel">取消</button>
+    <button id="btnClearFailed">只清失败</button>
+    <button id="btnClearAll" style="background:var(--red)">全部清空</button>
+  </div>
+</div></div>
+<div id="toasts"></div>
+<div id="longPanel" role="dialog" aria-modal="true" aria-labelledby="longPanelTitle"><div class="box">
+  <h3 id="longPanelTitle">已复制内容</h3>
+  <pre id="longPanelText"></pre>
+  <div class="row">
+    <button id="btnLongClose">关闭</button>
+  </div>
+</div></div>
+<footer id="foot">采集 · —</footer>
+<script>
+"use strict";
+var SEGS=[
+  {id:"found",nm:"发现",sub:"发现的视频"},
+  {id:"task",nm:"任务",sub:"待处理的任务"},
+  {id:"raw",nm:"原文",sub:"原始听写"},
+  {id:"tidy",nm:"整理",sub:"整理后的文字"},
+  {id:"draft",nm:"成稿",sub:"可存的笔记初稿"},
+  {id:"store",nm:"入库",sub:"存入笔记库"},
+  {id:"archive",nm:"归档",sub:"归档记录"}
+];
+var selected=null, cache={runs:[]};
+var browseTarget=null, browsePath="";
+var detailsByRun={}, lastSnap=null, lastFetchAt=0, lastStageAt=0, lastStageKey="";
+var prevDone=-1, prevFailed=-1, prevSkipped=-1, notifAsked=false, longInInput=0;
+// P0-1 三路径 localStorage 持久化（清空则回默认，不崩）
+var LS_INPUT="v2o-input-root", LS_VAULT="v2o-vault-root", LS_DATA="v2o-data-root";
+function lsGet(k){try{return localStorage.getItem(k)||"";}catch(e){return "";}}
+function lsSet(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+// FR-15/HD-7=A：同步紧凑 SHA-256（仅作 data_root 不可逆摘要用；前端自测钉已知向量）
+function sha256Hex(str){
+  function isPrime(n){for(var f=2;f*f<=n;f++){if(n%f===0)return false;}return true;}
+  function frac(x){return x-Math.floor(x);}
+  var primes=[],n=2,i,j;
+  while(primes.length<64){if(isPrime(n))primes.push(n);n++;}
+  var H=[],K=[];
+  for(i=0;i<64;i++){
+    if(i<8)H.push(Math.floor(frac(Math.sqrt(primes[i]))*4294967296));
+    K.push(Math.floor(frac(Math.cbrt(primes[i]))*4294967296));
+  }
+  var utf8=unescape(encodeURIComponent(String(str)));
+  var bytes=[];
+  for(i=0;i<utf8.length;i++)bytes.push(utf8.charCodeAt(i)&255);
+  var bitLen=bytes.length*8;
+  bytes.push(128);
+  while(bytes.length%64!==56)bytes.push(0);
+  var hi=Math.floor(bitLen/4294967296),lo=bitLen-hi*4294967296;
+  [hi,lo].forEach(function(v){bytes.push((v>>>24)&255,(v>>>16)&255,(v>>>8)&255,v&255);});
+  for(i=0;i<bytes.length;i+=64){
+    var w=new Array(64);
+    for(j=0;j<16;j++)w[j]=(bytes[i+4*j]<<24)|(bytes[i+4*j+1]<<16)|(bytes[i+4*j+2]<<8)|bytes[i+4*j+3];
+    for(j=16;j<64;j++){
+      var s0=((w[j-15]>>>7)|(w[j-15]<<25))^((w[j-15]>>>18)|(w[j-15]<<14))^(w[j-15]>>>3);
+      var s1=((w[j-2]>>>17)|(w[j-2]<<15))^((w[j-2]>>>19)|(w[j-2]<<13))^(w[j-2]>>>10);
+      w[j]=(w[j-16]+s0+w[j-7]+s1)|0;
+    }
+    var a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+    for(j=0;j<64;j++){
+      var S1=((e>>>6)|(e<<26))^((e>>>11)|(e<<21))^((e>>>25)|(e<<7));
+      var ch=(e&f)^(~e&g);
+      var t1=(h+S1+ch+K[j]+w[j])|0;
+      var S0=((a>>>2)|(a<<30))^((a>>>13)|(a<<19))^((a>>>22)|(a<<10));
+      var mj=(a&b)^(a&c)^(b&c);
+      var t2=(S0+mj)|0;
+      h=g;g=f;f=e;e=(d+t1)|0;d=c;c=b;b=a;a=(t1+t2)|0;
+    }
+    H[0]=(H[0]+a)|0;H[1]=(H[1]+b)|0;H[2]=(H[2]+c)|0;H[3]=(H[3]+d)|0;
+    H[4]=(H[4]+e)|0;H[5]=(H[5]+f)|0;H[6]=(H[6]+g)|0;H[7]=(H[7]+h)|0;
+  }
+  var out="";
+  for(i=0;i<8;i++)out+=("00000000"+((H[i]>>>0).toString(16))).slice(-8);
+  return out;
+}
+// FR-15/HD-7=A：隐藏已完成只写 localStorage；键按 data_root 摘要（sha256 前 8 位）分区
+function hideDoneKey(){
+  var dr="";
+  try{dr=String(dataRoot()||"").trim()||String(effectiveDataRoot||"").trim();}catch(e){}
+  return "v2o-hide-done-"+sha256Hex(dr).slice(0,8);
+}
+function hideDoneGet(){return lsGet(hideDoneKey())==="1";}
+function hideDoneSet(v){lsSet(hideDoneKey(),v?"1":"0");}
+function savePaths(){
+  try{
+    var a=el("inInput").value.trim(), b=el("inVault").value.trim(), c=el("inData").value.trim();
+    if(a)lsSet(LS_INPUT,a); if(b)lsSet(LS_VAULT,b); if(c)lsSet(LS_DATA,c);
+    if(!a){try{localStorage.removeItem(LS_INPUT);}catch(e){}}
+    if(!b){try{localStorage.removeItem(LS_VAULT);}catch(e){}}
+    if(!c){try{localStorage.removeItem(LS_DATA);}catch(e){}}
+  }catch(e){}
+}
+function restorePathsFromLS(){
+  try{
+    if(!el("inInput").value&&lsGet(LS_INPUT))el("inInput").value=lsGet(LS_INPUT);
+    if(!el("inVault").value&&lsGet(LS_VAULT))el("inVault").value=lsGet(LS_VAULT);
+    if(!el("inData").value&&lsGet(LS_DATA))el("inData").value=lsGet(LS_DATA);
+  }catch(e){}
+}
+try{restorePathsFromLS();}catch(e){}
+function el(id){return document.getElementById(id);}
+function applyTheme(t){
+  // 默认浅色：只有显式 dark 才深色，其余（空/脏值/读不到）一律 light
+  var use=(t==="dark")?"dark":"light";
+  document.documentElement.setAttribute("data-theme", use);
+  el("btnTheme").textContent = use==="light" ? "◑ 深色" : "◐ 浅色";
+  try{localStorage.setItem("v2o-theme", use);}catch(e){}
+}
+(function initTheme(){
+  var t="light";
+  try{
+    if(!localStorage.getItem("v2o-theme-migrated")){
+      // 一次性迁移：旧版同键曾默认 dark 并回写，先清污染再强制 light，写标记
+      localStorage.removeItem("v2o-theme");
+      localStorage.setItem("v2o-theme-migrated","1");
+      t="light";
+    }else{
+      // 迁移已完成：照旧读取，记住用户手动切换
+      t=localStorage.getItem("v2o-theme")||"light";
+    }
+  }catch(e){t="light";}
+  applyTheme(t);
+})();
+el("btnTheme").onclick=function(){
+  var cur=document.documentElement.getAttribute("data-theme")||"light";
+  applyTheme(cur==="light"?"dark":"light");
+};
+// FR-15：隐藏已完成开关（只写 localStorage、按 data_root 分区；只改视图过滤）
+try{el("hideDoneChk").checked=hideDoneGet();}catch(e){}
+el("hideDoneChk").onchange=function(){
+  hideDoneSet(el("hideDoneChk").checked);
+  if(lastSnap)renderRuns(lastSnap);
+};
+function dataRoot(){return el("inData").value.trim();}
+function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];});}
+function stripQuotes(raw){
+  if(typeof raw!=="string")return "";
+  var t=raw.trim();
+  if(t.length>=2 && t[0]===t[t.length-1] && (t[0]==="'"||t[0]==='"'))t=t.slice(1,-1).trim();
+  return t;
+}
+function statusCN(r, cur){
+  // FR-13 监听脱钩：同快照下监听开关不改任务文字/颜色/计数；
+  // 只有 run 自身处于 ACTIVE 且有 worker 当前阶段时，才显示阶段文案。
+  var wid=r&&r.run_id, d=wid?detailsByRun[wid]:null;
+  var ws=d?d.state:null;
+  var isActive=String((r&&r.status)||"")==="ACTIVE"||String((r&&r.status)||"")==="RUNNING";
+  if(isActive&&cur&&cur.run_id===wid&&cur.stage){
+    var st=cur.stage;
+    if(st==="发现")return "发现中";
+    if(st==="听写中"||st==="整理中"||st==="成稿中"||st==="入库中")return st;
+  }
+  if(ws==="PUBLISHED")return "已入库";
+  if(ws==="RENDER_ONLY")return "已成稿未入库";
+  if(ws==="FAIL")return "失败";
+  if(ws==="PUBLISH_BLOCKED")return "入库受阻";
+  // DEVELOP-P1-9：库里已有同名笔记 → 没转写（没做，不算失败）
+  if(ws==="SKIPPED")return "已跳过（笔记已存在）";
+  var s=String(r.status||"");
+  if(s==="FAILED_RETRYABLE")return "失败可重试";
+  if(s==="NO_SPEECH_DETECTED")return "未检测到语音";
+  return "排队中";
+}
+function stClass(cn){
+  cn=String(cn||"");
+  if(/失败|受阻/.test(cn))return "st-bad";
+  if(/排队|发现|听写|整理|成稿|入库中|重试|未检测/.test(cn))return "st-warn";
+  return "st-ok";
+}
+function segState(id,counts,err){
+  var c=counts||{};
+  function n(t){var o=0;Object.keys(c[t]||{}).forEach(function(k){o+=c[t][k];});return o;}
+  if(err>0&&(id==="found"||id==="task"))return "err";
+  if(id==="found")return n("sources")>0?"ok":"";
+  if(id==="task")return n("processing_runs")>0?"ok":"";
+  if(id==="raw")return (n("artifacts")>0||n("processing_runs")>0)?"ok":"";
+  if(id==="tidy"||id==="draft")return n("artifacts")>0?"ok":"";
+  if(id==="store")return n("discovery_candidates")>0?"warn":"";
+  if(id==="archive")return n("archive_commits")>0?"ok":"";
+  return "";
+}
+// FR-10/HD-9=A：节点状态用文字表达（非颜色单一通道），颜色只是辅助
+function segStateText(st){
+  if(st==="ok")return "有记录";
+  if(st==="warn")return "待确认";
+  if(st==="err")return "有失败";
+  return "暂无";
+}
+function renderTape(snap){
+  var counts=snap&&snap.counts_by_state||{}, err=(snap&&snap.error_count)||0;
+  var h="";
+  SEGS.forEach(function(s){
+    var st=segState(s.id,counts,err);
+    h+='<div class="seg '+st+'" title="'+esc(s.sub)+'"><span class="nm">'+esc(s.nm)+'</span><span class="sttxt">'+esc(segStateText(st))+'</span></div>';
+  });
+  el("tape").innerHTML=h;
+}
+function outPathFor(run_id){
+  var d=detailsByRun[run_id];
+  if(!d)return null;
+  if(d.state==="PUBLISHED"&&d.canonical_output_path)return d.canonical_output_path;
+  if(d.state==="RENDER_ONLY"&&d.rendered_path)return d.rendered_path;
+  if(d.state==="PUBLISH_BLOCKED"&&d.rendered_path)return d.rendered_path;
+  if(d.state==="PUBLISH_BLOCKED"&&d.canonical_output_path)return d.canonical_output_path;
+  return null;
+}
+function vaultBase(p){p=String(p||"").replace(/\/+$/,"");var i=p.lastIndexOf("/");return i>=0?p.slice(i+1):p;}
+function shortId(id){try{var s=String(id||"");return s.length>6?s.slice(-6):s;}catch(e){return String(id||"");}}
+function filenameForRun(r){
+  try{
+    if(r&&typeof r.source_filename==="string"&&r.source_filename.trim())return r.source_filename.trim();
+    if(r&&r.run_id&&detailsByRun[r.run_id]&&detailsByRun[r.run_id].source_filename)return String(detailsByRun[r.run_id].source_filename);
+  }catch(e){}
+  return "未知文件";
+}
+function filenameForRunId(run_id){
+  try{
+    for(var i=0;i<(cache.runs||[]).length;i++){
+      var r=cache.runs[i];
+      if(r&&String(r.run_id)===String(run_id)){
+        if(r.source_filename)return String(r.source_filename);
+        break;
+      }
+    }
+    if(detailsByRun[run_id]&&detailsByRun[run_id].source_filename)return String(detailsByRun[run_id].source_filename);
+    var w=lastLock&&lastLock.worker;
+    if(w&&w.processed){
+      for(var j=w.processed.length-1;j>=0;j--){
+        var p=w.processed[j];
+        if(p&&String(p.run_id)===String(run_id)&&p.source_filename)return String(p.source_filename);
+      }
+    }
+    if(w&&w.current&&String(w.current.run_id)===String(run_id)&&w.current.filename)return String(w.current.filename);
+  }catch(e){}
+  return "未知文件";
+}
+// UX2-P1-3/P1-7：失败判定与“原因/下一步”拆解（列表头批量重试/复制原因共用）
+function isFailedRun(r){
+  var d=detailsByRun[r.run_id];
+  if(d&&d.state)return d.state==="FAIL"||d.state==="PUBLISH_BLOCKED";
+  var s=String(r.status||"");
+  return /^FAILED/.test(s)||s==="NO_SPEECH_DETECTED";
+}
+function failPartsForRun(r){
+  var d=detailsByRun[r.run_id];
+  var blocked=!!(d&&d.state==="PUBLISH_BLOCKED");
+  var v=d?String(d.verdict||""):"";
+  var parts=v.split("→");
+  var reason=(parts[0]||(blocked?"初稿已保留，入库未完成":"转写没成功")).trim()||"转写没成功";
+  var next=(parts[1]||(blocked?"看本地证据确认原因后点重试入库":"点重试再试一次")).trim()||"点重试再试一次";
+  return {reason:reason,next:next,blocked:blocked};
+}
+function failedRuns(){
+  var out=[];
+  (cache.runs||[]).forEach(function(r){
+    try{ if(r&&isFailedRun(r))out.push(r); }catch(e){}
+  });
+  return out;
+}
+// UX2-P1-7：来源人话标签＝视频文件夹尾段＋文件名（哈希只进 title）
+function sourceLabelForRun(r){
+  var fn=filenameForRun(r);
+  var tail="";
+  try{ tail=String((r&&r.source_dir_tail)||""); }catch(e){ tail=""; }
+  if(tail)return tail+"/"+fn;
+  return fn;
+}
+function obLinkFor(run_id){
+  var d=detailsByRun[run_id];
+  var vault=(lastLock&&lastLock.ob_vault_root)||"";
+  if(!vault)return {url:null,reason:"未配置笔记库，在上方填入笔记库目录后重起即用"};
+  var vr=lastLock?lastLock.vault_registered:undefined;
+  if(vr===false)return {url:null,reason:"先在OB中把该文件夹打开为仓库后再点",needRegister:true};
+  if(!d||d.state!=="PUBLISHED"||!d.canonical_output_path)return {url:null,reason:"该任务尚未入库，入库后可用"};
+  var cp=String(d.canonical_output_path), v=String(vault).replace(/\/+$/,"");
+  if(cp!==v&&cp.indexOf(v+"/")!==0)return {url:null,reason:"输出不在当前笔记库内"};
+  var rel=cp===v?"":cp.slice(v.length+1);
+  return {url:"obsidian://open?vault="+encodeURIComponent(vaultBase(v))+"&file="+encodeURIComponent(rel),reason:null};
+}
+function obClickHint(e){
+  try{
+    var t=e&&e.target?e.target:null;
+    var ob=obLinkFor(t?t.getAttribute("data-obrun"):"");
+    if(ob&&ob.needRegister){
+      if(e&&e.preventDefault)e.preventDefault();
+      try{
+        var box=t?(t.parentElement?((t.parentElement.parentElement)||t.parentElement):null):null;
+        var hint=box?box.querySelector(".obhint"):null;
+        if(hint){hint.textContent="先在OB中把该文件夹打开为仓库后再点";}
+        else if(t&&t.parentElement){
+          var d=document.createElement("div");
+          d.className="obhint";
+          d.textContent="先在OB中把该文件夹打开为仓库后再点";
+          t.parentElement.appendChild(d);
+        }
+      }catch(_){}
+      return false;
+    }
+  }catch(err){}
+  return true;
+}
+function revealPath(p){
+  fetch("/api/reveal",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({path:p})})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    if(x.code===200){toast("已在访达中定位","ok");}
+    else{toast(String((x.o&&x.o.error)||("定位失败："+x.code)),"err");say(String((x.o&&x.o.error)||("定位失败："+x.code)),"err");}
+  }).catch(function(e){toast("在访达中定位失败："+e,"err");say("在访达中定位失败："+e,"err");});
+}
+function finderUrlFor(run_id){
+  var d=detailsByRun[run_id];
+  if(d&&d.finder_url)return d.finder_url;
+  var p=outPathFor(run_id);
+  if(!p)return null;
+  try{
+    var parts=String(p).split("/");
+    for(var i=0;i<parts.length;i++){parts[i]=encodeURIComponent(parts[i]);}
+    return "file://"+parts.join("/").replace(/%3A/gi,":");
+  }catch(e){return null;}
+}
+function outCellFor(run_id){
+  var out=outPathFor(run_id);
+  if(!out)return "—";
+  var h='<span class="outrow"><button class="mini" data-reveal="'+esc(out)+'" title="'+esc(out)+'">访达</button>';
+  var ob=obLinkFor(run_id);
+  if(ob.url)h+='<a class="obbtn" href="'+esc(ob.url)+'" data-obrun="'+esc(run_id)+'" title="在 Obsidian 中打开">OB</a>';
+  else h+='<span class="obdis mini" title="'+esc(ob.reason||"OB不可用")+'">OB</span>';
+  h+='</span><div class="obhint">打不开？确认OB中已打开同名库</div>';
+  return h;
+}
+// UX2-P0-1：列表头一行“共N个（成功A/失败B/排队C），当前显示M个”，截断必须明示，禁静默丢
+// UX2-P1-2/FR-14：批量重试入口已收敛到首屏 #recoverBox「重新转写全部失败」；表头只留只读诊断
+// （P1-4/FR-3/HD-2=A：复制**脱敏摘要**＋页面逐条本地证据），不属恢复动作、无 whisper 成本
+// UX2-P1-5：未监听（或跨多目录）时按输入目录分组列成功/失败/排队
+function renderRunsHead(snap){
+  var box=el("runsHead");
+  if(!box)return;
+  var runs=(snap&&snap.recent_runs)||[];
+  cache.runs=runs;
+  var shown=runs.length;
+  var rs=(snap&&snap.run_summary)||null;
+  var t;
+  if(!rs){
+    if(shown>0){box.style.display="block";box.className="hint";t="共 "+shown+" 个，当前显示 "+shown+" 个";}
+    else{box.style.display="none";box.innerHTML="";return;}
+  }else{
+    var total=parseInt(rs.total!=null?rs.total:0,10);if(isNaN(total))total=0;
+    var done=parseInt(rs.done!=null?rs.done:0,10);if(isNaN(done))done=0;
+    var failed=parseInt(rs.failed!=null?rs.failed:0,10);if(isNaN(failed))failed=0;
+    var pending=parseInt(rs.pending!=null?rs.pending:0,10);if(isNaN(pending))pending=0;
+    var m=parseInt(rs.shown!=null?rs.shown:shown,10);if(isNaN(m))m=shown;
+    var limit=parseInt(rs.limit!=null?rs.limit:200,10);if(isNaN(limit))limit=200;
+    var truncated=!!rs.truncated||total>m;
+    t="共 "+total+" 个（成功 "+done+"/失败 "+failed+"/排队 "+pending+"），当前显示 "+m+" 个";
+    if(truncated){
+      var left=Math.max(0,total-m);
+      t+=" · 截断：仅显示前 "+m+" 个（共 "+total+" 个，还有 "+left+" 个未显示）。本次每次最多取 "+limit+" 条，请先处理/收口，或换更小的视频文件夹再刷新。";
+      box.className="hint warn";
+    }else{
+      box.className="hint";
+    }
+    // UX2-P1-5：按输入目录分组（未监听或跨多目录时展示归属；成功/失败分input计）
+    try{
+      var groups=(rs.groups||[]);
+      var running=!!(lastLock&&lastLock.running);
+      if(groups.length>0&&(!running||groups.length>1)){
+        var gs=groups.map(function(g){
+          return esc(String(g.dir_tail||"（无归属目录）"))+" 成功"+parseInt(g.done||0,10)+"/失败"+parseInt(g.failed||0,10)+"/排队"+parseInt(g.pending||0,10)+"（共"+parseInt(g.total||0,10)+"）";
+        });
+        t+=" · 按文件夹："+gs.join(" ｜ ");
+      }
+    }catch(e){}
+  }
+  var flist=failedRuns();
+  var nRetry=flist.length;
+  var btnHtml="";
+  if(nRetry>0)btnHtml+='<button id="btnCopyFailedReasons" title="只读：复制脱敏摘要（只含脱敏来源/目录尾段/错误码/类别/置信度/缺失证据/建议；不含真实绝对路径、正文、密钥、请求体）；不重新转写、whisper 0次">复制脱敏摘要</button>';
+  if(nRetry>0)btnHtml+='<button id="btnShowEvidence" title="只读：在页面上逐条展开本地证据（脱敏路径、身份匹配、产物、冲突、provenance）；不写任何数据">查看本地证据（逐条）</button>';
+  box.style.display="block";
+  box.innerHTML=esc(t)+(btnHtml?('<div class="runsheadbtns">'+btnHtml+'</div>'):"");
+  var cb=el("btnCopyFailedReasons");if(cb)cb.onclick=copyAllFailedReasons;
+  var eb=el("btnShowEvidence");if(eb)eb.onclick=showFailEvidence;
+}
+// FR-12/HD-6=A：完成区分层状态。首层来自快照 completed_page（默认 20 条），
+// 更早页按 next_cursor 追加加载；换 data_root 或手动刷新即重置（展开视图不跨目录串）。
+var completedExtra=[], completedNextCursor=null, completedRootSeen=null, completedLoading=false;
+function visibleCompletedRows(snap){
+  var rows=[], seen={};
+  ((snap&&snap.completed_page)||[]).concat(completedExtra).forEach(function(r){
+    if(r&&r.run_id&&!seen[r.run_id]){seen[r.run_id]=1;rows.push(r);}
+  });
+  return rows;
+}
+function loadOlderCompleted(){
+  if(completedLoading||!completedNextCursor)return;
+  completedLoading=true;
+  var qs=[];
+  if(dataRoot())qs.push("data_root="+encodeURIComponent(dataRoot()));
+  // 与 refresh 同口径：limit 必带 200（否则后端默认 20 会漏失败行）
+  qs.push("limit=200");
+  var irf=el("inInput").value.trim()||((lastLock&&lastLock.input_root)||"");
+  if(irf)qs.push("input_root="+encodeURIComponent(irf));
+  qs.push("completed_cursor="+encodeURIComponent(completedNextCursor));
+  fetch("/api/status?"+qs.join("&")).then(function(r){
+    return r.json().then(function(s){return{code:r.status,s:s};});
+  }).then(function(x){
+    completedLoading=false;
+    if(x.code!==200){say("已完成历史读取失败："+((x.s&&x.s.error)||x.code),"err");return;}
+    var s=x.s||{};
+    var seen={};
+    (s.completed_page||[]).forEach(function(r){
+      if(r&&r.run_id&&!seen[r.run_id]){seen[r.run_id]=1;completedExtra.push(r);}
+    });
+    completedNextCursor=s.next_cursor||null;
+    if(lastSnap)renderRuns(lastSnap);
+  }).catch(function(e){completedLoading=false;say("已完成历史读取失败："+e,"err");});
+}
+function renderCompletedBar(snap, completedRows){
+  var bar=el("completedBar");
+  if(!bar)return;
+  if(!snap||snap.completed_total==null){bar.style.display="none";bar.innerHTML="";return;}
+  var total=parseInt(snap.completed_total,10)||0;
+  var hideOn=false;
+  try{hideOn=hideDoneGet();}catch(e){}
+  var t="已完成 "+total+" 条";
+  if(hideOn)t+=" · 已隐藏（取消勾选标题区「隐藏已完成」即可恢复）";
+  var html='<span>'+esc(t)+'</span>';
+  if(!hideOn&&completedNextCursor&&total>completedRows.length){
+    html+=' <button id="btnMoreCompleted">展开更早（还有 '+(total-completedRows.length)+' 条）</button>';
+  }
+  bar.innerHTML=html;
+  bar.style.display="block";
+  var b=el("btnMoreCompleted");
+  if(b)b.onclick=function(){loadOlderCompleted();};
+}
+function renderRuns(snap){
+  lastSnap=snap;
+  var runs=(snap&&snap.recent_runs)||[];
+  renderRunsHead(snap);
+  var tb=el("runs");
+  var cur=(lastLock&&lastLock.worker&&lastLock.worker.current)||null;
+  // FR-12：分层——当前/排队/失败/受阻永远全量在前，不受 limit 影响；
+  // 完成区默认只画首页（completed_page），更早的收起，按「展开更早」cursor 追加。
+  // FR-15：隐藏开关只过滤本页视图，业务数据零删写。
+  var completedRows=[];
+  if(snap&&snap.completed_page){
+    var irNow=el("inInput").value.trim()||((lastLock&&lastLock.input_root)||"");
+    if(completedRootSeen===null||completedRootSeen!==dataRoot()+"|"+irNow){
+      completedRootSeen=dataRoot()+"|"+irNow;
+      completedExtra=[];
+      completedNextCursor=null;
+    }
+    if(completedNextCursor===null)completedNextCursor=snap.next_cursor||null;
+    completedRows=visibleCompletedRows(snap);
+    completedRows.forEach(function(r){
+      // 快照里的磁盘终态喂给详情/输出显示（worker 详情优先，不覆盖）
+      if(r&&r.run_id&&!detailsByRun[r.run_id]&&r.state){
+        detailsByRun[r.run_id]={state:r.state,verdict:r.verdict||"",
+          rendered_path:r.rendered_path||null,
+          canonical_output_path:r.canonical_output_path||null};
+      }
+    });
+    var cset={};
+    completedRows.forEach(function(r){cset[r.run_id]=1;});
+    runs=runs.filter(function(r){return !(r&&(r.completed===true||cset[r.run_id]));});
+  }
+  var hideOn=false;
+  try{el("hideDoneChk").checked=hideDoneGet();hideOn=hideDoneGet();}catch(e){}
+  var rowsAll=runs.concat(hideOn?[]:completedRows);
+  cache.runs=rowsAll;
+  tb.innerHTML=rowsAll.map(function(r,i){
+    var cn=statusCN(r,cur);
+    var outCell=outCellFor(r.run_id);
+    var d=detailsByRun[r.run_id];
+    var dbFail=/^FAILED/.test(String(r.status||""))||String(r.status||"")==="NO_SPEECH_DETECTED";
+    // 详情缺失时以库状态兜底判失败（67合成只有库行时也能逐行重试）
+    var hasDetail=!!(d&&d.state);
+    var failed=hasDetail?(d.state==="FAIL"||d.state==="PUBLISH_BLOCKED"):dbFail;
+    // DEVELOP-P1-9：已跳过（库里已有同名笔记）不算失败，但用户删掉那篇笔记后
+    // 要能一键重跑这一条（whisper 会跑），所以也给出重试入口。
+    var skippedRow=!!(hasDetail&&d.state==="SKIPPED");
+    // UX2-P1-3/FR-14：行内只留一个主按钮（入库受阻→重试入库；其余失败→重试），范围＝本任务并注明 whisper 成本；
+    // 批量重跑一律走首屏「恢复与重试」区，详情只留当前任务的「应用新词库重跑」。
+    var ops=[];
+    if(failed||skippedRow){
+      var pubBlocked=!!(hasDetail&&d.state==="PUBLISH_BLOCKED");
+      var mainLabel=pubBlocked?"重试入库（范围：本任务；whisper 0次）":"重试（范围：本任务；whisper 会跑）";
+      ops.push('<button class="mini go" '+(pubBlocked?('data-retry-publish="'+esc(r.run_id)+'"'):('data-retry="'+esc(r.run_id)+'"'))+' data-retryfn="'+esc(filenameForRun(r))+'" title="范围：本任务；'+(pubBlocked?"只重新入库，whisper 0次":"会重新转写，whisper 会跑")+'">'+mainLabel+'</button>');
+    }
+    var op=ops.length?ops.join(" "):"—";
+    var fn=filenameForRun(r);
+    var sid=shortId(r.run_id);
+    var taskCell='<div>'+esc(fn)+'</div><div style="font-size:11px;color:var(--dim)">…'+esc(sid)+'</div>';
+    // UX2-P1-7/P1-5：来源列显“文件夹尾段＋文件名”，裸哈希只进 title
+    return '<tr data-i="'+i+'" class="'+(selected===i?"sel":"")+'"><td title="'+esc(r.run_id)+'">'+taskCell+'</td><td title="'+esc(r.source_id||"")+'">'+esc(sourceLabelForRun(r))+'</td><td class="'+stClass(cn)+'">'+esc(cn)+'</td><td>'+outCell+'</td><td>'+esc(r.updated_at)+'</td><td>'+op+'</td></tr>';
+  }).join("");
+  renderCompletedBar(snap, completedRows);
+  var showEmpty=!snap||snap.ok===false||(rowsAll.length===0&&completedRows.length===0);
+  el("empty").style.display=showEmpty?"block":"none";
+  el("runsWrap").style.display=showEmpty?"none":"block";
+  if(showEmpty){
+    if(snap&&snap.ok===false){
+      el("empty").innerHTML="<b>状态库还没有建立。</b>按三步开始：<ol><li>在上方填入<b>视频文件夹的绝对路径</b>；</li><li>点击「<b>开始监听</b>」；</li><li>把视频丢进该文件夹。</li></ol>不填笔记库也能转，md在数据目录的 jobs 里，页面每行会给路径。<br>原因："+esc(snap.message||"未知");
+    }else{
+      el("empty").innerHTML="<b>还没有任务。</b>按三步开始：<ol><li>在上方填入<b>视频文件夹的绝对路径</b>（如 /Users/你的名字/Movies/待转写）；</li><li>点击「<b>开始监听</b>」；</li><li>把视频丢进该文件夹，任务会自动出现在这里。</li></ol>不填笔记库也能转，md在数据目录的 jobs 里，页面每行会给路径。<br>数据默认写在外置测试目录，不碰真实库。";
+    }
+  }
+  Array.prototype.forEach.call(tb.querySelectorAll("tr"),function(tr){
+    tr.onclick=function(e){
+      if(e.target&&(e.target.getAttribute("data-retry")||e.target.getAttribute("data-retry-publish")||e.target.getAttribute("data-reapply")||e.target.getAttribute("data-reveal")||e.target.getAttribute("data-copy")||e.target.getAttribute("data-obrun")))return;
+      selected=parseInt(tr.getAttribute("data-i"),10);renderRuns(snap);renderLineage();
+    };
+  });
+  Array.prototype.forEach.call(tb.querySelectorAll("[data-retry]"),function(b){
+    b.onclick=function(e){e.stopPropagation();retryRun(b.getAttribute("data-retry"));};
+  });
+  Array.prototype.forEach.call(tb.querySelectorAll("[data-retry-publish]"),function(b){
+    b.onclick=function(e){e.stopPropagation();publishOnlyRetry(b.getAttribute("data-retry-publish"));};
+  });
+  Array.prototype.forEach.call(tb.querySelectorAll("[data-reapply]"),function(b){
+    b.onclick=function(e){e.stopPropagation();reapplyOne(b.getAttribute("data-reapply"));};
+  });
+  Array.prototype.forEach.call(tb.querySelectorAll("[data-reveal]"),function(b){
+    b.onclick=function(e){e.stopPropagation();revealPath(b.getAttribute("data-reveal"));};
+  });
+  Array.prototype.forEach.call(tb.querySelectorAll("[data-copy]"),function(b){
+    b.onclick=function(e){e.stopPropagation();copyText(b.getAttribute("data-copy"));};
+  });
+  Array.prototype.forEach.call(tb.querySelectorAll("[data-obrun]"),function(a){
+    a.onclick=function(e){return obClickHint(e);};
+  });
+  el("foot").textContent="采集 · "+(snap?(snap.collected_at||"—"):"—");
+  renderLineage();
+}
+function fmtDur(created, updated){
+  try{
+    var a=Date.parse(created), b=Date.parse(updated);
+    if(isNaN(a)||isNaN(b)||b<a)return "—";
+    var s=Math.round((b-a)/1000);
+    if(s<60)return s+" 秒";
+    return Math.floor(s/60)+" 分 "+(s%60)+" 秒";
+  }catch(e){return "—";}
+}
+function renderLineage(){
+  var r=cache.runs[selected];
+  if(!r){el("lineage").innerHTML='<span class="k">点击左侧任意一行查看详情。</span>';return;}
+  var d=detailsByRun[r.run_id];
+  var cur=(lastLock&&lastLock.worker&&lastLock.worker.current)||null;
+  var cn=statusCN(r,cur);
+  var h='<div><span class="k">任务：</span><span class="v">'+esc(r.run_id)+'</span></div>';
+  h+='<div><span class="k">来源：</span><span class="v" title="'+esc(r.source_id||"")+'">'+esc(sourceLabelForRun(r))+'</span></div>';
+  h+='<div><span class="k">状态：</span><span class="v">'+esc(cn)+'</span></div>';
+  // FR-13 不一致并列+告警（fail-closed，不回写）
+  try{
+    var ps=String((r&&r.status)||"");
+    if((ps==="QUEUED"||ps==="ACTIVE")&&/失败|受阻/.test(String(cn||""))){
+      h+='<div class="notestatus warn">展示与记录不一致，原因待验证（记录：'+esc(ps)+'／展示：'+esc(cn)+'）。恢复资格 fail-closed，需补充证据后人工判断。</div>';
+    }
+  }catch(e){}
+  h+='<div><span class="k">耗时：</span><span class="v">'+esc(fmtDur(r.created_at,r.updated_at))+'</span></div>';
+  if(d&&(d.state==="PUBLISHED"||d.state==="RENDER_ONLY")){
+    var p=outPathFor(r.run_id);
+    var concl=d.state==="PUBLISHED"?"已存入你的笔记库":"已生成初稿在数据目录，未入库";
+    h+='<div><span class="k">结论：</span><span class="v">'+esc(concl)+'</span></div>';
+    if(p){
+      h+='<div><span class="k">输出：</span><span class="v">'+esc(p)+'</span> <button class="mini copybtn" data-copy="'+esc(p)+'">复制</button></div>';
+    }else{
+      h+='<div><span class="k">输出：</span><span class="v">未产出</span></div>';
+    }
+  }else if(d&&(d.state==="FAIL"||d.state==="PUBLISH_BLOCKED")){
+    var pb=d.state==="PUBLISH_BLOCKED";
+    var p2=pb?outPathFor(r.run_id):null;
+    if(pb){
+      h+='<div><span class="k">结论：</span><span class="v">初稿已保留，入库未完成</span></div>';
+      if(p2){
+        h+='<div><span class="k">输出：</span><span class="v">'+esc(p2)+'</span> <button class="mini copybtn" data-copy="'+esc(p2)+'">复制</button></div>';
+      }else{
+        h+='<div><span class="k">输出：</span><span class="v">未产出</span></div>';
+      }
+    }else{
+      h+='<div><span class="k">输出：</span><span class="v">未产出</span></div>';
+    }
+    var parts=String(d.verdict||(pb?"初稿已保留，入库未完成→看本地证据确认原因后点重试入库":"转写没成功")).split("→");
+    var reason=(parts[0]||"转写没成功").trim()||"转写没成功";
+    var next=(parts[1]||"点重试再试一次").trim()||"点重试再试一次";
+    // UX2-P1-3/FR-14：入库受阻→“重试入库”；其余失败→“重试这个视频”。行内只此一个主按钮，范围＝本任务并注明 whisper 成本。
+    h+='<div class="failbox"><div class="r">原因：'+esc(reason)+'</div><div class="n">下一步：'+esc(next)+'</div><div style="margin-top:6px"><button class="go" '+(pb?('data-retry-publish="'+esc(r.run_id)+'"'):('data-retry="'+esc(r.run_id)+'"'))+' title="范围：当前选中任务；'+(pb?"只重新入库，whisper 0次":"会重新转写，whisper 会跑")+'">'+(pb?"重试入库（范围：当前任务；whisper 0次）":"重试这个视频（范围：当前任务；whisper 会跑）")+'</button></div></div>';
+    // P1-4/FR-3：逐条本地证据在页面上可见（只读、已脱敏），不等用户去翻复制结果
+    h+='<div class="evbox"><div class="evh">本地证据（逐条，只读；已脱敏）</div><pre class="ev" id="diagEvidence">本地证据加载中…</pre></div>';
+  }else if(d&&d.state==="SKIPPED"){
+    // DEVELOP-P1-9：库里已有同名笔记 → 这条根本没转写（没做，不算失败）。
+    // 文案照实说「已存在/未覆盖」，不写「检查笔记库权限」那种误导；
+    // 要重跑得先删掉或改名库里那篇，再点重试（那次才会跑 whisper）。
+    var p3=String(d.canonical_output_path||"").trim();
+    h+='<div><span class="k">结论：</span><span class="v">笔记库里已有同名笔记，未覆盖；这条已跳过转写（whisper 没跑）</span></div>';
+    h+='<div><span class="k">库里已有：</span><span class="v">'+esc(p3||"见数据目录记录")+'</span>'+(p3?' <button class="mini copybtn" data-copy="'+esc(p3)+'">复制</button>':"")+'</div>';
+    h+='<div class="notestatus ok">原因：笔记库里已有同名笔记（不覆盖你改过的内容）。下一步：要重新转写这条，先删除或改名库里那篇笔记，再点下面的重试（whisper 会跑）。</div>';
+    h+='<div class="btnrow"><button class="mini" data-retry="'+esc(r.run_id)+'" title="范围：当前选中任务；会重新转写，whisper 会跑">重试这个视频（范围：当前任务；whisper 会跑）</button></div>';
+  }else{
+    if(cur&&cur.run_id===r.run_id){
+      h+='<div><span class="k">结论：</span><span class="v">正在处理：'+esc(cur.stage)+'</span></div>';
+    }else{
+      h+='<div><span class="k">结论：</span><span class="v">排队等待处理</span></div>';
+    }
+    h+='<div><span class="k">输出：</span><span class="v">—</span></div>';
+  }
+  // UX2-P1-3/FR-14：单条重跑收进详情“高级”（范围＝当前任务，与首屏批量区隔），行内不再并排两个相似动词
+  var canReapply=!!(d&&(d.state==="RENDER_ONLY"||d.state==="PUBLISHED"||d.state==="PUBLISH_BLOCKED"));
+  h+='<div class="btnrow" id="openRow"></div>';
+  if(canReapply){
+    h+='<details class="adv" id="advDetail"><summary>高级：应用新词库重跑（仅当前任务；whisper 0次）</summary>'
+      +'<div class="obhint">范围：当前任务；只重排整理与成稿，转写0次（whisper 不跑）；你在库内改过的笔记会被跳过不覆盖，新稿只留数据目录。</div>'
+      +'<div class="btnrow"><button class="mini" data-reapply="'+esc(r.run_id)+'" title="范围：当前任务（单条，非批量）；whisper 0次，改过的笔记跳过、不覆盖">应用新词库重跑（范围：当前任务；whisper 0次）</button></div></details>';
+  }
+  h+='<div class="notebox" id="notePrev">笔记加载中…</div>';
+  el("lineage").innerHTML=h;
+  renderOpenRow(r.run_id);
+  loadNote(r.run_id);
+  if(el("diagEvidence"))renderDiagEvidence(r.run_id);   // P1-4：失败任务的逐条本地证据（页面可见）
+  Array.prototype.forEach.call(el("lineage").querySelectorAll("[data-retry]"),function(b){
+    b.onclick=function(){retryRun(b.getAttribute("data-retry"));};
+  });
+  Array.prototype.forEach.call(el("lineage").querySelectorAll("[data-retry-publish]"),function(b){
+    b.onclick=function(){publishOnlyRetry(b.getAttribute("data-retry-publish"));};
+  });
+  Array.prototype.forEach.call(el("lineage").querySelectorAll("[data-reapply]"),function(b){
+    b.onclick=function(){reapplyOne(b.getAttribute("data-reapply"));};
+  });
+  Array.prototype.forEach.call(el("lineage").querySelectorAll("[data-copy]"),function(b){
+    b.onclick=function(){copyText(b.getAttribute("data-copy"));};
+  });
+}
+function renderOpenRow(run_id){
+  var row=el("openRow");
+  if(!row)return;
+  var p=outPathFor(run_id);
+  var h="";
+  if(p){
+    h+='<button class="mini" data-reveal="'+esc(p)+'" title="'+esc(p)+'">在访达中打开</button> <button class="mini" data-copy2="'+esc(p)+'">复制路径</button>';
+  }
+  var ob=obLinkFor(run_id);
+  if(ob.url)h+=' <a class="mini" data-obrun="'+esc(run_id)+'" href="'+esc(ob.url)+'">在OB中打开</a><div class="obhint">打不开？确认OB中已打开同名库</div>';
+  else if(ob.needRegister)h+=' <span class="obdis mini" title="先在OB中把该文件夹打开为仓库后再点">在OB中打开不可用（先在OB中把该文件夹打开为仓库后再点）</span><div class="obhint">先在OB中把该文件夹打开为仓库后再点</div>';
+  else h+=' <span class="obdis mini" title="'+esc(ob.reason||"OB不可用")+'">在OB中打开不可用（'+esc(ob.reason||"OB不可用")+'）</span><div class="obhint">'+esc(ob.reason||"OB不可用")+'</div>';
+  row.innerHTML=h||'<span class="k">暂无可打开的位置。</span>';
+  Array.prototype.forEach.call(row.querySelectorAll("[data-reveal]"),function(b){
+    b.onclick=function(){revealPath(b.getAttribute("data-reveal"));};
+  });
+  Array.prototype.forEach.call(row.querySelectorAll("[data-copy2]"),function(b){
+    b.onclick=function(){copyText(b.getAttribute("data-copy2"));};
+  });
+  Array.prototype.forEach.call(row.querySelectorAll("[data-obrun]"),function(a){
+    a.onclick=function(e){return obClickHint(e);};
+  });
+}
+function noteStatusHtml(o){
+  // UX2-P1-4：预览头状态行（复用后端 note_hint/user_edited 只读判定）
+  try{
+    if(o&&o.note_hint){
+      var edited=!!o.user_edited;
+      return '<div class="notestatus '+(edited?"warn":"ok")+'">'+(edited?"⚠ ":"")+esc(o.note_hint)+'</div>';
+    }
+  }catch(e){}
+  return "";
+}
+function loadNote(run_id){
+  var box=el("notePrev");
+  if(!box)return;
+  var q="/api/note?run_id="+encodeURIComponent(run_id);
+  if(dataRoot())q+="&data_root="+encodeURIComponent(dataRoot());
+  fetch(q).then(function(r){return r.json();}).then(function(o){
+    var nb=el("notePrev");
+    if(!nb)return;
+    if(!o||!o.ok){nb.textContent="笔记加载失败："+((o&&o.error)||"未知");return;}
+    var st=noteStatusHtml(o);
+    if(o.text!=null){
+      nb.innerHTML=st+'<div><span class="k">笔记正文：</span><span class="v">'+esc(o.path||"")+'</span></div><pre>'+esc(o.text)+'</pre>';
+    }else{
+      nb.innerHTML=st+'<div><span class="k">笔记：</span><span class="v">'+esc(o.stage_text||"排队等待处理")+'</span></div>';
+    }
+  }).catch(function(e){
+    var nb2=el("notePrev");
+    if(nb2)nb2.textContent="笔记加载失败："+e;
+  });
+}
+function stageStep(stage){
+  if(stage==="发现")return {n:1,pct:10};
+  if(stage==="听写中")return {n:2,pct:60};
+  if(stage==="整理中")return {n:3,pct:75};
+  if(stage==="成稿中")return {n:4,pct:90};
+  if(stage==="入库中")return {n:5,pct:100};
+  return {n:1,pct:10};
+}
+function renderProgress(w){
+  var cur=w&&w.current, q=(w&&w.queue)||{pending:0,done:0,failed:0};
+  var pending=parseInt(q.pending||0,10), done=parseInt(q.done||0,10), failed=parseInt(q.failed||0,10);
+  var total=q.total!=null?parseInt(q.total||0,10):(pending+done+failed);
+  if(isNaN(total))total=pending+done+failed;
+  if(total<0)total=0;
+  // UX2-P1-8：分段进度（绿成功／红失败／灰排队），失败不再计入成功，100%仅当排队0且失败0
+  // P1-3/RERUN-PROGRESS P3-4：total=0（无候选/未开始/空闲）时三段一律 0%——
+  // 空态不许画满，更不许画成绿色 100% 让人误认恢复成功；「当前在跑哪一个」
+  // 由下方阶段条（#stageBarWrap）与文案说明，不靠主条满格示意。
+  var okPct=total>0?Math.round(done*100/total):0;
+  var failPct=total>0?Math.round(failed*100/total):0;
+  if(okPct+failPct>100){okPct=Math.min(okPct,100);failPct=Math.max(0,100-okPct);}
+  var pendPct=total>0?Math.max(0,100-okPct-failPct):0;
+  el("progFillOk").style.width=okPct+"%";
+  el("progFillFail").style.width=failPct+"%";
+  el("progFillPending").style.width=pendPct+"%";
+  var counts="成功 "+done+"/失败 "+failed+"/排队 "+pending+"，共 "+total;
+  var txt="";
+  var now=Date.now();
+  var heart=Math.max(0,Math.round((now-lastFetchAt)/1000));
+  var heartS=" · 心跳 "+heart+"s 前更新";
+  if(cur&&cur.run_id){
+    var secs="";
+    var stageDur=0;
+    try{
+      var t0=Date.parse(cur.stage_started_at);
+      if(!isNaN(t0)){stageDur=Math.max(0,Math.round((now-t0)/1000));secs=" · 已用时 "+stageDur+"s";}
+    }catch(e){}
+    var st=stageStep(cur.stage);
+    txt="正在"+cur.stage+" "+cur.filename+"（第 "+st.n+" 步/共 5 步：发现→听写→整理→成稿→入库）"+secs+heartS+" · "+counts;
+    if(longInInput>0)txt+=" · 长视频分段中";
+    if(stageDur>60)txt+=" · 还在跑，长视频请勿关闭页面";
+    el("progStageText").style.display="block";
+    el("progStageText").textContent="当前这一步："+cur.stage+"（第 "+st.n+"/5 步）";
+    el("stageBarWrap").style.display="block";
+    el("progStageFill").style.width=st.pct+"%";
+    el("stageNote").style.display="block";
+  }else if(pending>0||done>0||failed>0){
+    // 收口口径：排队0才算收口；失败>0 明示“含失败B”，绝不显示成全绿100%
+    if(pending===0){
+      txt=counts+" · 已收口"+(failed>0?("（含失败 "+failed+"）"):"（全部成功）")+heartS;
+    }else{
+      txt=counts+" · 等待新视频…"+heartS;
+    }
+    el("progStageText").style.display="none";
+    el("stageBarWrap").style.display="none";
+    el("stageNote").style.display="none";
+  }else{
+    txt="空闲：暂无排队视频";
+    el("progStageText").style.display="none";
+    el("stageBarWrap").style.display="none";
+    el("stageNote").style.display="none";
+  }
+  el("progText").textContent=txt;
+}
+var lastLock=null;
+// UX2-P1-6：停止态（{finishing,filename,message}）——current 未清前先显“正在收尾…”，不误导为未监听
+var stopState=null;
+function renderLock(o){
+  lastLock=o;
+  var l=el("lock");
+  var running=!!(o&&o.running);
+  var w=o&&o.worker;
+  var curNow=(w&&w.current)||null;
+  var finishing=!!(!running&&stopState&&stopState.finishing&&curNow);
+  if(stopState&&stopState.finishing&&!curNow)stopState.finishing=false;
+  if(finishing){l.className="lock warn";l.textContent="● 正在收尾…";}
+  else if(running){l.className="lock on";l.textContent="● 监听中";}
+  else{l.className="lock off";l.textContent="● 未监听";}
+  detailsByRun=(w&&w.details_by_run)||{};
+  if(w&&w.processed){
+    var m={};
+    w.processed.forEach(function(p){if(p&&p.run_id&&!m[p.run_id])m[p.run_id]=p;});
+    Object.keys(m).forEach(function(k){if(!detailsByRun[k])detailsByRun[k]=m[k];});
+  }
+  renderProgress(w);
+  if(lastSnap)renderRuns(lastSnap);
+  // 常驻绿条（V2.2补修 P0-3：全终态放行走“旧N条已入库，本次只转新增M个”，真半截才BLOCK）
+  var bar=el("liveBar");
+  if(finishing){
+    // UX2-P1-6：收尾中——三段式语义常驻，禁用重起避免与收尾线程打架
+    bar.textContent=(stopState&&stopState.message)||"已停止接新任务，当前这个会跑完收尾；重起后已完成跳过、半截重转。";
+    bar.style.display="block";
+    el("btnStart").disabled=true;
+    el("btnStart").textContent="收尾中…";
+    el("btnStop").style.display="inline-block";
+    el("btnStop").disabled=true;
+    el("btnStop").textContent="正在收尾…";
+    el("preview").textContent="";
+  }else if(running){
+    var inp=(o&&o.input_root)||"";
+    var hasVault=!!(o&&o.ob_vault_root);
+    var t="监听中："+inp+"，把视频丢进去即可";
+    if(!hasVault)t+="（未填笔记库，只存数据目录）";
+    try{
+      var skipN=parseInt((o&&o.skipped_terminal)||0,10)||0;
+      var note=(o&&o.startup_note)||"";
+      if(skipN>0){
+        var mTot=null;
+        try{
+          if(w&&w.queue&&w.queue.total!=null)mTot=parseInt(w.queue.total,10);
+        }catch(e){mTot=null;}
+        if(mTot==null||isNaN(mTot)){
+          try{mTot=((w&&w.queue)?((parseInt(w.queue.pending||0,10)||0)+(parseInt(w.queue.done||0,10)||0)+(parseInt(w.queue.failed||0,10)||0)):0);}catch(e){mTot=0;}
+        }
+        t+=" · 旧"+skipN+"条已入库，本次只转新增"+mTot+"个";
+        if(note)t+="（"+note+"）";
+      }
+    }catch(e){}
+    bar.textContent=t;
+    bar.style.display="block";
+    el("btnStart").disabled=true;
+    el("btnStart").textContent="监听中…";
+    el("btnStop").style.display="inline-block";
+    el("btnStop").disabled=false;
+    el("btnStop").textContent="停止";
+    var pv=(w&&w.preview)||"";
+    el("preview").textContent=pv;
+    // 运行中改输入提示由 input 事件处理，这里保持
+  }else{
+    // UX2-P1-6：刚停过则常驻三段式停止语义，不再误显“未监听/上次监听”
+    if(stopState&&stopState.message){
+      bar.textContent=stopState.message;
+      bar.style.display="block";
+    }else{
+      bar.style.display="none";
+      bar.textContent="";
+    }
+    el("btnStart").disabled=false;
+    el("btnStart").textContent="开始监听";
+    el("btnStop").style.display="none";
+    el("btnStop").disabled=false;
+    el("btnStop").textContent="停止";
+    el("preview").textContent="";
+    el("editHint").style.display="none";
+    // P0-1 回填优先级：localStorage 为主，后端 last_* 为辅；清空则留空回默认，不崩
+    try{restorePathsFromLS();}catch(e){}
+    try{
+      if(o&&!el("inInput").value){
+        var li=(o&&o.last_input_root)||(o&&o.input_root)||"";
+        if(li)el("inInput").value=li;
+      }
+      if(o&&!el("inVault").value){
+        var lv=(o&&o.last_ob_vault_root)||(o&&o.ob_vault_root)||"";
+        if(lv)el("inVault").value=lv;
+      }
+      if(o&&!el("inData").value){
+        var ld=(o&&o.last_data_root)||(o&&o.data_root)||"";
+        if(ld)el("inData").value=ld;
+      }
+    }catch(e){}
+    // P0-2 成功条：上次监听回显，一键重起（回填后点开始即可，不另加按钮）
+    try{
+      var lastIn=el("inInput").value.trim()||lsGet(LS_INPUT)||((o&&(o.last_input_root||o.input_root))||"");
+      if(lastIn&&!(stopState&&stopState.message)){
+        bar.textContent="上次监听："+lastIn+"，已回填，点开始监听即重起";
+        bar.style.display="block";
+      }
+    }catch(e){}
+  }
+  if(w){
+    var q=w.queue||{pending:0,done:0,failed:0};
+    // toast：成功/失败数变化（V2.3 P0-1：用人话文件名，不暴露裸run_id）
+    if(prevDone>=0&&(q.done!==prevDone||q.failed!==prevFailed||q.skipped!==prevSkipped)){
+      if(q.done>prevDone||q.failed>prevFailed){
+        var last=w.processed&&w.processed.length?w.processed[w.processed.length-1]:null;
+        var nm=last?((last.source_filename||filenameForRunId(last.run_id)||"未知文件")+" / "+cnOfState(last.state)):"有新结果";
+        if(q.failed>prevFailed)toast("转写失败："+nm+"，点行查看原因","err");
+        else toast("转写完成："+nm+"，点行查看路径","ok");
+      }else if(q.skipped>prevSkipped){
+        // DEVELOP-P1-9：库里已有同名笔记 → 跳过转写（whisper 0 次），单给一句，不叫失败
+        var lastS=w.processed&&w.processed.length?w.processed[w.processed.length-1]:null;
+        var nmS=lastS?((lastS.source_filename||filenameForRunId(lastS.run_id)||"未知文件")):"有任务";
+        toast("已跳过转写："+nmS+"（库里已有同名笔记，未覆盖）","ok");
+      }
+    }
+    prevDone=q.done;prevFailed=q.failed;prevSkipped=q.skipped;
+    // P0-3：队列信息移到进度区，右侧让给笔记预览
+    // DEVELOP-P1-9：已跳过（库里已有同名笔记，没转写）单列显示，不计入成功/失败
+    var skipTxt=(q.skipped||0)>0?(" / 跳过 "+(q.skipped||0)):"";
+    var qtxt="";
+    if(w.processed_n>0){
+      var last2=w.processed[w.processed.length-1];
+      var last2fn=last2?((last2.source_filename||filenameForRunId(last2.run_id)||"未知文件")+" / "+cnOfState(last2.state)):"—";
+      qtxt="队列：排队 "+(q.pending||0)+" / 成功 "+(q.done||0)+" / 失败 "+(q.failed||0)+skipTxt+"，末个 "+last2fn;
+    }else if(w.running){
+      qtxt="队列：排队 "+(q.pending||0)+"，处理线程运行中，等待新任务…";
+    }else if((q.done||0)>0||(q.failed||0)>0||(q.pending||0)>0||(q.skipped||0)>0){
+      qtxt="队列：排队 "+(q.pending||0)+" / 成功 "+(q.done||0)+" / 失败 "+(q.failed||0)+skipTxt;
+    }
+    el("queueLine").textContent=qtxt;
+    el("worker").textContent="";
+    el("worker").style.display="none";
+  }else{
+    el("queueLine").textContent="";
+  }
+  // P0-1：一键换新数据目录（启动门按目录隔离失败时后端给建议路径）
+  try{
+    var nb=el("btnNewData");
+    if(o&&!o.running&&o.suggested_data_root){nb.style.display="inline-block";nb.title="建议："+o.suggested_data_root;}
+    else nb.style.display="none";
+  }catch(e){}
+  updateStartReady();
+}
+function cnOfState(s){
+  if(s==="PUBLISHED")return "已入库";
+  if(s==="RENDER_ONLY")return "已成稿未入库";
+  if(s==="FAIL")return "失败";
+  if(s==="PUBLISH_BLOCKED")return "入库受阻";
+  if(s==="SKIPPED")return "已跳过（笔记已存在）";
+  return String(s||"");
+}
+var sayTimer=null, lastLongText="", lastLongTitle="", lastFocus=null;
+function say(t,cls){var m=el("msg");m.textContent=String(t==null?"":t).slice(0,120);m.className="hint "+(cls||"");if(sayTimer)clearTimeout(sayTimer);sayTimer=setTimeout(function(){try{m.textContent="";}catch(e){}},3000);}
+function openLongPanel(title,text,focusBack){
+  lastLongText=String(text||"");lastLongTitle=String(title||"已复制内容");lastFocus=focusBack||document.activeElement;
+  el("longPanelTitle").textContent=lastLongTitle;el("longPanelText").textContent=lastLongText;
+  el("longPanel").className="open";el("longPanel").style.display="block";
+  try{el("btnLongClose").focus();}catch(e){}
+}
+function closeLongPanel(){
+  el("longPanel").className="";el("longPanel").style.display="none";
+  try{if(lastFocus&&lastFocus.focus)lastFocus.focus();}catch(e){}
+}
+function toast(t, kind){
+  var box=el("toasts");
+  var d=document.createElement("div");
+  d.className="toast "+(kind||"ok");
+  d.textContent=t;
+  d.onclick=function(){box.removeChild(d);};
+  box.appendChild(d);
+  setTimeout(function(){try{box.removeChild(d);}catch(e){}},3000);
+  try{
+    if("Notification" in window){
+      if(Notification.permission==="granted"){
+        new Notification("懒得笔记",{body:t});
+      }else if(Notification.permission!=="denied"&&!notifAsked){
+        notifAsked=true;
+        Notification.requestPermission().then(function(p){
+          if(p==="granted"){try{new Notification("懒得笔记",{body:t});}catch(e){}}
+        }).catch(function(){});
+      }
+    }
+  }catch(e){}
+}
+function copyText(t, opts){
+  // FR-17：只出短提示，长文不进 #msg；长文只进可关闭面板（需用户主动打开）。
+  opts=opts||{};
+  var shortOk=opts.shortOk||("已复制 "+String(t==null?"":t).length+" 字");
+  var shortErr=opts.shortErr||"复制失败";
+  function done(){
+    say(shortOk,"ok");toast(shortOk,"ok");
+    if(opts.longText){
+      lastLongText=String(opts.longText);lastLongTitle=String(opts.longTitle||"已复制内容");
+      var vb=el("btnViewLong");if(vb)vb.style.display="inline-block";
+    }
+  }
+  function fail(){
+    say(shortErr,"warn");toast(shortErr,"err");
+  }
+  function fallback(){
+    try{
+      var ta=document.createElement("textarea");
+      ta.value=t;document.body.appendChild(ta);ta.select();
+      document.execCommand("copy");document.body.removeChild(ta);
+      done();
+    }catch(e){fail();}
+  }
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(done,fallback);
+  }else fallback();
+}
+// P2-2：数据目录非法时的本地人话——与后端 400（`数据目录须为绝对路径，请点浏览重选`）
+// 及 apply 侧同一口径，只此一处写死，不另造第二套说法。
+function retryRootHint(){
+  return "数据目录须为绝对路径，请点「浏览」重选（或清空该框改用默认外置测试目录）";
+}
+// P1-3/P2-7：送 /api/retry 的请求体——带上**本页生效数据目录**（框优先，其次
+// 后端学到的生效目录）。后端按同一 realpath 校验，跨目录一律 409 人话零执行，
+// 不再让「重试」悄悄作用到当前监听目录。
+// P2-2：本地先按 isAbsRoot 拦一遍明显非法的目录（相对路径/非字符串）：这种值
+// 到后端必然 400，白跑一趟。返回 null＝本地拦下，由调用方出人话、不发请求。
+// 两处都没有值＝沿用旧行为（不带 data_root，后端按当前监听目录走），不算非法。
+function retryBody(run_id){
+  var typed=String(dataRoot()||"").trim();
+  var learned=String(effectiveDataRoot||"").trim();
+  var root=typed||learned;          // 框优先，其次生效目录；只看「有值」的那一个
+  if(root&&!isAbsRoot(root))return null;
+  var p={run_id:run_id};
+  if(root)p.data_root=root;
+  return p;
+}
+function retryRun(run_id){
+  var fn=filenameForRunId(run_id);
+  // P2-2：非法目录本地就拦，不发这个必然被拒的请求，并把原因说给用户听
+  var body=retryBody(run_id);
+  if(!body){say("重试未发起："+retryRootHint()+"。","err");return;}
+  say("正在重试 "+fn+"…");
+  fetch("/api/retry",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(body)})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    if(x.code===202){say("已重新排队："+fn+"，只重跑这一个","ok");toast("已重新排队："+fn,"ok");}
+    else say("重试失败："+(x.o.error||x.code),"err");
+    refresh();
+  }).catch(function(e){say("重试请求失败："+e,"err");});
+}
+// P0-3返工2（首选）：仅重新入库走 P0-2 已有 PUBLISH_ONLY 通路（retry-plan 取 plan/token → retry-batch confirm:true，whisper 0次）；零后端改动。
+// fail-closed：plan 不可达/该 run 不在 eligible 内/策略不是 PUBLISH_ONLY，一律不调 batch，只报 warn。
+function publishOnlyRetry(run_id){
+  var fn=filenameForRunId(run_id);
+  say("正在仅重新入库 "+fn+"（whisper 0次）…");
+  var base={run_ids:[run_id]};
+  if(dataRoot())base.data_root=dataRoot();
+  var v=el("inVault").value.trim();
+  if(v)base.ob_vault_root=v;
+  fetch("/api/failures/retry-plan",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(base)})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    var o=x.o||{};
+    if(x.code!==200||!o.ok){say("仅入库预览失败："+(o.error||x.code)+"（零执行，未改任何数据）","err");return;}
+    var elig=o.eligible||[];
+    var hit=null;
+    for(var i=0;i<elig.length;i++){if(String(elig[i].run_id)===String(run_id)){hit=elig[i];break;}}
+    if(!hit){
+      var ex=o.excluded||[];
+      var why="";
+      for(var j=0;j<ex.length;j++){if(String(ex[j].run_id)===String(run_id)){why=String(ex[j].reason||ex[j].error||"不在可恢复集合内");break;}}
+      say("该任务当前不可仅入库："+(why||"不在可恢复集合内")+"（零执行）","warn");
+      return;
+    }
+    if(String(hit.strategy)!=="PUBLISH_ONLY"){
+      say("该任务当前策略为 "+String(hit.strategy)+"，不适用仅入库（零执行，未改任何数据）","warn");
+      return;
+    }
+    var b2={confirm:true,plan_token:o.plan_token,run_ids:[run_id]};
+    if(dataRoot())b2.data_root=dataRoot();
+    var v2=el("inVault").value.trim();
+    if(v2)b2.ob_vault_root=v2;
+    fetch("/api/failures/retry-batch",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(b2)})
+    .then(function(r){return r.json().then(function(oo){return{code:r.status,o:oo};});})
+    .then(function(y){
+      var oo=y.o||{};
+      if(y.code===202||y.code===200){say("仅入库已提交："+fn+"（whisper 0次，任务 "+(oo.job_id||"")+"）","ok");toast("仅入库已提交："+fn,"ok");}
+      else say("仅入库提交失败："+(oo.error||y.code)+"（零执行或见返回说明）","err");
+      refresh();
+    }).catch(function(e){say("仅入库请求失败："+e,"err");});
+  }).catch(function(e){say("仅入库预览请求失败："+e,"err");});
+}
+// UX2-P1-2/FR-14：一键重试全部失败（逐个调已有 /api/retry，幂等；前端给“N/total 已排队”进度）
+// 唯一入口＝首屏 #recoverBox「重新转写全部失败」（范围＝全部失败任务）；后端 /api/retry 未改
+// P2-1：这是**页面内循环**——「已排队」只在这一次请求成功后成立；离开/刷新页面不会把
+// 剩下的任务继续入队，所以文案只承诺「需保持本页打开」，绝不写「后台继续/可离开」。
+// P2-2：每个失败都把后端人话原因透出来（首个原因落首屏恢复区），不再只报一个失败数字。
+function retryAllFailed(){
+  var list=failedRuns();
+  // P1-3 零目标：给明确人话，不让用户以为“按钮没反应”
+  if(!list.length){say("当前没有失败任务可重试（零目标，未排队任何任务）。","warn");return;}
+  // P2-2：整批共用同一个数据目录，非法就在本地拦下——不让 N 个请求都白撞后端 400
+  if(!retryBody(list[0].run_id)){
+    say("本批重试未发起："+retryRootHint()+"。","err");
+    recoverHint(retryRootHint()+"；本次没有重新排队任何任务。","err");
+    return;
+  }
+  if(!confirm("重试全部失败 "+list.length+" 个吗？\n会逐个重新排队（幂等，成功任务不受影响）。"))return;
+  var total=list.length, okN=0, badN=0, i=0, badWhy="";
+  // P1-3：批量重试窗口内冻结本次执行参数（目标集合＝当时这份失败清单）
+  setCandidateControls(false,true);
+  say("正在重试全部失败：0/"+total+" 已排队…需保持本页打开：离开或刷新后，剩下没排上的不会继续重试（已排上的会照常跑完）。");
+  // P2-2：失败原因不再只堆一个数字——留首个后端人话，收尾回显到首屏恢复区
+  function noteBad(why){
+    badN++;
+    why=String(why||"").trim()||"请求没送达（网络中断）";
+    if(!badWhy)badWhy=why;
+  }
+  function advance(){
+    i++;
+    say("正在重试全部失败："+i+"/"+total+" 已排队…（需保持本页打开，离开则剩余任务不会再排队）");
+    step();
+  }
+  function step(){
+    if(i>=total){
+      if(badN){
+        say("重试全部失败完成：已排队 "+okN+"/"+total+"，失败 "+badN+" 个（原因见下方提示）。","warn");
+        recoverHint("本批有 "+badN+" 个没排上（首个原因："+badWhy+"）。这些任务没有被重新排队，可修正后重试。","warn");
+      }else say("重试全部失败完成：已排队 "+okN+"/"+total+"。","ok");
+      toast("已排队 "+okN+"/"+total+" 个失败任务","ok");
+      setCandidateControls(true,false);
+      refresh();
+      return;
+    }
+    var rid=list[i].run_id;
+    var body=retryBody(rid);
+    if(!body){   // 中途目录被改成非绝对路径：本地拦，不白跑请求（P2-2）
+      noteBad(retryRootHint()+"（本次未重排）");
+      advance();
+      return;
+    }
+    fetch("/api/retry",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body)})
+    .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+    .then(function(x){
+      if(x.code===202)okN++;
+      else noteBad((x.o&&x.o.error)||("请求被拒（HTTP "+x.code+"）"));
+    })
+    .catch(function(){noteBad("");})
+    .then(advance);
+  }
+  step();
+}
+// ═════ P1-4 / FR-3 / HD-2=A：脱敏摘要复制 ＋ 页面逐条本地证据（只读，零写盘） ═════
+// 口径（不另造第二套）：
+//  ① 摘要与页面证据**优先**取只读诊断接口 `/api/failures/diagnosis` 的字段：后端已按
+//     `server.py:1428 _diag_redact_path()`（只留 basename ＋ 两级父目录标签）脱敏；
+//  ② 诊断不可得（未配置绝对数据目录／库缺或读不出／请求失败）时**降级**到任务列表口径；
+//     降级路同样脱敏，缺失字段一律写「未提供」，绝不编造置信度/类别；
+//  ③ 前端兜底打码与后端同口径：`redactPathField`＝`server.py:1428 _diag_redact_path()`、
+//     `redactPathTail`＝`server.py:1044 _dir_tail()`、`redactCopyField`＝`server.py:354
+//     _strip_paths()`（整句里的路径从 "/" 起到引号/中文标点/换行收尾，整段抹成 "…"）；
+//  ④ 摘要正文只允许 FR-3 那 7 类字段进——`FAIL_DIGEST_FIELDS` 是**唯一白名单**，
+//     与后端 `RECOVERY_RESULT_FIELDS`／`_recovery_result_entry()`（`server.py:1846`）
+//     同一「固定字段集合」口径：白名单外的键（正文/token/请求体）根本没有出口。
+var FAIL_DIGEST_FIELDS=["label","tail","code","category","confidence","missing","next"];
+var REDACT_STOP_CHARS="'\"`，。；：、！？（）《》【】[]{}<>|*?\t\n\r";
+var NO_EVIDENCE="未提供（诊断不可用）";
+// 路径值口径：只留 basename ＋ 两级父目录标签（非路径值原样，故后端枚举/人话词汇不受影响）
+function redactPathField(v){
+  var p=String(v==null?"":v);
+  if(p.charAt(0)!=="/")return p;
+  var parts=p.split("/").filter(function(x){return x.length>0;});
+  return parts.length?("…/"+parts.slice(-3).join("/")):"…";
+}
+// 目录尾段口径："…/" ＋ 末段
+function redactPathTail(v){
+  var p=String(v==null?"":v).replace(/\/+$/,"");
+  if(p.charAt(0)!=="/")return p;
+  var parts=p.split("/").filter(function(x){return x.length>0;});
+  return parts.length?("…/"+parts[parts.length-1]):"…";
+}
+// 自由文本口径：整句里的路径片段整段抹成 "…"（宁可多抹，也不漏真路径尾段）
+function redactCopyField(v){
+  var t=String(v==null?"":v),out="",i=0,n=t.length;
+  while(i<n){
+    if(t.charAt(i)==="/"){
+      var j=i+1;
+      while(j<n&&REDACT_STOP_CHARS.indexOf(t.charAt(j))<0)j++;
+      if(!(out.length&&out.charAt(out.length-1)==="…"))out+="…";
+      i=j;continue;
+    }
+    out+=t.charAt(i);i++;
+  }
+  return out.replace(/\s+/g," ").trim();
+}
+// 白名单出口：只可能带这 7 个键，其它键一律没有出口
+function digestEntry(fields){
+  var e={};
+  FAIL_DIGEST_FIELDS.forEach(function(k){e[k]=String((fields&&fields[k])||"");});
+  return e;
+}
+// 与 retryBody 同口径取「本页生效数据目录」：框优先，其次后端学到的生效目录；
+// 无值/非绝对路径一律不查（宁可不给诊断，也不去诊断别的目录）
+function digestDataRoot(){
+  var typed=String(dataRoot()||"").trim(),learned=String(effectiveDataRoot||"").trim();
+  var root=typed||learned;
+  if(root&&!isAbsRoot(root))return "";
+  return root;
+}
+var diagCache={root:null,byRun:null,snap:"",at:"",pending:null};
+function dropDiagCache(){diagCache={root:null,byRun:null,snap:"",at:"",pending:null};}
+// 只读拉一次诊断（同目录同轮复用）；诊断不可得回空表，由调用方降级，不往页面上抛异常
+function loadDiag(){
+  var root=digestDataRoot();
+  if(!root)return Promise.resolve(null);
+  if(diagCache.byRun&&diagCache.root===root)return Promise.resolve(diagCache.byRun);
+  if(diagCache.pending&&diagCache.root===root)return diagCache.pending;
+  // P2-1：本轮缓存独立成 box（不再写模块级变量）。换目录/手动刷新会整块换掉
+  // diagCache，于是旧目录那条在飞的请求落地时必然「不认领」——否则它的 items 会
+  // 落进新目录的缓存，摘要正文与页面证据出现**别的目录**的数据（同名 run_id 时
+  // 用户会把 A 目录的证据当 B 目录的复制出去协作排错）。
+  var box={root:root,byRun:null,snap:"",at:"",pending:null};
+  diagCache=box;
+  // 查过就落缓存（哪怕没拿到）：byRun 空对象＝「已查过但不可用」——页面据此写
+  // 「诊断不可用」，既不反复闪「加载中」，也不每 5 秒重扫一次盘
+  function mark(o){
+    // 落地前先认领本轮请求：本次请求发起时的 root（box.root）与当前 root 不一致，
+    // 或本轮缓存块已被换掉 → 丢弃该响应：不写缓存、也不回给调用方。
+    // 同时保证换目录/刷新后不会被旧请求「占位」，下一次仍会重新发起。
+    if(diagCache!==box||String(diagCache.root||"")!==root)return null;
+    var by={};
+    if(o&&o.ok===true&&o.items){
+      o.items.forEach(function(it){if(it&&it.run_id)by[String(it.run_id)]=it;});
+      box.snap=String(o.diagnosis_snapshot_id||"UNKNOWN");
+      box.at=String(o.generated_at||"");
+    }
+    box.byRun=by;
+    return by;
+  }
+  box.pending=fetch("/api/failures/diagnosis?data_root="+encodeURIComponent(root))
+    .then(function(r){return r.json();})
+    .then(mark)
+    .catch(function(){return mark(null);});
+  return box.pending;
+}
+function diagItemFor(run_id){
+  if(!diagCache.byRun)return null;
+  return diagCache.byRun[String(run_id)]||null;
+}
+// FR-3 逐条取值：诊断优先；诊断不可得则降级（缺失一律「未提供」，不编造）
+function failDigestFields(r){
+  var it=diagItemFor(r&&r.run_id);
+  var tail=redactPathTail((it&&it.source_dir_tail)||((r&&r.source_dir_tail)||""));
+  if(it)return digestEntry({
+    label:redactPathField(it.source_label||"")||redactPathField(filenameForRun(r)),
+    tail:tail,
+    code:redactPathField(it.raw_error_code||"")||"UNKNOWN",
+    category:redactPathField(it.action_category||"")||"UNKNOWN",
+    confidence:redactPathField(it.confidence||"")||"UNVERIFIED",
+    missing:redactPathField(it.missing_evidence||"")||"UNKNOWN",
+    next:redactCopyField(it.next_action||"")||NO_EVIDENCE});
+  // 降级路唯一的自由文本是「建议」：先同口径脱敏，再按 say() 同一 120 字上限截断
+  return digestEntry({
+    label:redactPathField(filenameForRun(r)),
+    tail:tail,
+    code:NO_EVIDENCE,category:NO_EVIDENCE,confidence:NO_EVIDENCE,missing:NO_EVIDENCE,
+    next:(redactCopyField(failPartsForRun(r).next)||"").slice(0,120)||NO_EVIDENCE});
+}
+function failDigestText(rows){
+  var lines=["失败诊断摘要（脱敏；共 "+rows.length+" 条）",""];
+  rows.forEach(function(r,i){
+    var f=failDigestFields(r);
+    lines.push((i+1)+". "+f.label+(f.tail?("（目录尾段："+f.tail+"）"):""));
+    lines.push("   错误码："+f.code);
+    lines.push("   类别："+f.category);
+    lines.push("   置信度："+f.confidence);
+    lines.push("   缺失证据："+f.missing);
+    lines.push("   建议："+f.next);
+    lines.push("");
+  });
+  return lines.join("\n");
+}
+// 页面逐条本地证据：比复制摘要更全（脱敏路径/身份匹配/产物/冲突/provenance），全部同口径脱敏
+function evidenceLinesFor(r,i){
+  var f=failDigestFields(r),it=diagItemFor(r&&r.run_id);
+  var out=[(i+1)+". "+f.label+(f.tail?("（目录尾段："+f.tail+"）"):"")+"　run …"+shortId(r.run_id)];
+  out.push("   错误码："+f.code+"　类别："+f.category+"　置信度："+f.confidence);
+  if(it){
+    out.push("   根因："+redactPathField(it.root_cause||"UNKNOWN")+"　阶段："+redactPathField(it.stage||"UNKNOWN"));
+    out.push("   原登记路径（脱敏）："+redactPathField(it.recorded_path_redacted||"UNKNOWN")
+      +"（"+(it.recorded_path_exists?"仍在原位":"当前不在原位")+"）");
+    out.push("   替代路径（脱敏）："+redactPathField(it.alternate_path_redacted||"UNKNOWN")
+      +"　身份匹配："+redactPathField(it.identity_match||"UNKNOWN"));
+    out.push("   持久态："+redactPathField(it.persisted_state||"UNKNOWN")
+      +"　展示态："+redactPathField(it.display_state||"UNKNOWN")
+      +"　provenance："+redactPathField(it.provenance_status||"UNKNOWN"));
+    out.push("   恢复资格："+redactPathField(it.recovery_eligibility||"UNKNOWN")
+      +"　是否调 whisper："+(it.will_call_whisper?"是":"否"));
+    out.push("   产物："+["raw_path","normalized_path","rendered_path","canonical_output_path"].map(function(k){
+      return (it.artifact_presence&&it.artifact_presence[k])?"有":"无";}).join("／"));
+    out.push("   证据来源："+(((it.evidence_sources||[]).map(redactCopyField).join("、"))||"UNKNOWN"));
+    out.push("   证据冲突："+(((it.evidence_conflicts||[]).map(redactCopyField).join("；"))||"无"));
+    out.push("   缺失证据："+f.missing);
+  }else{
+    out.push("   本地证据：诊断不可用（未配置绝对数据目录／库缺失或读不出）；上列为任务列表降级口径，缺失项一律未提供，不编造。");
+  }
+  out.push("   建议："+f.next);
+  return out;
+}
+function failEvidenceText(rows){
+  var out=["失败本地证据（逐条，只读；共 "+rows.length+" 条；诊断快照："
+    +(diagCache.snap||"未取得（下列为任务列表降级口径）")+")",""];
+  rows.forEach(function(r,i){out=out.concat(evidenceLinesFor(r,i));out.push("");});
+  return out.join("\n");
+}
+// 详情区（选中失败任务）：逐条本地证据在页面上可见，不只藏在复制结果里。
+// 只在「还没查过」时写占位——刷新每 5 秒重画一次详情区，已查过的快照不重写，
+// 免得同一句「加载中」每 5 秒闪一下
+function renderDiagEvidence(run_id){
+  var box=el("diagEvidence");
+  if(!box)return;
+  if(!diagCache.byRun)box.textContent="本地证据加载中…";
+  loadDiag().then(function(){
+    var row=null;
+    (cache.runs||[]).forEach(function(x){if(x&&String(x.run_id)===String(run_id))row=x;});
+    if(!row)return;
+    box.textContent=evidenceLinesFor(row,0).join("\n");
+  });
+}
+// FR-3/HD-2=A 一键复制脱敏摘要：只含 7 类允许字段；成功只出短句，长文只进可关闭面板（FR-17）
+function copyAllFailedReasons(){
+  var rows=failedRuns();
+  if(!rows.length){say("当前没有失败任务可复制。","warn");return;}
+  say("正在整理脱敏摘要…（本地证据较多时稍慢，读完即自动复制）");
+  loadDiag().then(function(){
+    var list=failedRuns();
+    if(!list.length){say("当前没有失败任务可复制。","warn");return;}
+    var body=failDigestText(list);
+    copyText(body,{shortOk:"已复制 "+list.length+" 条脱敏摘要",shortErr:"复制失败",
+      longText:body,longTitle:"失败诊断摘要（脱敏，共 "+list.length+" 条）"});
+  });
+}
+// 页面逐条本地证据（全部失败任务）：只读可关闭面板，关闭按钮/Esc/遮罩/焦点返回四退出。
+// 先开面板再填内容——诊断在缺源行多时按后端预算逐行扫描（每行 ≤2s），
+// 面板立刻可关，不让用户看着像卡死（追加反馈三的教训）。
+function showFailEvidence(){
+  var rows=failedRuns();
+  if(!rows.length){say("当前没有失败任务可查看。","warn");return;}
+  openLongPanel("失败本地证据（逐条，只读）","本地证据读取中…（只读诊断，不写任何数据）",el("btnShowEvidence"));
+  loadDiag().then(function(){
+    el("longPanelText").textContent=failEvidenceText(failedRuns());
+  });
+}
+function reapplyPayload(extra){
+  var p={};
+  if(dataRoot())p.data_root=dataRoot();
+  var v=el("inVault").value.trim();
+  if(v)p.ob_vault_root=v;
+  for(var k in extra){p[k]=extra[k];}
+  return p;
+}
+function reapplyOne(run_id){
+  var fn=filenameForRunId(run_id);
+  say("正在应用新词库重跑 "+fn+"（转写0次）…");
+  fetch("/api/reapply",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(reapplyPayload({run_id:run_id}))})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    if(x.code===200&&x.o.ok){say("重跑完成："+(x.o.note||fn),"ok");toast("重跑完成："+fn,"ok");}
+    else say("重跑："+((x.o&&(x.o.reason||x.o.error))||x.code),"warn");
+    refresh();
+  }).catch(function(e){say("重跑请求失败："+e,"err");});
+}
+// FR-14/D-19：批量「从已有文字重新成稿」（范围＝全部已完成任务）的唯一入口是首屏 #recoverBox 的范围选择
+function reapplyAll(){
+  if(!confirm("从已有文字重新成稿：范围＝全部已完成任务。\nwhisper 0次（只重排整理与成稿，原文不动）；你在库内改过的笔记会被跳过，已发布的笔记不覆盖。"))return;
+  // P1-3/RERUN-PROGRESS P3-6（只做提示部分，不做强制取消）：这条是**同步**重跑，
+  // 本页会一直等到跑完，所以不写「回来能看到本次汇总」，只承诺「跑完不丢、可刷新看状态」。
+  say("正在全部重跑…（本页会等到跑完；也可离开页面，后台会继续跑完，回来刷新即可看任务状态）");
+  // P1-3：批量重跑窗口内冻结本次执行参数（范围＝全部已完成任务、目标集合＝当时快照）
+  setCandidateControls(false,true);
+  fetch("/api/reapply",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(reapplyPayload({all:true}))})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    if(x.code===200){say(String((x.o&&x.o.message)||"全部重跑完成"),"ok");toast(String((x.o&&x.o.message)||"全部重跑完成"),"ok");}
+    else say("全部重跑失败："+((x.o&&x.o.error)||x.code),"err");
+    setCandidateControls(true,false);
+    refresh();
+  }).catch(function(e){say("全部重跑请求失败："+e,"err");setCandidateControls(true,false);});
+}
+var loadedVocabEntries=[];
+var vocabGroupLabels={programming:"预置-编程",crypto:"预置-币圈",finance:"预置-金融",user:"我自己加的"};
+// P1-5/VOCAB-FOLD P3-2：分组判定只做**展示层归一化**（trim+小写）——`" programming "`
+// 不再被误归到「我自己加的」。归一化只进这一个判据，**不碰落盘内容**，
+// 也不影响后端「正确文本含 wrong 即删条」等三铁律（落盘串一律原样透传）。
+function vocabGroupFor(entry){
+  var source=String((entry&&entry.source)||"").trim().toLowerCase();
+  if(source==="programming"||source==="preset:programming")return "programming";
+  if(source==="crypto"||source==="preset:crypto")return "crypto";
+  if(source==="finance"||source==="preset:finance")return "finance";
+  return "user";
+}
+function renderVocabList(){
+  var filter=String(el("vocabFilter").value||"").trim().toLowerCase();
+  var groups={programming:[],crypto:[],finance:[],user:[]};
+  var matched=0;
+  loadedVocabEntries.forEach(function(entry){
+    var hay=String(entry.wrong||"")+" "+String(entry.right||"");
+    if(filter&&hay.toLowerCase().indexOf(filter)<0)return;
+    groups[vocabGroupFor(entry)].push(entry);
+    matched++;
+  });
+  // P1-5/VOCAB-FOLD P3-4：过滤时把两个口径分开说——总数（词库一共多少条）与
+  // 匹配数（本次筛出几条），不再让老总数被误读成「这次会应用多少条」。
+  el("vocabListSummary").textContent="已导入词库（"+loadedVocabEntries.length+"条）"
+    +(filter?("· 匹配 "+matched+" 条"):"");
+  // P1-5/VOCAB-FOLD P3-3：空库只留一句人话，不再让四个组各喊一次「暂无匹配词条」。
+  // P1-5 返工（code-reviewer P3-3）：这句**不写方位**——添加行(`#vocWrong`/`#btnVocAdd`)在
+  // 词库列表**之后**（`index.html:268-271` vs 列表块 `:263-267`），写「在上方」属事实错误；
+  // 方位词还会随布局调整漂移（P1-6 就是布局活），故只描述动作、不描述位置。
+  if(!loadedVocabEntries.length){
+    el("vocabList").innerHTML='<div class="hint">词库还没有词条：跑一次 AI 审查生成候选，或手动添加词条。</div>';
+    return;
+  }
+  var h="";
+  ["programming","crypto","finance","user"].forEach(function(group){
+    var items=groups[group];
+    h+='<details class="vocabGroup"><summary>'+vocabGroupLabels[group]+'（'+items.length+'条）</summary>';
+    if(!items.length){h+='<div class="hint">暂无匹配词条</div>';}else{
+      items.forEach(function(e){
+        // P1-5/VOCAB-FOLD P3-1：行内来源标签**限定为四组标签之一**，与该词条所在组
+        // 恒一致——不再回显后端原始 source（candidate／领域名／日后新增值都不外露）。
+        h+='<div class="vrow"><span>'+esc(e.wrong)+' → '+esc(e.right)+' <span class="hint">（来源：'+vocabGroupLabels[group]+'）</span></span><button class="mini" data-vocdel="'+esc(e.wrong)+'">删除</button></div>';
+      });
+    }
+    h+='</details>';
+  });
+  el("vocabList").innerHTML=h;
+  Array.prototype.forEach.call(el("vocabList").querySelectorAll("[data-vocdel]"),function(b){
+    b.onclick=function(){delVocab(b.getAttribute("data-vocdel"));};
+  });
+}
+function loadVocab(){
+  var q="/api/vocab";
+  if(dataRoot())q+="?data_root="+encodeURIComponent(dataRoot());
+  fetch(q).then(function(r){return r.json();}).then(function(o){
+    if(!o||!o.ok)return;
+    el("vocRev").textContent="词库 "+(o.count||0)+" 条 · 生效 "+(o.effective_revision||o.revision||"")+"（新转写自动应用）";
+    loadedVocabEntries=o.vocab||[];
+    renderVocabList();
+  }).catch(function(){});
+}
+function candidateCheckboxes(){return Array.prototype.slice.call(el("candidateList").querySelectorAll("[data-candidate-index]"));}
+function candidateGroupCheckboxes(){return Array.prototype.slice.call(el("candidateList").querySelectorAll("[data-candidate-group]"));}
+var vocabApplyTimer=null,vocabApplyRunning=false;
+// P1-2 任务身份：本页发起的那次任务的 job_id（轮询只认它），以及待审清单版本
+var vocabApplyJobId=null,vocabCandidatesRevision=null;
+// P2-新1：后端实际生效的数据目录。框里为空时（UI 判绿＝用默认外置测试目录）
+// 从这里取值，apply 与 status 两处口径一致，绝不出现「提交成功但查不到进度」。
+var effectiveDataRoot="";
+// R2：轮询容错——单次/短暂失败不停表；连续失败或超时上限才停，且必须给人话提示。
+var vocabApplyFailStreak=0,vocabApplyStartedAt=0;
+var VOCAB_APPLY_MAX_FAIL=8,VOCAB_APPLY_MAX_MS=10*60*1000;
+function setCandidateControls(on, lock){
+  // P1-3/RERUN-PROGRESS P3-5 运行中参数锁定：批量任务跑起来后，本次执行参数
+  // （范围、策略入口、rerun_old、目标集合）一律冻结——控件禁用＋就地写明原因，
+  // 后端对同窗口内的变更请求也会 409 人话拒绝（两层，谁都别想静默换参数）。
+  // 锁定判定 = 显式锁定 or 本页这次错词重跑仍在跑（取或）：别的批量链跑完时
+  // 传 lock=false 也解不开正在跑的错词重跑的锁（否则控件会先放开、白等一次 409）。
+  var locked=!!lock||!!vocabApplyRunning;
+  el("btnCandidateApply").disabled=!on||locked;
+  el("candidateSelectAll").disabled=!on||locked;
+  el("candidateRerunOld").disabled=!on||locked;
+  el("candidateOnlyNew").disabled=!on||locked;
+  candidateCheckboxes().forEach(function(c){c.disabled=locked;});
+  candidateGroupCheckboxes().forEach(function(c){c.disabled=locked;});
+  el("recScopeSel").disabled=locked;
+  el("recScopeAll").disabled=locked;
+  el("btnRecTranscribe").disabled=locked;
+  el("btnRecReuse").disabled=locked;
+  el("btnRecPublish").disabled=locked;
+  // P2-1：这句由「服务端后台任务」（错词重跑/重新成稿）与「页面内循环」（批量重试）
+  // 共用，两边的“能不能离开/有没有进度条”结论都相反，所以这里**只说锁定这件事**（对
+  // 三条链都成立），不承诺离开、也不指进度条；每条链自己的 say/进度行才写它成立与否
+  // （错词重跑那条可离开＋已用时是真的，见 renderVocabApplyProgress；P3-新1）。
+  el("batchLockHint").textContent=locked?"批量任务进行中：本次执行参数（范围、策略、rerun_old、目标集合）已锁定，本次不改，跑完再改。":"";
+}
+function loadVocabCandidates(){
+  var q="/api/vocab/candidates";
+  if(dataRoot())q+="?data_root="+encodeURIComponent(dataRoot());
+  fetch(q).then(function(r){return r.json();}).then(function(o){
+    var box=el("candidateList"), btn=el("btnCandidateApply"), all=el("candidateSelectAll");
+    if(!o||!o.ok){box.innerHTML='<div class="hint err">待审清单读取失败，请刷新后重试。</div>';setCandidateControls(false);vocabCandidatesRevision=null;return;}
+    // P1-2 候选版本锁：POST 时回传该指纹，清单变了后端 409 零执行；
+    // 清单缺失时后端回哨兵 "absent"（伪版本），前端按“没有版本”处理并禁止提交
+    vocabCandidatesRevision=(o.candidates_revision&&o.candidates_revision!=="absent")?o.candidates_revision:null;
+    // P2-新1：同一份回包既给版本也给生效目录——两者同源，保证「能提交」即「查得到进度」
+    if(o.data_root)effectiveDataRoot=String(o.data_root);
+    // P1-3/CANDIDATE-APPLY P3-4：清单**缺失**（还没生成过）与**腐坏**（有文件但读不出）
+    // 必须分开说——腐坏不能被塞进“暂无待审候选”把证据藏起来。
+    if(!o.has_candidates){
+      var cstate=String(o.candidates_state||"");
+      var cmsg=String(o.candidates_state_message||"");
+      if(cstate==="corrupt"){
+        box.innerHTML='<div class="hint err">'+esc(cmsg||"待审清单文件损坏或格式不对（读不出来）：请重新跑一次 AI 审查覆盖它；损坏内容不会被应用，也不会重跑任何稿件。")+'</div>';
+      }else if(cstate==="missing"){
+        box.innerHTML='<div class="hint">'+esc(cmsg||"还没有待审清单（文件不存在）：先跑一次 AI 审查生成清单。")+'</div>';
+      }else{
+        box.innerHTML='<div class="hint">暂无待审候选，去跑一次AI审查生成清单（找编排者要提示词）</div>';
+      }
+      setCandidateControls(false);all.checked=false;return;
+    }
+    var labels={high:"高置信度",medium:"中置信度",low:"低置信度"}, h="";
+    ["high","medium","low"].forEach(function(level){
+      var items=(o.candidates&&o.candidates[level])||[];
+      // P1-5/CANDIDATE-UI2 P3-3：组头 checkbox 长在 <summary> 里，点它会被浏览器当成
+      // 折叠动作一起做掉（勾中/低组时最容易顺手把组收起来）。这里在组头 label 上
+      // 掐断冒泡：**勾选只勾选、不折叠**；折叠仍走 summary 的三角标/空白处，功能不动。
+      h+='<details class="candGroup" '+(level!=="low"?'open':'')+'><summary><label class="candGroupHead" onclick="event.stopPropagation()"><input type="checkbox" data-candidate-group="'+level+'" '+(level!=="low"?'checked':'')+'> '+labels[level]+'（'+items.length+'）</label></summary>';
+      items.forEach(function(c){
+        var evidence=c.evidence||[], evidenceHtml=evidence.length?'<details class="candEvidenceDetails"><summary>证据（'+evidence.length+'）</summary><div>'+esc(evidence.join("；"))+'</div></details>':'';
+        h+='<label class="candRow"><input type="checkbox" data-candidate-index="'+esc(String(c.index))+'" data-candidate-level="'+level+'" '+(level!=="low"?'checked':'')+'>'
+          +'<span class="candText">'+esc(c.wrong||"（空错词）")+' → '+esc(c.right||"（空正词）")+evidenceHtml+'</span></label>';
+      });
+      h+='</details>';
+    });
+    box.innerHTML=h;setCandidateControls(true);
+    // P1-5/CANDIDATE-UI2 P3-4：初态不再硬写 false（高中组明明已勾），改由**同一个**
+    // syncCandidateSelectAll 算——页面所见与提交范围从此只有一套口径。
+    syncCandidateSelectAll();
+    candidateCheckboxes().forEach(function(c){c.onchange=syncCandidateSelectAll;});
+    candidateGroupCheckboxes().forEach(function(c){c.onchange=function(){
+      candidateCheckboxes().forEach(function(item){if(item.getAttribute("data-candidate-level")===c.getAttribute("data-candidate-group"))item.checked=c.checked;});
+      syncCandidateSelectAll();
+    };});
+  }).catch(function(){el("candidateList").innerHTML='<div class="hint err">待审清单读取失败，请刷新后重试。</div>';setCandidateControls(false);vocabCandidatesRevision=null;});
+}
+function syncCandidateSelectAll(){
+  var cs=candidateCheckboxes();el("candidateSelectAll").checked=cs.length>0&&cs.every(function(c){return c.checked;});
+  candidateGroupCheckboxes().forEach(function(g){var level=g.getAttribute("data-candidate-group"), items=candidateCheckboxes().filter(function(c){return c.getAttribute("data-candidate-level")===level;});g.checked=items.length>0&&items.every(function(c){return c.checked;});});
+}
+function vocabApplyStopPoll(){
+  if(vocabApplyTimer){clearInterval(vocabApplyTimer);vocabApplyTimer=null;}
+}
+function vocabApplySetText(text,cls){
+  el("candidateApplyText").textContent=String(text||"");
+  el("candidateApplyText").className="hint "+(cls||"");
+}
+function renderVocabApplyProgress(s){
+  el("candidateApplyProgress").style.display="";
+  var total=Number(s.total||0),done=Number(s.done||0);
+  el("candidateApplyFill").style.background="var(--green)";
+  el("candidateApplyFill").style.width=vocabApplyPct(s)+"%";
+  var lock=vocabApplyLockText(s);
+  if(s.stage==="rerunning"&&total>0){
+    vocabApplySetText("已处理 "+done+"/"+total+(s.current_filename?"（当前："+s.current_filename+"）":"")
+      +vocabApplyElapsedText(s)+lock+" · 可离开本页面，稍后回来仍能看到进度（本版不提供中途强制取消）");
+  }else{
+    vocabApplySetText((s.rerun_old===false?"正在导入词库（老稿不动）…":"正在导入错词并准备重跑…")
+      +vocabApplyElapsedText(s)+lock+" · 可离开本页面，稍后回来仍能看到进度");
+  }
+}
+// P1-3/RERUN-PROGRESS P3-4「无目标不画 100%」：进度百分比只按**本次真实重跑目标**
+// 算。没有目标（total<=0：没勾候选/没可重跑稿件/只入库不重跑）时一律 0%，
+// 绝不画满 100% 让用户误以为“都恢复成功了”。
+function vocabApplyPct(s){
+  var total=Number((s&&s.total)||0);
+  if(!(total>0))return 0;
+  var done=Number((s&&s.done)||0);
+  return Math.max(0,Math.min(100,Math.floor(done*100/total)));
+}
+// P1-3（RERUN-PROGRESS P3-6 的「部分做」）：长任务显示已用时＋可离开提示；
+// 后端已给 elapsed_seconds，缺失时按 started_at 自算，都没有就不显示。
+function vocabApplyElapsedText(s){
+  var sec=Number((s&&s.elapsed_seconds)||0);
+  if(!(sec>0)){
+    var t0=Date.parse(String((s&&s.started_at)||""));
+    if(!isNaN(t0))sec=Math.max(0,Math.round((Date.now()-t0)/1000));
+  }
+  return sec>0?(" · 已用时 "+sec+"s"):"";
+}
+// P1-3/CANDIDATE-APPLY P3-2：终态统计用后端同一口径（stats 五桶），
+// 页面不再自己另算一套 —— 前端展示与后端汇总必须能对上。
+function vocabApplyStatsText(s){
+  var st=(s&&s.stats)||null;
+  var sum=(s&&s.summary)||{};
+  var ok=Number((st?st.success:sum.success)||0);
+  var skip=Number((st?st.skipped:sum.skipped)||0);
+  var bad=Number((st?st.failed:sum.failed)||0);
+  var human=Number((st?st.needs_human:sum.needs_human)||0);
+  var intr=Number((st?st.interrupted:sum.interrupted)||0);
+  var total=Number((st?st.total:sum.total)||0);
+  var txt="重跑目标 "+total+" 篇：成功 "+ok+"，跳过 "+skip+"，失败 "+bad;
+  if(human)txt+="，待人工 "+human;
+  if(intr)txt+="，中断 "+intr;
+  if(total>0&&ok+skip+bad+human+intr===total)txt+="（可复算："+total+"="+ok+"+"+skip+"+"+bad+"+"+human+"+"+intr+"）";
+  return txt;
+}
+// P1-3/RERUN-PROGRESS P3-5「页面参数＝实际执行参数」：把**本次锁住的那套参数**
+// 写成一句人话（rerun_old ＋ 目标候选数），而不是用户此刻控件上的值。
+// 两个来源同口径：status 的 rerun_old/indices_count；409 的 locked_params。
+function vocabApplyLockText(s){
+  var raw=(s&&s.locked_params)?s.locked_params:null;
+  var rerun=raw?(raw.rerun_old):(s?s.rerun_old:undefined);
+  if(rerun!==true&&rerun!==false)return "";
+  var n=null;
+  if(raw&&raw.indices)n=raw.indices.length;
+  else if(!raw&&s&&s.indices_count!=null&&!isNaN(Number(s.indices_count)))n=Number(s.indices_count);
+  return "（本次锁定："+(rerun?"重跑老稿":"只入库、不重跑老稿")
+    +(n==null?"":("，目标候选 "+n+" 条"))+"）";
+}
+function renderVocabApplyFinal(s){
+  el("candidateApplyProgress").style.display="";
+  var sum=s.summary||{};
+  if(s.state==="failed"){
+    el("candidateApplyFill").style.background="var(--red)";
+    // 失败也按真实进度画，不再硬拉满 100%（无目标时就是 0%）
+    el("candidateApplyFill").style.width=vocabApplyPct(s)+"%";
+    vocabApplySetText(String(s.error||s.message||"处理失败，请重试")+vocabApplyElapsedText(s),"err");
+    return;
+  }
+  el("candidateApplyFill").style.background="var(--green)";
+  el("candidateApplyFill").style.width=vocabApplyPct(s)+"%";
+  var msg=String(s.message||("完成：导入"+(s.imported||0)+"条"));
+  var statsTxt=vocabApplyStatsText(s);
+  if(msg.indexOf("重跑目标")<0)msg+=" · "+statsTxt;
+  if(!(Number(s.total||0)>0)&&msg.indexOf("零目标")<0){
+    msg+="（本次没有需要重跑的稿件，进度条不画满，避免误认为“全部恢复成功”）";
+  }
+  msg+=vocabApplyElapsedText(s);
+  // 严重度与展示同口径：优先读后端 stats.failed，缺了才回落 summary.failed
+  var failN=Number((s.stats&&s.stats.failed!=null)?s.stats.failed:((sum&&sum.failed)||0));
+  vocabApplySetText(msg,failN>0?"warn":"ok");
+  var det=s.details||[];
+  if(det.length){
+    var lines=[];det.forEach(function(d){lines.push((d.accepted?'保留':'拒收')+'：'+(d.wrong||('索引'+d.index))+(d.right?' → '+d.right:'')+(d.reason?'（'+d.reason+'）':''));});
+    el("vCandidate").textContent=lines.join("；");el("vCandidate").className="vhint";
+  }
+}
+function vocabApplyStartTimer(){
+  if(!vocabApplyStartedAt)vocabApplyStartedAt=Date.now();
+  if(!vocabApplyTimer)vocabApplyTimer=setInterval(pollVocabApplyStatus,1500);
+}
+// P1-2 任务身份：轮询必须带 data_root + job_id，只渲染本页发起的那次任务，
+// 多标签页/换数据目录时不得把别人的进度画到自己页面上。
+// P2-新1：框为空时用 effectiveDataRoot（后端生效目录），保证与 apply 同口径。
+function vocabJobDataRoot(){
+  return String(dataRoot()||"").trim()||String(effectiveDataRoot||"").trim()||"";
+}
+function vocabApplyStatusQuery(){
+  var qs=[],root=vocabJobDataRoot();
+  if(root)qs.push("data_root="+encodeURIComponent(root));
+  if(vocabApplyJobId)qs.push("job_id="+encodeURIComponent(vocabApplyJobId));
+  return qs.length?("?"+qs.join("&")):"";
+}
+function vocabApplyDropPoll(reason){
+  vocabApplyStopPoll();vocabApplyRunning=false;
+  el("btnCandidateApply").disabled=false;
+  // P1-3：本次任务已不在跑 → 解除参数锁定（按候选清单是否真的读到了决定可控性）
+  setCandidateControls(candidateCheckboxes().length>0);
+  if(reason)vocabApplySetText(reason,"warn");
+}
+// P2-三1：任何“接管不了/查不到”的出口都必须复原按钮并给人话，
+// 杜绝「停表＋按钮禁用＋零提示」把用户卡在假象里。
+function vocabApplyGiveUp(reason){
+  vocabApplyDropPoll(reason||"后台任务进度读不到了，请点「刷新」重看");
+}
+// 终态统一渲染（轮询与续看共用，避免两处口径分叉）
+function vocabApplyFinish(s){
+  vocabApplyJobId=(s&&s.job_id)||vocabApplyJobId;
+  vocabApplyStopPoll();vocabApplyRunning=false;
+  el("btnCandidateApply").disabled=false;
+  // P1-3：终态即解除参数锁定（下一次提交可以改范围/rerun_old/目标集合）
+  setCandidateControls(candidateCheckboxes().length>0);
+  renderVocabApplyFinal(s);
+  loadVocab();loadVocabCandidates();refresh();
+}
+// P3-三1：与后端同口径——生效目录必须是绝对路径（相对值不入库、不提交）
+function isAbsRoot(p){return !!p&&String(p).charAt(0)==="/";}
+function vocabApplyNotePollFailure(err){
+  vocabApplyFailStreak++;
+  el("candidateApplyProgress").style.display="";  // 提示必须可见，不许静默
+  var tooLong=(vocabApplyStartedAt>0)&&((Date.now()-vocabApplyStartedAt)>VOCAB_APPLY_MAX_MS);
+  if(vocabApplyFailStreak<VOCAB_APPLY_MAX_FAIL&&!tooLong){
+    vocabApplySetText("进度读取失败，正在重试…（第"+vocabApplyFailStreak+"次："
+      +String(err||"网络错误")+"）","warn");
+    return;  // 单次/短暂失败不停表，继续轮询
+  }
+  vocabApplyStopPoll();vocabApplyRunning=false;el("btnCandidateApply").disabled=false;
+  // P1-3：本页不再推进这次任务 → 解除参数锁定，让用户能改参数/重提交
+  setCandidateControls(candidateCheckboxes().length>0);
+  // M4：停表原因文案必须准确（连续失败 vs 累计超时）
+  var why=(vocabApplyFailStreak>=VOCAB_APPLY_MAX_FAIL)
+    ? ("进度读取连续失败"+vocabApplyFailStreak+"次")
+    : ("进度刷新累计超过"+Math.round(VOCAB_APPLY_MAX_MS/60000)+"分钟仍未完成");
+  vocabApplySetText(why+"，已停止自动刷新；后台任务可能仍在跑，"
+    +"请点「刷新」或稍后重开页面查看","err");
+}
+function pollVocabApplyStatus(){
+  fetch("/api/vocab/candidates/apply/status"+vocabApplyStatusQuery())
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    var o=x.o||{};
+    if(x.code===400||x.code===404||x.code===409){
+      // 服务端明确拒绝（跨目录/非本页任务/参数不对）：不渲染别人的任务，给人话就停表
+      vocabApplyFailStreak=0;
+      vocabApplyDropPoll(String(o.error||"进度读取被拒绝，请刷新后再看"));
+      return;
+    }
+    if(x.code!==200||o.ok===false){
+      // 服务端抖动（5xx 等）：按轮询容错口径计数重试，不静默冻结也不无限重试
+      vocabApplyNotePollFailure("HTTP "+x.code);
+      return;
+    }
+    var s=o.job;
+    if(!s){
+      // P2-新1：曾经在跑的任务忽然查不到，必须给人话，不许静默停表
+      var wasRunning=vocabApplyRunning;
+      vocabApplyFailStreak=0;vocabApplyStopPoll();vocabApplyRunning=false;
+      el("btnCandidateApply").disabled=false;
+      if(wasRunning)vocabApplySetText("后台任务已查不到（服务可能重启过或换了数据目录），"
+        +"进度停在这里；请点「刷新」重看，或重开页面","warn");
+      return;
+    }
+    if(vocabApplyJobId&&s.job_id&&String(s.job_id)!==String(vocabApplyJobId)){
+      vocabApplyDropPoll("后端最近任务已换成另一次（不是本页发起的），已停止刷新本页进度");
+      return;
+    }
+    vocabApplyJobId=s.job_id||vocabApplyJobId;
+    vocabApplyFailStreak=0;
+    if(s.state==="running"){
+      vocabApplyRunning=true;el("btnCandidateApply").disabled=true;
+      // P1-3：接管到进行中的任务 → 同样冻结本次执行参数
+      setCandidateControls(true);
+      renderVocabApplyProgress(s);
+      vocabApplyStartTimer();
+      return;
+    }
+    vocabApplyFinish(s);
+  }).catch(function(e){vocabApplyNotePollFailure(e);});
+}
+function resumeVocabApplyPoll(){
+  // 页面重载续看：只接管「本页生效数据目录」下进行中的任务，终态不打扰；
+  // P2-新1：与 apply 同一口径（框为空时用后端生效目录），不得出现「能提交但续看不到」
+  // P2-三1：本页刚提交过（vocabApplyRunning）时，下面的每条“接管不了”都必须
+  //         给人话＋复原按钮，不许静默 return。
+  var root=vocabJobDataRoot();
+  if(!isAbsRoot(root)){
+    // P3-三1：相对/空值不算生效目录——本地就拦，不留到服务端 400
+    if(vocabApplyRunning)vocabApplyGiveUp("数据目录须为绝对路径（可点「浏览」重选，"
+      +"或清空该框改用默认外置测试目录），无法接管后台任务");
+    return;
+  }
+  fetch("/api/vocab/candidates/apply/status"+vocabApplyStatusQuery())
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    var o=x.o||{};
+    if(x.code===400||x.code===404||x.code===409){
+      // 别目录/别任务被服务端拒：本页刚提交过就必须说清，不能停在“正在导入…”假象
+      if(vocabApplyRunning)vocabApplyGiveUp(String(o.error
+        ||"后台正在跑的任务不属于本页数据目录，无法接管；请核对数据目录后刷新"));
+      return;
+    }
+    if(x.code!==200||o.ok===false){
+      // 服务端抖动：仍开表限期重试（由 poll 的容错给明确提示），不静默冻结
+      vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
+      vocabApplyStartTimer();
+      return;
+    }
+    var s=o.job;
+    if(!s){
+      if(vocabApplyRunning)vocabApplyGiveUp("后台任务已查不到（服务可能重启过），"
+        +"请点「刷新」重看");
+      return;
+    }
+    if(!sameDataRoot(s.data_root,root)){  // 双保险：目录不符不画
+      if(vocabApplyRunning)vocabApplyGiveUp("后台任务属于另一个数据目录，本页不再显示它的进度；"
+        +"请核对数据目录后点「刷新」");
+      return;
+    }
+    if(s.state==="running"){
+      vocabApplyJobId=s.job_id||vocabApplyJobId;
+      vocabApplyRunning=true;el("btnCandidateApply").disabled=true;
+      // P1-3：接管到进行中的任务 → 同样冻结本次执行参数
+      setCandidateControls(true);
+      vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
+      renderVocabApplyProgress(s);
+      vocabApplyStartTimer();
+      return;
+    }
+    // 提交与接管之间任务已跑完：本页刚提交过就直接落终态（不是静默丢），冷启动不打扰
+    if(vocabApplyRunning)vocabApplyFinish(s);
+  }).catch(function(){
+    // 载入时读不到：仍开表限期重试；连续失败由 poll 的容错给明确提示，不静默冻结
+    vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
+    vocabApplyStartTimer();
+  });
+}
+function sameDataRoot(a,b){
+  var x=String(a||"").replace(/\/+$/,""),y=String(b||"").replace(/\/+$/,"");
+  return !!x&&!!y&&x===y;
+}
+function applyVocabCandidates(){
+  var ids=candidateCheckboxes().filter(function(c){return c.checked;}).map(function(c){return Number(c.getAttribute("data-candidate-index"));});
+  // P1-3/CANDIDATE-APPLY P3-3 零目标：给明确人话（不是“按钮没反应”，也不建空任务）
+  if(!ids.length){
+    if(!candidateCheckboxes().length){
+      el("vCandidate").textContent="当前没有可勾选的待审候选（零目标，未执行任何导入与重跑）：先跑一次 AI 审查生成清单，或点「刷新」重读。";
+    }else{
+      el("vCandidate").textContent="没有勾选任何待审候选（零目标，未执行任何导入与重跑）：请先勾选至少一条再点「错词重跑」。";
+    }
+    el("vCandidate").className="vhint err";return;
+  }
+  if(!vocabCandidatesRevision){
+    el("vCandidate").textContent="候选清单还没读到版本，先点「刷新」重载待审清单再提交（防应用到错的候选）";
+    el("vCandidate").className="vhint err";return;
+  }
+  // P2-新1：提交必须带显式绝对 data_root（与状态查询同口径）；解析不到就人话阻止，
+  // 绝不提交一个「后台跑了但本页看不到进度」的任务。
+  // P3-三1：相对路径同样在本地拦住（后端也要求绝对），把 400 提前成本地人话。
+  var submitRoot=vocabJobDataRoot();
+  if(!submitRoot){
+    el("vCandidate").textContent="请先选择数据目录（或点「刷新」让页面读到当前生效目录）再提交";
+    el("vCandidate").className="vhint err";return;
+  }
+  if(!isAbsRoot(submitRoot)){
+    el("vCandidate").textContent="数据目录须为绝对路径，请点「浏览」重选（或清空该框改用默认外置测试目录）再提交";
+    el("vCandidate").className="vhint err";return;
+  }
+  // P1-3/CANDIDATE-UI2 P3-2：策略二选一（重跑老稿／只入库）**不允许双空就提交**。
+  // 双空在语义上等于「只入库」但页面上看不出范围，容易被当成「没选=照旧重跑」；
+  // 这里明确回到安全一侧（只入库＝不重跑、不动库内笔记）并写人话，绝不静默换语义。
+  if(!el("candidateRerunOld").checked&&!el("candidateOnlyNew").checked){
+    el("candidateOnlyNew").checked=true;
+    say("「重跑老稿／只入库」不能都不选，已回到安全一侧：只入库（不重跑，不动库内笔记）。","warn");
+  }
+  var rerunOld=el("candidateRerunOld").checked;
+  if(!confirm(rerunOld?"导入所选错词并重跑全部已完成任务吗？\n转写0次，改过的笔记会按 No-Clobber 跳过。":"只导入所选错词，不重跑老稿吗？\n老稿保持不动，新视频会自动应用。"))return;
+  el("btnCandidateApply").disabled=true;vocabApplyRunning=true;
+  vocabApplyFailStreak=0;vocabApplyStartedAt=Date.now();
+  vocabApplyJobId=null;
+  el("vCandidate").textContent="";el("vCandidate").className="vhint";
+  setCandidateControls(true);   // P1-3：提交即冻结本次执行参数（范围/rerun_old/目标集合）
+  // P1-3：提交即冻结本次执行参数；首帧就把「本次锁定的目标集合」按实际提交的
+  // 条数画出来（页面显示＝实际执行，不等后端回包才开始一致）。
+  renderVocabApplyProgress({state:"running",stage:"importing",rerun_old:rerunOld,total:0,done:0,started_at:new Date().toISOString(),indices_count:ids.length});
+  fetch("/api/vocab/candidates/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(reapplyPayload({indices:ids,rerun_old:rerunOld,candidates_revision:vocabCandidatesRevision,data_root:submitRoot}))})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    var o=x.o||{};
+    if(x.code===202){vocabApplyJobId=o.job_id||null;vocabApplyStartTimer();pollVocabApplyStatus();return;}
+    if(x.code===409&&o.running){   // 已有任务在跑：先落人话再接管（接管失败也必须留话，P2-三1）
+      // P1-3/P3-5：把「本次锁住的参数」一并回显，页面参数与实际执行的那次一致
+      vocabApplySetText(String(o.error||"已有一次任务在进行中，请等它跑完再试")+vocabApplyLockText(o),"warn");
+      resumeVocabApplyPoll();return;
+    }
+    vocabApplyRunning=false;el("btnCandidateApply").disabled=false;
+    setCandidateControls(candidateCheckboxes().length>0);
+    vocabApplySetText(String(o.error||o.message||("处理失败："+x.code)),"err");
+  }).catch(function(e){
+    vocabApplyRunning=false;el("btnCandidateApply").disabled=false;
+    setCandidateControls(candidateCheckboxes().length>0);
+    vocabApplySetText("错词重跑请求失败："+e,"err");
+  });
+}
+el("candidateSelectAll").onchange=function(){candidateCheckboxes().forEach(function(c){c.checked=el("candidateSelectAll").checked;});candidateGroupCheckboxes().forEach(function(c){c.checked=el("candidateSelectAll").checked;});};
+el("candidateRerunOld").onchange=function(){if(el("candidateRerunOld").checked)el("candidateOnlyNew").checked=false;};
+el("candidateOnlyNew").onchange=function(){if(el("candidateOnlyNew").checked)el("candidateRerunOld").checked=false;};
+el("btnCandidateApply").onclick=applyVocabCandidates;
+function addVocab(){
+  var w=el("vocWrong").value.trim(), r=el("vocRight").value.trim();
+  if(!w||!r){el("vVoc").textContent="错词和正词都要填";el("vVoc").className="vhint err";return;}
+  if(w.length<2){el("vVoc").textContent="错词至少2个字（单字替换会误伤全文，如a→b，请加长后再试）";el("vVoc").className="vhint err";return;}
+  if(w.length<=3 && !confirm("短词（"+w.length+"字）易命中多处：添加后新转写与重跑会自动应用全文替换（命中超50处请及时删除），仍要添加 "+w+"→"+r+" 吗？"))return;
+  fetch("/api/vocab",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(reapplyPayload({wrong:w,right:r}))})
+  .then(function(r2){return r2.json().then(function(o){return{code:r2.status,o:o};});})
+  .then(function(x){
+    if(x.code===200){var msg=String(x.o.message||"已添加");if(x.o&&x.o.preview&&x.o.preview.warnings&&x.o.preview.warnings.length)msg+="【预览："+x.o.preview.warnings.join("；")+"】";el("vVoc").textContent=msg;el("vVoc").className="vhint ok";el("vocWrong").value="";el("vocRight").value="";loadVocab();}
+    else{el("vVoc").textContent=String(x.o.error||("添加失败："+x.code));el("vVoc").className="vhint err";}
+  }).catch(function(e){el("vVoc").textContent="添加请求失败："+e;el("vVoc").className="vhint err";});
+}
+function delVocab(w){
+  if(!confirm("删除词库 "+w+" 吗？新转写不再应用，已生成的稿子不动。"))return;
+  fetch("/api/vocab/delete",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(reapplyPayload({wrong:w}))})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    if(x.code===200){say(String(x.o.message||"已删除"),"ok");loadVocab();}
+    else say("删除失败："+((x.o&&x.o.error)||x.code),"err");
+  }).catch(function(e){say("删除请求失败："+e,"err");});
+}
+function loadPresets(){
+  var q="/api/vocab/presets";
+  if(dataRoot())q+="?data_root="+encodeURIComponent(dataRoot());
+  fetch(q).then(function(r){return r.json();}).then(function(o){
+    if(!o||!o.ok)return;
+    var ps=o.presets||[];
+    if(!ps.length){el("presetBox").innerHTML="";return;}
+    var h='<span class="hint">预置词库（停用域只影响新转写，老稿需重跑）：</span>';
+    ps.forEach(function(p){
+      var entries=(p.entries||[]).map(function(e){return '<div class="pentry">'+esc(e.wrong)+' → '+esc(e.right)+'</div>';}).join("");
+      h+='<div class="presetRow"><label><input type="checkbox" data-preset-import="'+esc(p.domain)+'"> 导入</label>'
+        +'<label><input type="checkbox" data-preset-enabled="'+esc(p.domain)+'" '+(p.enabled!==false?'checked':'')+'> 启用</label>'
+        +'<span>'+esc(p.label)+'（'+(p.count||0)+'）</span><button type="button" class="mini" data-preset-view="'+esc(p.domain)+'">查看</button>'
+        +'<details class="presetEntries" data-preset-entries="'+esc(p.domain)+'"><summary>只读查看全词条</summary>'+entries+'</details></div>';
+    });
+    h+='<button class="mini" id="btnPresetImport">一键导入所选</button>';
+    el("presetBox").innerHTML=h;
+    el("btnPresetImport").onclick=importPresets;
+    Array.prototype.forEach.call(el("presetBox").querySelectorAll("[data-preset-view]"),function(b){b.onclick=function(){var d=el("presetBox").querySelector('[data-preset-entries="'+b.getAttribute("data-preset-view")+'"]');if(d)d.open=!d.open;};});
+    Array.prototype.forEach.call(el("presetBox").querySelectorAll("[data-preset-enabled]"),function(c){c.onchange=savePresetDomains;});
+  }).catch(function(){});
+}
+function savePresetDomains(){
+  var enabled={};
+  Array.prototype.forEach.call(el("presetBox").querySelectorAll("[data-preset-enabled]"),function(c){enabled[c.getAttribute("data-preset-enabled")]=c.checked;});
+  fetch("/api/vocab/presets/domains",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(reapplyPayload({enabled:enabled}))})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){el("vPreset").textContent=String((x.o&&x.o.message)||((x.o&&x.o.error)||"预置词库开关保存失败"));el("vPreset").className=x.code===200?"vhint ok":"vhint err";loadVocab();})
+  .catch(function(e){el("vPreset").textContent="预置词库开关保存失败："+e;el("vPreset").className="vhint err";});
+}
+function importPresets(){
+  var ds=[];
+  Array.prototype.forEach.call(el("presetBox").querySelectorAll("[data-preset-import]"),function(c){
+    if(c.checked)ds.push(c.getAttribute("data-preset-import"));
+  });
+  if(!ds.length){el("vPreset").textContent="先勾选至少一个领域再导入";el("vPreset").className="vhint err";return;}
+  if(!confirm("把所选预置词库（"+ds.join("、")+"）导入你的词库吗？\n新转写自动应用；已存在的错词跳过，撞内置词库的拒收。"))return;
+  el("vPreset").textContent="正在导入…";el("vPreset").className="vhint";
+  fetch("/api/vocab/presets/import",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(reapplyPayload({domains:ds}))})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    if(x.code===200&&x.o&&x.o.ok){
+      el("vPreset").textContent=String(x.o.message||"导入完成");
+      el("vPreset").className="vhint ok";
+      loadVocab();
+    }else{
+      el("vPreset").textContent=String((x.o&&x.o.error)||("导入失败："+x.code));
+      el("vPreset").className="vhint err";
+    }
+  }).catch(function(e){el("vPreset").textContent="导入请求失败："+e;el("vPreset").className="vhint err";});
+}
+el("btnVocAdd").onclick=addVocab;
+el("vocabFilter").oninput=renderVocabList;
+var refreshing=false;
+function refresh(autoPoll){
+  autoPoll=autoPoll===true;
+  if(refreshing)return;
+  refreshing=true;
+  el("btnRefresh").disabled=true;
+  el("btnRefresh").textContent="刷新中…";
+  var qs=[];
+  if(dataRoot())qs.push("data_root="+encodeURIComponent(dataRoot()));
+  // UX2-P0-1：必带 limit=200（否则后端默认20，67只见20且失败藏起）
+  qs.push("limit=200");
+  var irf=el("inInput").value.trim()||((lastLock&&lastLock.input_root)||"");
+  if(irf)qs.push("input_root="+encodeURIComponent(irf));
+  var q=qs.length?("?"+qs.join("&")):"";
+  var p1=fetch("/api/status"+q).then(function(r){return r.json().then(function(s){return{code:r.status,s:s};});}).then(function(x){
+    var s=x.s;
+    // 后端按 data_root 只回本目录的数据；400 时如实说明原因，不静默忽略
+    if(x.code!==200){say("状态读取失败："+((s&&s.error)||x.code),"err");return;}
+    // FR-12：每张新快照把续接游标对齐到「首页尾之后」——监听中新完成项把
+    // 边界行挤出首页时，下一次「展开更早」从首页尾接起、按 run_id 去重，不留缝
+    if(s&&s.completed_page)completedNextCursor=s.next_cursor||null;
+    renderTape(s);renderRuns(s);
+    if(s&&s.ok===false)say("状态库尚不存在，填入视频文件夹后点击「开始监听」。");
+  }).catch(function(e){say("状态读取失败："+e,"err");});
+  var p2=fetch("/api/start").then(function(r){return r.json();}).then(function(o){
+    lastFetchAt=Date.now();
+    renderLock(o);
+    // P2-新1：框为空时后端用的就是 default_data_root；只在本页还没学到生效目录时兜底
+    if(o&&o.default_data_root&&!effectiveDataRoot)effectiveDataRoot=String(o.default_data_root);
+    if(o&&o.error)say("启动失败："+o.error,"err");
+  }).catch(function(){});
+  if(!autoPoll){
+    dropDiagCache();   // P1-4：手动刷新＝用户要看最新本地证据，旧诊断快照不再复用
+    completedExtra=[];completedNextCursor=null;completedRootSeen=null;   // FR-12：手动刷新重置完成区展开视图
+    try{loadVocab();}catch(e){}
+    try{loadPresets();}catch(e){}
+    try{loadVocabCandidates();}catch(e){}
+  }
+  Promise.all([p1,p2]).then(function(){
+    refreshing=false;
+    el("btnRefresh").disabled=false;
+    el("btnRefresh").textContent="刷新";
+    // P2-新1：等生效目录/候选版本回包之后再续看，避免因目录未知而漏接管
+    // 注（P3-三3，只记不修）：续看只在本轮 refresh 里调一次；两个真源
+    // （default_data_root 是常量、清单回包恒带 data_root）恒有值，当前不可达。
+    if(!autoPoll){try{resumeVocabApplyPoll();}catch(e){}}
+  });
+}
+function openBrowser(target){
+  browseTarget=target;
+  el("modal").classList.add("open");
+  loadDir(el(target).value.trim()||"");
+}
+function loadDir(p){
+  fetch("/api/browse?path="+encodeURIComponent(p||"")).then(function(r){
+    return r.json().then(function(o){return{code:r.status,o:o};});
+  }).then(function(x){
+    if(x.code!==200){say("浏览失败："+(x.o.error||x.code),"err");return;}
+    browsePath=x.o.path;
+    var parts=x.o.path.split("/").filter(function(s){return s;});
+    var h='<a data-p="/">/</a>';
+    var acc="";
+    parts.forEach(function(s){
+      acc+="/"+s;
+      h+='<a data-p="'+esc(acc)+'">'+esc(s)+"</a>/";
+    });
+    h+=' <span>(上级：<a data-p="'+esc(x.o.parent)+'">..</a>)</span>';
+    el("crumbs").innerHTML=h;
+    Array.prototype.forEach.call(el("crumbs").querySelectorAll("a"),function(a){
+      a.onclick=function(){loadDir(a.getAttribute("data-p"));};
+    });
+    var counts=x.o.counts||{};
+    el("bdirs").innerHTML=x.o.dirs.map(function(d){
+      var n=counts[d]!=null?counts[d]:null;
+      var suffix=n!=null?"（"+n+" 个视频）":"";
+      return "<div data-d=\""+esc(d)+"\">📁 "+esc(d)+suffix+"</div>";
+    }).join("")||"<div>（空目录）</div>";
+    Array.prototype.forEach.call(el("bdirs").querySelectorAll("div[data-d]"),function(d){
+      d.onclick=function(){loadDir(browsePath+"/"+d.getAttribute("data-d"));};
+      d.ondblclick=function(){el(browseTarget).value=browsePath+"/"+d.getAttribute("data-d");closeBrowser();validateInput(browseTarget);};
+    });
+    var v=x.o.videos||{total:0,sample:[],long_estimate:0};
+    var info="当前目录有 "+(v.total||0)+" 个视频";
+    if((v.sample||[]).length)info+="（如 "+v.sample.slice(0,3).join("、")+"）";
+    var cls="";
+    if((v.total||0)===0){info+=" · 该目录无视频文件，选了也转不出东西";cls="warn";}
+    if((v.long_estimate||0)>0)info+=" · 检测到长视频 "+v.long_estimate+" 个（按大小估算），转写可能超 "+(v.long_estimate*10)+" 分钟，分段进行请勿关闭页面";
+    var bi=el("browseInfo");
+    bi.textContent=info;
+    bi.className=cls;
+  }).catch(function(e){say("浏览请求失败："+e,"err");});
+}
+function closeBrowser(){el("modal").classList.remove("open");}
+Array.prototype.forEach.call(document.querySelectorAll("[data-browse]"),function(b){
+  b.onclick=function(){openBrowser(b.getAttribute("data-browse"));};
+});
+el("btnClose").onclick=closeBrowser;
+el("modal").onclick=function(e){if(e.target===el("modal"))closeBrowser();};
+document.addEventListener("keydown",function(e){if(e.key==="Escape")closeBrowser();});
+el("btnPick").onclick=function(){if(browseTarget){el(browseTarget).value=browsePath;}closeBrowser();if(browseTarget)validateInput(browseTarget);};
+el("btnRefresh").onclick=function(){refresh(false);};
+function validateInput(which, cb){
+  var map={inInput:["inInput","vInput",true],inVault:["inVault","vVault",false],inData:["inData","vData",false]};
+  var cfg=map[which];
+  if(!cfg){if(cb)cb(true);return;}
+  var input=el(cfg[0]), hint=el(cfg[1]), required=cfg[2];
+  var raw=input.value;
+  var cleaned=stripQuotes(raw);
+  if(cleaned!==raw.trim()){
+    input.value=cleaned;
+    hint.textContent="已自动去掉首尾引号";
+    hint.className="vhint warn";
+  }
+  var v=input.value.trim();
+  function done2(ok, msg, cls){
+    if(msg!=null){hint.textContent=msg;hint.className="vhint "+cls;}
+    input.classList.remove("bad","good");
+    input.classList.add(ok?"good":"bad");
+    updateStartReady();
+    if(cb)cb(ok);
+  }
+  if(!v){
+    if(which==="inVault"){done2(true,"不填也能转，md只存数据目录，每行会给路径","ok");return;}
+    if(which==="inData"){done2(true,"用默认外置测试目录","ok");return;}
+    done2(false,"请填写视频文件夹绝对路径","err");return;
+  }
+  fetch("/api/browse?path="+encodeURIComponent(v)).then(function(r){
+    return r.json().then(function(o){return{code:r.status,o:o};});
+  }).then(function(x){
+    if(x.code===200){
+      var vv=x.o.videos||{total:0,long_estimate:0};
+      if(which==="inInput"){
+        longInInput=vv.long_estimate||0;
+        var lh=el("longHint");
+        if(longInInput>0){
+          lh.style.display="block";
+          lh.textContent="检测到长视频 "+longInInput+" 个（按大小估算），转写可能超 "+(longInInput*10)+" 分钟，分段进行请勿关闭页面";
+        }else lh.style.display="none";
+      }
+      var msg="路径可用";
+      if(which==="inInput"&&(vv.total||0)===0)msg="路径可用，但该目录暂无视频文件";
+      if(hint.textContent==="已自动去掉首尾引号"&&x.code===200){
+        // 保留去引号回显，追加可用
+        hint.textContent="已自动去掉首尾引号，路径可用";
+        hint.className="vhint warn";
+        input.classList.remove("bad");input.classList.add("good");
+        updateStartReady();if(cb)cb(true);return;
+      }
+      done2(true,msg,"ok");
+    }else{
+      if(which==="inInput")longInInput=0;
+      done2(false,String(x.o.error||"路径有问题，请点浏览重选"),"err");
+    }
+  }).catch(function(){
+    done2(false,"校验请求失败，请点浏览重选","err");
+  });
+}
+["inInput","inVault","inData"].forEach(function(id){
+  el(id).addEventListener("blur",function(){validateInput(id);});
+  el(id).addEventListener("input",function(){
+    if(lastLock&&lastLock.running){
+      var h=el("editHint");
+      h.style.display="block";
+      h.textContent="修改下次启动生效，当前监听 "+(lastLock.input_root||"");
+      h.className="hint warn";
+    }
+  });
+});
+function updateStartReady(){
+  var okI=!el("inInput").classList.contains("bad");
+  var okV=!el("inVault").classList.contains("bad");
+  var okD=!el("inData").classList.contains("bad");
+  var b=el("btnStart");
+  if(okI&&okV&&okD&&!b.disabled)b.classList.add("ready");
+  else b.classList.remove("ready");
+}
+el("btnStart").onclick=function(){
+  stopState=null;
+  var input=el("inInput").value.trim();
+  if(!input){say("请先填写视频文件夹的绝对路径。","err");return;}
+  say("正在启动监听…");
+  fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({data_root:dataRoot()||undefined,input_root:input,
+      ob_vault_root:el("inVault").value.trim()||undefined})})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    if(x.code===202){try{savePaths();}catch(e){}say("已开始监听："+x.o.input_root+"，把视频丢进去即可。","ok");}
+    else if(x.code===409){say(String(x.o.error||"已经在监听同一文件夹，无需重复操作"),"warn");}
+    else{
+      var msg=String(x.o.error||("启动失败："+x.code));
+      say(msg,"err");
+      if(/没就绪/.test(msg)){
+        say(msg+" · 一键启动命令可复制： ./app/start.sh","err");
+        toast("转写环境没就绪，可复制一键启动命令： ./app/start.sh","err");
+      }
+    }
+    refresh();
+  }).catch(function(e){say("启动请求失败："+e,"err");});
+};
+el("btnStop").onclick=function(){
+  if(stopState&&stopState.finishing)return;
+  say("正在停止（先停接新任务，当前任务会跑完收尾）…");
+  el("btnStop").disabled=true;
+  fetch("/api/stop",{method:"POST"}).then(function(r){return r.json();}).then(function(o){
+    o=o||{};
+    // UX2-P1-6：三段式——已停止接新任务／当前这个会跑完收尾／重起后已完成跳过、半截重转
+    stopState={finishing:!!o.finishing,
+      filename:String((o.current&&o.current.filename)||""),
+      message:String(o.message||"已停止接新任务；重起后已完成跳过、半截重转。")};
+    el("btnStop").disabled=false;
+    say(stopState.message,"ok");
+    if(stopState.finishing)toast("已停止接新任务，当前任务收尾中…","ok");
+    else toast("已停止监听","ok");
+    refresh();
+  }).catch(function(e){el("btnStop").disabled=false;say("停止失败："+e,"err");});
+};
+el("btnNewData").onclick=function(){
+  var s=(lastLock&&lastLock.suggested_data_root)||"";
+  if(!s){say("暂无建议的新数据目录。","warn");return;}
+  el("inData").value=s;
+  say("已填入新数据目录："+s+"，点开始监听即重起（源视频与笔记不动）。","ok");
+  validateInput("inData");
+};
+// UX2-P0-2：清空前先明示代价（DB N条＋jobs M个 / 预计重转X分钟），
+// 二选一“只清失败 / 全部清空”，默认不选全清；清后给撤销指引。
+var clearPreview=null;
+function clearOpenedRoot(){
+  return el("inInput").value.trim()||((lastLock&&lastLock.input_root)||"");
+}
+function openClearDialog(){
+  var ir=clearOpenedRoot();
+  if(!ir){say("请先填写要清空的视频文件夹绝对路径。","err");return;}
+  clearPreview=null;
+  el("clearMsg").textContent="";
+  el("clearCost").textContent="正在核对要清的任务与代价…";
+  el("btnClearFailed").disabled=true;
+  el("btnClearAll").disabled=true;
+  el("clearModal").classList.add("open");
+  fetch("/api/clear",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({data_root:dataRoot()||undefined,input_root:ir,dry_run:true})})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    if(x.code!==200||!x.o||!x.o.ok){
+      el("clearCost").textContent="无法清空："+String((x.o&&x.o.error)||("HTTP "+x.code));
+      return;
+    }
+    if(x.o.no_tasks){
+      el("clearCost").textContent=String(x.o.message||"本目录下没有任务记录，无需清空。");
+      return;
+    }
+    var p=x.o.preview||{};
+    var of=p.only_failed||{};
+    clearPreview={input_root:ir,preview:p};
+    var lines=[];
+    lines.push("将删 DB "+p.db_runs+" 条 ＋ jobs "+p.jobs+" 个；vault md 与源视频不动。");
+    lines.push("重起需重转约 "+p.est_retranscribe_minutes+" 分钟（按每条约 "+p.avg_sec_per_video+" 秒估算，实际以视频长短为准）。");
+    if(p.failed>0)lines.push("失败 "+p.failed+" 条建议先在失败行逐条点「重试」，确需清空再清。");
+    lines.push("");
+    lines.push("当前共 "+p.total+" 条：成功 "+p.success+" / 失败 "+p.failed+" / 排队 "+p.pending+"。");
+    if(p.failed>0){
+      lines.push("「只清失败」→ 删 "+of.db_runs+" 条失败记录＋jobs "+of.jobs+" 个，成功 "+p.success+" 条保留（不动）。");
+    }else{
+      lines.push("（当前没有失败记录，「只清失败」无可清。）");
+    }
+    lines.push("「全部清空」→ 删全部 "+p.db_runs+" 条，重起会全部重转。");
+    el("clearCost").textContent=lines.join("\n");
+    el("btnClearFailed").disabled=!(p.failed>0);
+    el("btnClearAll").disabled=!(p.db_runs>0);
+  }).catch(function(e){
+    el("clearCost").textContent="核对失败："+e;
+  });
+}
+function doClear(onlyFailed){
+  var ir=clearOpenedRoot();
+  if(!ir)return;
+  if(!onlyFailed){
+    if(!confirm("再次确认：将删除本目录全部 "+((clearPreview&&clearPreview.preview&&clearPreview.preview.db_runs)||"")+" 条任务记录与 jobs 中间文件，不可撤销。\n（源视频与笔记 md 不动，但重起需全部重转。）\n确定要「全部清空」吗？"))return;
+  }
+  el("clearMsg").textContent="正在清空…";
+  el("btnClearFailed").disabled=true;
+  el("btnClearAll").disabled=true;
+  fetch("/api/clear",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({data_root:dataRoot()||undefined,input_root:ir,only_failed:!!onlyFailed})})
+  .then(function(r){return r.json().then(function(o){return{code:r.status,o:o};});})
+  .then(function(x){
+    if(x.code===200&&x.o&&x.o.ok){
+      el("clearModal").classList.remove("open");
+      say(String(x.o.message||"已清空。")+" "+String(x.o.undo||""),"ok");
+      toast(String(x.o.message||"已清空"),"ok");
+      selected=null;refresh();
+    }else{
+      el("clearMsg").textContent="清空失败："+String((x.o&&x.o.error)||("HTTP "+x.code));
+      el("btnClearFailed").disabled=false;
+      el("btnClearAll").disabled=false;
+    }
+  }).catch(function(e){
+    el("clearMsg").textContent="清空请求失败："+e;
+    el("btnClearFailed").disabled=false;
+    el("btnClearAll").disabled=false;
+  });
+}
+el("btnClear").onclick=openClearDialog;
+el("btnClearCancel").onclick=function(){el("clearModal").classList.remove("open");};
+el("btnClearFailed").onclick=function(){doClear(true);};
+el("btnClearAll").onclick=function(){doClear(false);};
+el("clearModal").onclick=function(e){if(e.target===el("clearModal"))el("clearModal").classList.remove("open");};
+// FR-14 统一恢复入口（首屏可见；三种后果＋作用范围＋whisper成本；详情仅留当前任务上下文快捷）
+function recoverHint(t,cls){el("recoverHint").textContent=t;el("recoverHint").className="hint "+(cls||"");}
+// FR-14/D-19：批量入口唯一——「重新转写全部失败」与「重新成稿（范围＝全部已完成）」都只在本框内选择范围
+// P1-3/CANDIDATE-UI2 P3-2：范围二选一**不允许双空**——被清空时回到安全一侧
+// （「当前所选任务」＝不误伤全库），并把原因写成页面人话，绝不静默按别的范围执行。
+function recScopeVal(){
+  var n=document.querySelector('input[name="recScope"]:checked');
+  if(n)return n.value;
+  var safe=document.querySelector('input[name="recScope"][value="sel"]');
+  if(safe)safe.checked=true;
+  recoverHint("重新成稿范围不能为空，已回到安全的一侧：当前所选任务（不会动到全库）。","warn");
+  return "sel";
+}
+function recScopeLabel(){return recScopeVal()==="all"?"全部已完成任务":"当前所选任务";}
+function syncRecScope(){
+  if(!document.querySelector('input[name="recScope"]:checked')){
+    var safe=document.querySelector('input[name="recScope"][value="sel"]');
+    if(safe)safe.checked=true;
+  }
+  el("btnRecReuse").textContent="从已有文字重新成稿（范围："+recScopeLabel()+"；whisper 0次）";
+}
+Array.prototype.forEach.call(document.querySelectorAll('input[name="recScope"]'),function(n){n.onchange=syncRecScope;});
+syncRecScope();
+el("btnRecTranscribe").onclick=function(){
+  var f=failedRuns();
+  recoverHint("重新转写：范围＝全部失败任务（当前 "+f.length+" 个）；whisper 会跑，有时间成本。");
+  if(!f.length){say("当前没有失败任务可重试。","warn");return;}
+  retryAllFailed();
+};
+el("btnRecReuse").onclick=function(){
+  if(recScopeVal()==="all"){
+    recoverHint("从已有文字重新成稿：范围＝全部已完成任务；whisper 0次，库内改过的笔记跳过、已发布的不覆盖。","ok");
+    reapplyAll();
+    return;
+  }
+  var r=cache.runs[selected];
+  if(!r){say("先在列表点选一个任务，或把「重新成稿范围」切到「全部已完成任务」。","warn");return;}
+  recoverHint("从已有文字重新成稿：范围＝当前所选任务（"+filenameForRunId(r.run_id)+"）；whisper 0次。","ok");
+  reapplyOne(r.run_id);
+};
+el("btnRecPublish").onclick=function(){
+  recoverHint("正在检查该任务是否可仅入库（whisper 0次，只写不存在的新笔记，不覆盖）…","ok");
+  var r2=cache.runs[selected];
+  if(r2){publishOnlyRetry(r2.run_id);}else{say("先在列表点选一个任务，再点此按钮。","warn");}
+};
+// FR-17 长文面板退出：关闭按钮+Esc+遮罩+焦点返回
+el("btnLongClose").onclick=closeLongPanel;
+el("longPanel").onclick=function(e){if(e.target===el("longPanel"))closeLongPanel();};
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"&&el("longPanel").style.display==="block")closeLongPanel();
+});
+el("btnViewLong").onclick=function(){openLongPanel(lastLongTitle||"已复制内容",lastLongText,el("btnViewLong"));};
+refresh(false);setInterval(function(){refresh(true);},5000);
+</script>
+</body>
+</html>

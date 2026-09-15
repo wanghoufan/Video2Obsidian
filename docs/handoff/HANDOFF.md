@@ -94,6 +94,20 @@
 
 - `docs/pm/STAGE5-PLAN.md` 与 `docs/qa/STAGE5-QA-REPORT.md` **已各在文件尾部追加「收尾注记」一节**，说明 A5「抖动文件仍 WAITING」在 P1-1-FIX（`ac3ecd8`）后已变为「首投 `PROMOTED`」，并附 `docs/review/P1-1-FIX-WATCHER-CODE-REVIEW.md:74/:139` 探针 4 证据；核对结论＝**与当前代码一致**（`src/stage5/watcher.py:74-86`、`:284-352`）。两文件正文与结论一字未动。
 
+### 6. Windows 施工变更（用户 2026-09-15 晚拍板，**CHANGE_REQUEST=B**）
+
+- **变更内容**：Windows 版**不再另建独立仓库**，改为在本仓建子目录 **`windows/`**，在里面完成**大部分开发**，最后整个目录拷过去即成新仓库（`Video2Obsidian-Windows`）的根内容。原 `docs/pm/WINDOWS-MIGRATION-PLAN.md`（planner 出的五阶段方案）**继续有效**，只是「建仓」这一步从「新建远端仓库」改成「本仓建子目录」。
+- **分类理由（TM 判 B，不召 Sol Planner）**：功能范围、五阶段、验收标准**一字未变**，只改**施工落点与交付方式**；计划文档已由 planner 出过并经用户看过。不属 Change C（无产品/架构新增）。
+- **隔离铁律（违反即打回）**：
+  1. 所有 Windows 施工**只改 `windows/**`**；仓根 `app/`、`src/`、`tests/`（＝Mac 端）**零改动**（已冻结 tag `v1.0-mac`＋P1-9 收口，不得被带歪）。
+  2. `windows/` 内是**完整可独立运行副本**（app/src/tests/README…），拷过去即可跑，不依赖父目录任何文件。
+  3. Windows 侧自测放 `windows/tests/`；Mac 端三套自测（`tests/selftest_*.py`）**不得被引用或修改**。
+  4. 复制源＝当前 `main` 的 HEAD（含 P1-9，属平台无关功能，Windows 版同样要带），来源 hash 记档；排除 `.venv`／`.git`／`data/`／`.codebuddy/`／`__pycache__`。
+  5. 隐私扫描：复制与交付前各扫一次（无密钥／无真实绝对路径／无用户隐私）。
+- **本仓能完成的（约 70–80%，TM 估）**：ASR 后端抽象与 faster-whisper/CT2 适配器接线、`fcntl`→`msvcrt` 单实例锁、卷/原子性探针替换、长路径与路径比较、Explorer reveal、进程/信号去 POSIX 化、`start.ps1`＋`start.bat`、UTF-8、依赖声明（锁版本＋哈希）、ffmpeg 固定与 manifest、离线门禁、文档与 README；静态验证（compileall、AST、纯 Python 层单测、Windows 风格路径桩测）。
+- **必须留到 Windows 真机（本仓验不了，交付时列清单）**：CUDA/CT2 与真实转写质量/性能、NTFS 原子/硬链接/只读语义实测、Defender/UAC、Explorer 与 `obsidian://` 真机、PowerShell 实跑、长路径策略注册表检查、干净机复装。**这些不许推断为通过**，一律在交付提示词里列明待验。
+- **交付**：完工后出一份给 Windows 端智能体的接续提示词（待适配项清单＋验收命令＋红线），落 `windows/docs/` 与本 HANDOFF。
+
 ## 二、下一步的任务
 
 - **下一步（Next Single Action，按序）**：
@@ -102,7 +116,7 @@
   2. **（已完成）P1-1 ＋ P1-1-FIX 收口**：supervisor PASS（放行三条件已办：TASK 账本补行／README 落已知限制／P2 定级措辞更正）→ 推送 `main`；细节见 §一.3。
   3. **（已完成）冻结**：tag **`v1.0-mac`** 已打（落点 `5f06fdb`）并推送远端。
   4. **（已完成·接续）P1-9 走完角色链收口**：在制品先落盘 → code-reviewer（0 P0/P1）→ qa（BUG 0，HTTP 段由本窗口补位）→ supervisor（放行 0/2）→ 两账本 → 已推 `main`。15k flaky 与历史 P3-e **未修，继续挂账**。
-  5. **（顺延）Windows 迁移**：① Mac 端仓库改名加 **Mac** 后缀（`Video2Obsidian-Mac`）② Windows 端另建独立仓库 `Video2Obsidian-Windows`，按 `docs/pm/WINDOWS-MIGRATION-PLAN.md` 施工——**用户已明确：本轮只出计划，暂不施工** ③ 两边仓库隔离、互不覆盖 ④ 远端仓库改名属影响共享状态的操作，动前**再向用户确认一次**。
+  5. **（当前项）Windows 版本仓施工**（已改为子目录方案，见 §一.6）：① Stage 0 建 `windows/` 副本＋隔离＋语法基线＋隐私扫描（TM 直做）② 按 `docs/pm/WINDOWS-MIGRATION-PLAN.md` 五阶段，逐阶段走 builder→code-reviewer→qa→supervisor，尽量一口气做完能做的部分 ③ 收尾出 Windows 端接续提示词 ④ **Mac 端远端仓库已名 `Video2Obsidian-Mac`（无需再改名）**；将来 Windows 端建远端仓库属影响共享状态的操作，动前再确认一次。
   4. 收尾：experience-recorder ＋ neat-freak 各一次（每阶段只派一次）。
 - **人要拍什么板（只问大事）**：
   1. **词库三铁律机械保证**（仍挂，不阻塞任何 P1）：「长 wrong 排前」「正词含 wrong 即删条」代码无机械保证。选项：① 只补口径文档（TM 建议）；② 补代码保证（须同改 `_user_rules_revision` 规范化，否则同内容异序被打进死路——见 P1-5 复检节技术约束）；③ 补断言钉现状。

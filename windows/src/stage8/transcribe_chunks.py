@@ -11,13 +11,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import time
 import wave
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import asr_backend  # noqa: E402  (Windows 端唯一 ASR 后端适配层)
+import platform_win  # noqa: E402  (平台适配单点：FFmpeg 进程一律经此)
 
 from stage1.asr import (  # noqa: E402 (read-only reuse, Stage8 addition only)
     DECODE_DEFAULTS,
@@ -107,8 +109,9 @@ def _check_chunks(chunks) -> list:
 
 
 def _cut_chunk_wav(source_wav: str, chunk: dict, out_path: str) -> dict:
-    cmd = [
-        "ffmpeg",
+    # FFmpeg 进程一律走平台单点（随包 ffmpeg.exe / V2O_FFMPEG / PATH 兜底
+    # 全部在 platform_win.ffmpeg_resolve 收口），超时与错误语义不变。
+    args = [
         "-hide_banner",
         "-loglevel",
         "error",
@@ -127,7 +130,7 @@ def _cut_chunk_wav(source_wav: str, chunk: dict, out_path: str) -> dict:
         "pcm_s16le",
         out_path,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    proc = platform_win.run_ffmpeg(args, timeout=600)
     if proc.returncode != 0:
         raise ChunkTranscribeError(
             "ffmpeg chunk cut failed for chunk %r: %s"
@@ -142,33 +145,44 @@ def _call_engine_once(
     initial_prompt: str,
     word_timestamps: bool,
     no_speech_threshold: float,
+    model=None,
+    model_info: dict | None = None,
+    config: dict | None = None,
 ) -> dict:
-    """Single real engine call; mirrors the stage1 call shape plus prompt."""
+    """Single real engine call; mirrors the stage1 call shape plus prompt.
+
+    Windows 端 Stage 3：引擎统一走 asr_backend.transcribe_file（离线门禁、
+    GPU 档位、manifest 校验、片段归一化全部在那层 fail-closed），本模块
+    不再直接 import 任何引擎库。``model_info``（manifest 校验结果）与
+    ``config``（运行档位）是 run 级解析一次的产物（run_chunks 加载模型时
+    留存），为空时现场解析兜底，保证 chunk 循环内不重算。
+    """
     if no_speech_threshold != FROZEN_NO_SPEECH_THRESHOLD:
         raise ChunkTranscribeError("no_speech_threshold drift refused")
-    model_info = resolve_model_revision()
-    if not model_info.get("revision_match"):
+    info = model_info if model_info is not None else resolve_model_revision()
+    if not info.get("revision_match"):
         raise ChunkTranscribeError(
             "model revision drift: resolved %r != frozen %r"
-            % (model_info.get("revision_resolved"), FROZEN_MODEL_REVISION)
+            % (info.get("revision_resolved"), FROZEN_MODEL_REVISION)
         )
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    import mlx_whisper  # noqa: PLC0415 (venv-only, lazy)
-
-    result = mlx_whisper.transcribe(
+    result = asr_backend.transcribe_file(
         wav_path,
-        path_or_hf_repo=FROZEN_MODEL_REPO,
-        word_timestamps=word_timestamps,
+        model=model,
         initial_prompt=initial_prompt,
-        clip_timestamps="0",
-        no_speech_threshold=no_speech_threshold,
         language=ENGINE_LANGUAGE,
-        verbose=False,
+        word_timestamps=word_timestamps,
+        no_speech_threshold=no_speech_threshold,
+        decode=DECODE_DEFAULTS,
+        config=config,
     )
+    if not result.get("monotonic"):
+        raise ChunkTranscribeError(
+            "engine segments broke the monotonic timeline contract"
+        )
     return {
         "text": result.get("text", ""),
         "segments": result.get("segments", []),
-        "detected": result.get("language"),
+        "detected": (result.get("info") or {}).get("language"),
     }
 
 
@@ -356,6 +370,18 @@ def run_chunks(
     call_count = 0
     per_chunk = []
     absolute_lists = []
+    # 真实路径：run 级状态只在加载时解析一次——档位（含 GPU probe）、
+    # manifest 校验、模型加载全部 run 级一次，chunk 循环内复用，不再每
+    # chunk 重算（large-v3-turbo ~1.6GB，逐 chunk 全量哈希是无谓 IO/CPU；
+    # 档位也锁死为 load 时那一份，杜绝中途环境变量变更的不一致窗口）；
+    # engine 桩路径不解析、不加载任何引擎。
+    real_model = None
+    model_info = None
+    run_config = None
+    if engine is None:
+        run_config = asr_backend.resolve_runtime()
+        model_info = resolve_model_revision()
+        real_model = asr_backend.load_model(run_config)
     t0 = time.time()
     for pos, chunk in enumerate(chunk_list):
         prompt = prompts[pos]["initial_prompt"]
@@ -363,7 +389,8 @@ def run_chunks(
         cut = _cut_chunk_wav(source_wav_path, chunk, cut_path)
         if engine is None:
             raw = _call_engine_once(
-                cut["wav_path"], prompt, word_timestamps, no_speech_threshold
+                cut["wav_path"], prompt, word_timestamps, no_speech_threshold,
+                model=real_model, model_info=model_info, config=run_config,
             )
         else:
             raw = engine(cut["wav_path"], prompt)

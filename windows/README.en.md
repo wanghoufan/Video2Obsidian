@@ -15,7 +15,7 @@ If you provide an Obsidian vault directory, notes are written there mirroring th
 ## Key features
 
 - **Watch-and-process**: fill in a video folder, press start, then drop files in. Jobs queue in the background; you do not need to keep watching the page.
-- **Local transcription**: uses `mlx-whisper` in your local Python environment, with `ffmpeg` extracting audio first.
+- **Local transcription**: uses `faster-whisper` (CTranslate2 backend) in your local Python environment, with `ffmpeg` extracting audio first.
 - **Word fixes**: maintain “wrong word → correct word” pairs (names, terms) in the console. New transcripts apply them automatically; existing results can be re-run.
 - **Draft and publish**: transcripts become paragraph-style Markdown. With a vault directory set, files mirror into Obsidian; without it, the run stops at render (a deliberate `RENDER_ONLY` outcome).
 - **Visible jobs with retry**: the job list shows Discover → Transcribe → Tidy → Draft → Publish progress. Failed jobs can be retried, previewed, and opened in Finder or Obsidian.
@@ -53,7 +53,7 @@ Click a row in the job list to read the finished note.
 ### Requirements
 
 - Apple Silicon Mac.
-- Python 3.12 with `import mlx_whisper` working.
+- Python 3.12 with `import faster_whisper` and `import ctranslate2` working (versions pinned in `requirements.txt`).
 - `ffmpeg` installed locally (used to extract audio before transcription).
 - An Obsidian vault directory is optional.
 
@@ -67,8 +67,8 @@ The console backend itself uses only the Python standard library, so it needs no
 stage0bench/bin/python -> .venv/bin/python -> venv/bin/python -> python3
 ```
 
-- With `mlx_whisper`: transcription is available.
-- Without it: the console still opens, but starting a job returns `400 PRECHECK_MLX_MISSING`. Switch to the right Python and restart.
+- With `faster_whisper` / `ctranslate2`: transcription is available.
+- Without them: the console still opens, but starting a job returns `400 PRECHECK_ASR_BACKEND_MISSING`. Install the pinned dependencies from `requirements.txt` and restart.
 
 The port defaults to `127.0.0.1:8899` and only listens locally; to change it, override with the `V2O_PORT` environment variable (`app/start.sh` passes it through to `app/server.py`).
 
@@ -110,7 +110,7 @@ For full behavior see [Usage](./docs/usage.md); for errors see [Troubleshooting]
 ## Known limitations
 
 - The target device is Apple Silicon Mac. Other platforms are not verified in this repository.
-- Without `mlx_whisper` or `ffmpeg`, transcription is unavailable; the console reports it explicitly. Besides `mlx-whisper`, `watchdog` is also required (this repository ships no dependency manifest).
+- Without `faster_whisper` / `ctranslate2` or `ffmpeg`, transcription is unavailable; the console reports it explicitly. See `requirements.txt` for the pinned dependency list (including `watchdog`).
 - Watch state is lost on restart; press start again in the page after the service restarts.
 - Long real-world videos are still under acceptance testing. The pipeline guarantees it keeps running, not word-level accuracy.
 - **A video dropped into the watched folder is only picked up after it stops changing (about 7 seconds of quiet writes).** If a copy/download pauses for longer than ~7 seconds and then continues, a partial transcript may be produced first, while the complete version is blocked by No-Clobber protection (existing notes are never overwritten). In that case, delete the partial `.md` and drop the video again.

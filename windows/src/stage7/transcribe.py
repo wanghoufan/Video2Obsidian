@@ -9,6 +9,8 @@ import wave
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import asr_backend  # noqa: E402  (Windows 端唯一 ASR 后端适配层)
+
 from stage1.asr import (  # noqa: E402 (read-only reuse, Stage7 addition only)
     DECODE_DEFAULTS,
     FROZEN_MODEL_REPO,
@@ -77,24 +79,25 @@ def run_single_file_with_prompt(wav_path: str, initial_prompt: str) -> dict:
             % (model_info.get("revision_resolved"), FROZEN_MODEL_REVISION)
         )
 
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    import mlx_whisper  # noqa: PLC0415 (venv-only, lazy)
-
+    # 引擎调用只有这一条路（asr_backend，Windows 端不再 import 任何 Mac 端引擎；
+    # 离线门禁 / GPU 档位 / manifest 校验全部在 asr_backend 内 fail-closed）。
     t0 = time.time()
-    result = mlx_whisper.transcribe(
+    result = asr_backend.transcribe_file(
         wav_info["wav_path"],
-        path_or_hf_repo=FROZEN_MODEL_REPO,
-        word_timestamps=FROZEN_WORD_DEFAULT,
         initial_prompt=initial_prompt,
-        clip_timestamps="0",
-        no_speech_threshold=FROZEN_NO_SPEECH_THRESHOLD,
         language=ENGINE_LANGUAGE,
-        verbose=False,
+        word_timestamps=FROZEN_WORD_DEFAULT,
+        no_speech_threshold=FROZEN_NO_SPEECH_THRESHOLD,
+        decode=DECODE_DEFAULTS,
     )
     call_s = round(time.time() - t0, 1)
+    if not result.get("monotonic"):
+        raise TranscribeError(
+            "engine segments broke the monotonic timeline contract"
+        )
 
     vad = vad_observe_only(wav_info["wav_path"])
-    detected = result.get("language")
+    detected = (result.get("info") or {}).get("language")
     lang_record = record_detected_language(detected)
 
     text = result.get("text", "")
@@ -111,7 +114,8 @@ def run_single_file_with_prompt(wav_path: str, initial_prompt: str) -> dict:
         "prompt_chars": len(initial_prompt),
         "token_count": tokens,
         "model": FROZEN_MODEL_REPO,
-        "model_revision": FROZEN_MODEL_REVISION,
+        "model_revision": model_info.get("revision_resolved")
+        or FROZEN_MODEL_REVISION,
         "word_timestamps": FROZEN_WORD_DEFAULT,
         "no_speech_threshold": FROZEN_NO_SPEECH_THRESHOLD,
         "clip": "0",

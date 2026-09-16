@@ -15,7 +15,7 @@
 ## 核心功能
 
 - **监听文件夹，自动处理**：填好视频文件夹并点开始监听，把视频丢进去即可，后台排队逐个处理，不用守在页面前。
-- **本机转写**：用本机 Python 环境里的 `mlx-whisper` 把声音转成文字，中间用 `ffmpeg` 提取音频。
+- **本机转写**：用本机 Python 环境里的 `faster-whisper`（CTranslate2 后端）把声音转成文字，中间用 `ffmpeg` 提取音频。
 - **错词修正**：在控制台词汇区维护“错词→正词”（比如人名、术语），新转写自动应用，也能一键重跑已有结果。
 - **成稿与入库**：转写结果会整理成分段正文并生成 Markdown；填了笔记库目录就按目录镜像写入，不填就只保留在数据目录。
 - **任务可见可重试**：任务列表显示发现→听写→整理→成稿→入库的进度，失败的任务可以单独重试，也能预览正文、一键在访达或 Obsidian 里打开。
@@ -53,7 +53,7 @@ http://127.0.0.1:8899/
 ### 前置要求
 
 - Apple Silicon Mac。
-- Python 3.12，且该 Python 能 `import mlx_whisper`。
+- Python 3.12，且该 Python 能 `import faster_whisper` 与 `import ctranslate2`（版本以 `requirements.txt` 锁定为准）。
 - 本机装有 `ffmpeg`（转写前提取音频用）。
 - Obsidian 库目录是选填的；不写也能跑通全流程。
 
@@ -67,8 +67,8 @@ http://127.0.0.1:8899/
 stage0bench/bin/python → .venv/bin/python → venv/bin/python → python3
 ```
 
-- 找到带 `mlx_whisper` 的 Python：转写可用。
-- 找不到：控制台照常打开，但点开始转写时会报 `400 PRECHECK_MLX_MISSING`，换对 Python 后重起即可。
+- 找到带 `faster_whisper` / `ctranslate2` 的 Python：转写可用。
+- 找不到：控制台照常打开，但点开始转写时会报 `400 PRECHECK_ASR_BACKEND_MISSING`，按 `requirements.txt` 装好依赖后重起即可。
 
 端口默认 `127.0.0.1:8899`，只监听本机；如需换端口，用环境变量 `V2O_PORT` 覆盖（`app/start.sh` 会透传给 `app/server.py`）。
 
@@ -110,7 +110,7 @@ stage0bench/bin/python → .venv/bin/python → venv/bin/python → python3
 ## 已知限制
 
 - 目标设备是 Apple Silicon Mac，其他平台当前仓库未能验证。
-- 缺 `mlx_whisper` 或 `ffmpeg` 时转写不可用，控制台会明确报错，需要先补好环境。依赖除 `mlx-whisper` 外还需 `watchdog`（本仓库暂无依赖清单文件）。
+- 缺 `faster_whisper` / `ctranslate2` 或 `ffmpeg` 时转写不可用，控制台会明确报错，需要先补好环境。依赖清单见 `requirements.txt`（含 `watchdog`）。
 - 服务重启后监听状态不会自动恢复，需要在页面手动重新开始监听。
 - 真实长视频的端到端表现仍在验收中；转写流程保证不断不断流，不保证词级准确率。
 - **往监听目录拷入视频后，需等文件写稳（约 7 秒无线索写入）才会被识别入队**；拷贝/下载过程中若长时间停顿（超过约 7 秒）再继续写，可能先按当时内容生成一份**不完整稿**，而完整稿会因 No-Clobber 保护（已存在笔记不覆盖）被挡下。遇到这种不完整稿，请**删除该 md 后重新放入视频**即可正常出稿。

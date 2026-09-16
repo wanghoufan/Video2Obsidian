@@ -1,0 +1,16 @@
+{
+  "schema": "v2o-model-manifest/v1",
+  "note": "CT2 模型登记：source/revision/license/local_path/files 必须由联网机用 tools/freeze_model_manifest.py 冻结后回填。本文件现在是占位模板，任何一项没冻结即 BLOCK，不允许加载模型、不允许联网下载。",
+  "models": [
+    {
+      "model_id": "Systran/faster-whisper-large-v3-turbo",
+      "source": "REPLACE_WITH_SOURCE_URL_OR_RELEASE_ASSET",
+      "revision": "REPLACE_WITH_FROZEN_CT2_REVISION",
+      "license": "MIT",
+      "license_file": "LICENSE",
+      "local_path": "REPLACE_WITH_ABSOLUTE_MODEL_DIR_ON_THIS_MACHINE",
+      "compute_type": "int8_float16",
+      "files": []
+    }
+  ]
+}

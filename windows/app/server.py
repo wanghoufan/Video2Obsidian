@@ -5,7 +5,7 @@
 复用（只读 import，不改 src 任何文件）：
   - src/stage12/status_snapshot.collect：只读状态快照
   - src/stage5/startup.run_startup：后台线程启动监听
-  - 转写 worker 内按需懒加载（无 hard 依赖，缺 mlx 时只记 verdict）：
+  - 转写 worker 内按需懒加载（无 hard 依赖，缺转写引擎时只记 verdict）：
     stage1.asr / stage7.transcribe / stage7.prompt_builder /
     stage8.transcribe_chunks / stage8.chunk_planner /
     stage1.prepare / stage3.normalize / stage3.render /
@@ -82,7 +82,7 @@ except platform_win.DataRootUnavailable:
     raise SystemExit(2)
 DEFAULT_PROFILE_HASH = "local-console-v1"
 
-CODE_MLX_MISSING = "PRECHECK_MLX_MISSING"
+CODE_ASR_MISSING = "PRECHECK_ASR_BACKEND_MISSING"
 
 # P1-FIX-1：发布门复核「源文件此刻是否仍在变」的采样间隔（秒）。
 # 静默窗+多轮采样挡不住「写方停顿超过投递门」的文件，这一道在处理/发布前再核
@@ -427,13 +427,18 @@ def _err_text(exc, limit: int = 180) -> str:
     return text
 
 
-def _mlx_available() -> bool:
-    """probe import，不 hard 依赖：缺 mlx_whisper 时返回 False。"""
-    try:
-        __import__("mlx_whisper")
-        return True
-    except Exception:
-        return False
+def _asr_engine_available() -> bool:
+    """probe import，不 hard 依赖：缺 faster-whisper/CT2 时返回 False。
+
+    Windows 端 Stage 3：转写引擎统一是 asr_backend（faster-whisper /
+    CTranslate2），不再探测 Mac 端那套 mlx。
+    """
+    for module in ("faster_whisper", "ctranslate2"):
+        try:
+            __import__(module)
+        except Exception:
+            return False
+    return True
 
 
 def _is_under_root(src_path: str, input_root: str) -> bool:
@@ -1734,7 +1739,7 @@ def _diag_action(row: dict, source: dict, manifest: dict | None, recorded_exists
         root = "PUBLISH_NO_CLOBBER_CONFLICT" if "clobber" in low or "exists" in low else "PUBLISH_PERMISSION"
         return ("PUBLISH_BLOCKED", root, "PUBLISH", "PUBLISH_ONLY", "AUTO_PUBLISH", False,
                 "检查发布权限或目标冲突后仅重新入库")
-    if any(x in low for x in ("permission", "sandbox", "precondition", "mlx_missing")):
+    if any(x in low for x in ("permission", "sandbox", "precondition", "asr_backend_missing")):
         return ("PRECONDITION_BLOCKED", "PERMISSION_OR_SANDBOX", "SYSTEM",
                 "BLOCK_UNTIL_FIXED", "NEEDS_ENV_FIX", False, "修复权限或运行环境后重新诊断")
     if any(x in low for x in ("media", "ffprobe", "unreadable", "corrupt", "invalid")):
@@ -2276,10 +2281,10 @@ def _exec_retranscribe(data_root: str, run_id: str, work_dir: str) -> dict:
     if os.path.getsize(src) <= 0:
         return {"ok": False, "state": "FAILED", "strategy": "RETRANSCRIBE",
                 "whisper_calls": 0, "reason": "源文件为空，引擎未调用"}
-    if not _mlx_available():
+    if not _asr_engine_available():
         return {"ok": False, "state": "NEEDS_HUMAN", "strategy": "RETRANSCRIBE",
                 "whisper_calls": 0,
-                "reason": "本机转写引擎不可用（mlx_whisper 缺失），修复环境后重新诊断"}
+                "reason": "本机转写引擎不可用（faster-whisper/CT2 缺失），修复环境后重新诊断"}
     # 引擎在位但批量通道不做整片重转写冒充：如实记录需转监听通道处理
     return {"ok": False, "state": "NEEDS_HUMAN", "strategy": "RETRANSCRIBE",
             "whisper_calls": 0,
@@ -4730,7 +4735,7 @@ def _transcribe_audio(job_asr_dir: str, src_path: str,
     """转写 stage7/8（只读复用公开 API），返回 {text, segments, engine_calls}。
 
     短音频（<=600s）走 stage7 单文件；长音频走 stage8 分块。
-    stage7/8 失败则回退 stage1 单文件直调；mlx 缺失则抛错由上层记 verdict。
+    stage7/8 失败则回退 stage1 单文件直调；转写引擎缺失则抛错由上层记 verdict。
     prompt_terms：用户正词弱引导（V2.5，进 topic 层，失败忽略不拦转写）。
     """
     from stage1.asr import extract_temp_wav  # noqa: E402  (只读复用)
@@ -5465,8 +5470,8 @@ def _handle_start_post(body: bytes) -> tuple[int, dict]:
         return 400, {"ok": False, "error": "数据目录不可用：%s，请检查权限" % (_err_text(exc),)}
 
     # 人话预检：转写必须在就绪的 python 下跑（probe，不 hard 依赖）
-    if not _mlx_available():
-        return 400, {"ok": False, "code": CODE_MLX_MISSING,
+    if not _asr_engine_available():
+        return 400, {"ok": False, "code": CODE_ASR_MISSING,
                      "error": "转写环境没就绪：请用自带一键启动重开，再点开始监听"}
 
     with _state_lock:

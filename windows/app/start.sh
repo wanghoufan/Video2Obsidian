@@ -13,17 +13,17 @@ for cand in "$ROOT/stage0bench/bin/python" "$ROOT/.venv/bin/python" "$ROOT/venv/
 done
 if [ -z "$PY" ]; then
   PY="python3"
-  echo "WARN: 未找到 stage0bench/.venv/venv，转写需要 mlx 的 python；先用 $PY 起控制台（/api/start 会 400 提示换 venv）。"
+  echo "WARN: 未找到 stage0bench/.venv/venv，转写需要 faster-whisper/CT2 的 python；先用 $PY 起控制台（/api/start 会 400 提示换 venv）。"
 else
   echo "venv 复核：$PY"
   "$PY" -c "import sys; print('复核 python：' + sys.executable)"
 fi
 
-# P0-6：转写必须在有 mlx 的 python 下跑；缺则只告警（控制台仍可起，/api/start 会 400 明确提示）。
-if "$PY" -c "import mlx_whisper" 2>/dev/null; then
-  echo "mlx_whisper 就绪，转写可用。"
+# P0-6：转写必须在有 faster-whisper/CT2 的 python 下跑；缺则只告警（控制台仍可起，/api/start 会 400 明确提示）。
+if "$PY" -c "import faster_whisper, ctranslate2" 2>/dev/null; then
+  echo "faster-whisper/CT2 就绪，转写可用。"
 else
-  echo "WARN: $PY 缺 mlx_whisper，转写 /api/start 会 400（PRECHECK_MLX_MISSING）；请进 stage0bench venv 后重起。" >&2
+  echo "WARN: $PY 缺 faster_whisper/ctranslate2，转写 /api/start 会 400（PRECHECK_ASR_BACKEND_MISSING）；请按 requirements.txt 装好后重起。" >&2
 fi
 
 echo "用 $PY 启动 懒得笔记 本机控制台…"

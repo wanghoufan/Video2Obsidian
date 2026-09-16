@@ -563,6 +563,74 @@ def run_argv(argv: list, timeout: float = 10.0) -> subprocess.CompletedProcess:
     )
 
 
+# ---- ffmpeg（Windows：随包绝对路径优先）---------------------------------
+FFMPEG_ENV = "V2O_FFMPEG"
+FFMPEG_DIR_PARTS = ("third_party", "ffmpeg", "bin")
+
+
+def bundle_root() -> str:
+    """随包第三方目录的根（``<repo>/third_party``；本文件在 ``<repo>/src``）。"""
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        *FFMPEG_DIR_PARTS,
+    )
+
+
+def ffmpeg_resolve(environ: dict | None = None,
+                   platform: str | None = None) -> dict:
+    """定位 ffmpeg 可执行文件，返回 ``{exe, kind, bundled}``。
+
+    顺序：① ``V2O_FFMPEG`` 指定的绝对路径；② 随包 ``third_party/ffmpeg/bin``
+    （Windows 为 ``ffmpeg.exe``，这是交付形态）；③ PATH 里的 ``ffmpeg``（兜底，
+    只有前两档都没有时才用，Windows 真机应走前两档）。
+    """
+    env = os.environ if environ is None else environ
+    op = _ops(platform)
+    override = str(env.get(FFMPEG_ENV) or "").strip()
+    if override:
+        if not op.isabs(override):
+            raise PlatformCapabilityMissing(
+                "环境变量 %s 必须给出 ffmpeg 的绝对路径（不许用相对路径或"
+                "只写命令名），否则无法确定用的是哪一个 ffmpeg" % (FFMPEG_ENV,)
+            )
+        if not os.path.isfile(override):
+            raise PlatformCapabilityMissing(
+                "环境变量 %s 指向的 ffmpeg 不存在：请在开始监听前把它改成"
+                "真实存在的文件路径" % (FFMPEG_ENV,)
+            )
+        return {"exe": override, "kind": "env", "bundled": False}
+    name = "ffmpeg.exe" if is_windows(platform) else "ffmpeg"
+    bundled = os.path.join(bundle_root(), name)
+    if os.path.isfile(bundled):
+        return {"exe": bundled, "kind": "bundled", "bundled": True}
+    if is_windows(platform):
+        # 交付形态没有随包 ffmpeg 时仍允许 PATH 兜底，但如实记 kind=path，
+        # 便于 README/诊断指出「没在用随包那个」。
+        return {"exe": name, "kind": "path", "bundled": False}
+    return {"exe": name, "kind": "path", "bundled": False}
+
+
+def ffmpeg_executable(environ: dict | None = None,
+                      platform: str | None = None) -> str:
+    """ffmpeg 可执行文件路径（数组首项，绝不拼 shell 字符串）。"""
+    return ffmpeg_resolve(environ, platform)["exe"]
+
+
+def ffmpeg_argv(args, environ: dict | None = None,
+                platform: str | None = None) -> list:
+    """拼 ffmpeg 参数数组：exe + 参数，不用 shell、不用 POSIX 特有写法。"""
+    return [ffmpeg_executable(environ, platform)] + [str(a) for a in args]
+
+
+def run_ffmpeg(args, timeout: float = 600.0, environ: dict | None = None,
+               platform: str | None = None) -> subprocess.CompletedProcess:
+    """跑一次 ffmpeg：UTF-8 输出、数组传参、超时交给调用方定。"""
+    return subprocess.run(
+        ffmpeg_argv(args, environ, platform), capture_output=True, text=True,
+        encoding=ENCODING, errors="replace", timeout=timeout,
+    )
+
+
 # ---- 进程 ---------------------------------------------------------------
 def kill_child(proc, timeout: float = 10.0,
                platform: str | None = None) -> dict:

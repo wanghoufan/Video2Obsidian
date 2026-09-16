@@ -5,6 +5,7 @@
 
 - Captured at（YYYY-MM-DD HH:MM）：**2026-09-15 22:10（TM 收口 + 冻结）**；本阶段 P1 全部收口并推送 `main`，随后**冻结版本**（tag `v1.0-mac`，落点 `5f06fdb`）；下一步＝**Windows 11 迁移**（另建独立仓库，方案已由 planner 产出：`docs/pm/WINDOWS-MIGRATION-PLAN.md`，**只出计划不施工**）
 - **接续（编排者恢复工作，2026-09-15 晚）**：冻结后发现工作树留有**未提交的 P1-9 在制品**（4 文件），已按「续做半成品默认保留」逐块核对后**先 commit＋push 落盘**，再补走角色链。见 §一.4。Windows 迁移顺延到 P1-9 收口之后。
+- **接续 2（编排者恢复工作，2026-09-16）**：实测 git 对账发现 HANDOFF 落后实际进度——WIN Stage 0（`ebabf91`）与 **Stage 1+2（`6e19fb5`，四角色链 PASS 已推 main）** 均已收口；工作树留 **Stage 3 在制品**（asr_backend 适配层＋stage1 改接＋platform_win.run_ffmpeg），已按「续做半成品默认保留」续链收口，见 §一.7。
 - PROJECT_PHASE：**DEVELOP**（Phase2 未关闭）
 - PLAN_VERSION：`PRODUCT_PLAN_V1.3`（正文最新；文末「Readiness Score / 本轮真实验证记录」两段仍为 V1.2 旧文本，见 `docs/pm/PRODUCT_PLAN.md` 顶部收尾注记）
 - PLAN_READINESS_SCORE：**未达 90**（planner 自评 89；Research Reviewer 独立 83；用户已知并决定开工）
@@ -108,6 +109,16 @@
 - **必须留到 Windows 真机（本仓验不了，交付时列清单）**：CUDA/CT2 与真实转写质量/性能、NTFS 原子/硬链接/只读语义实测、Defender/UAC、Explorer 与 `obsidian://` 真机、PowerShell 实跑、长路径策略注册表检查、干净机复装。**这些不许推断为通过**，一律在交付提示词里列明待验。
 - **交付**：完工后出一份给 Windows 端智能体的接续提示词（待适配项清单＋验收命令＋红线），落 `windows/docs/` 与本 HANDOFF。
 
+### 7. WIN Stage 3 链状态（**已收口**，2026-09-16）
+
+- **范围**（`docs/pm/WINDOWS-MIGRATION-PLAN.md` §4 Stage 3＋§1）：单一 `asr_backend`（faster-whisper/CT2）适配层＋四处绑定点接线（stage1/7/8/prompt_builder）＋manifest 占位与 freeze 工具＋ffmpeg 单点。**在制品接续**：接续时工作树已有一批未提交 Stage 3 在制品（asr_backend/manifest/freeze 工具/stage1 改接/platform_win.run_ffmpeg，compileall rc0），逐块核对＝方向正确，保留续链。
+- **builder 首版（PASS，opencode-go/deepseek-v4.1-flash）**：stage7/transcribe.py、stage8/transcribe_chunks.py、stage7/prompt_builder.py 三处 mlx 绑定改接 `asr_backend.transcribe_file`/`load_tokenizer`（契约保留：zh／word OFF／nst 0.6／decode 透传／segments 单调守卫／prompt ≤200 口径 " "+去空格）；`run_chunks` 整 run `load_model` 一次逐块复用；`server.py` 预检 `_asr_engine_available`＋`PRECHECK_ASR_BACKEND_MISSING`；`start.sh` venv 预检换包；README×2 表述替换；新增 `tests/selftest_win_stage3.py`（全桩注入，61 断言 0 失败，9/9 证伪有牙）；六套自测 rc0（contract 600）。mlx 残留清扫（供应链防线如 BANNED markers/MLX_REVISION 黑名单有意保留）。
+- **code-reviewer 首轮（PASS 0P0/0P1，opencode/muse-spark-1.3-contributor-free）**：十项核查全过；**P1-1**（stage8 `_cut_chunk_wav` 直调 subprocess 未走 ffmpeg 单点，属既有代码非回归）、P2×2（每 chunk 全模型 SHA-256 重算；config=None 每 chunk 重跑 GPU probe）、P3×3。报告 `docs/review/WIN-STAGE3-CODE-REVIEW.md`。
+- **builder 返工（PASS）**：三项全落（`transcribe_chunks.py:133` run_ffmpeg timeout=600、`:383` run 级 manifest 校验一次、`:382/:393` run 级 resolve_runtime＋config 透传）；自测增 [11c]/[11d]（61→70 断言，证伪 9→11）；stage8 numstat 26/12→46/19。**返工复核（PASS）**：三项逐条证实、签名变化全仓 grep 零遗漏、净增量对账差 0、自跑 2 条证伪有牙（/tmp 备份还原，未用 git checkout）。
+- **qa（codex/gpt-5.6-luna，任务级 FAIL＝环境限制）**：**业务 BUG 0**（QA-001..003 P3 挂账）；独立夹具 **16/16**；证伪 3/3 有牙；contract rc=1（codex 沙箱禁 loopback bind）→ **TM 补位 600/600 rc0**。报告 `docs/qa/WIN-STAGE3-QA-2026-09-16.md`。
+- **supervisor 复检（PASS，放行，0/2）**：四套自测独立复跑 rc0（contract 600 双重证实）；自建夹具 35 断言两遍一致；证伪 2/2 有牙（shasum 一致还原）；三项关闭读码证实；账本逐行 json 坏行 0；红线扫描零命中。复检节在 qa 报告尾部。
+- **挂账（非阻塞）**：P3×3（monotonic 守卫保险带恒真／OOM 后模型无显式释放与 work_dir 不清理／requirements 哈希占位待随模型冻结回填）＋README 面向 Windows 的表述待 Stage 4 统一改写＋**Stage 4 真机清单**（真实 CUDA/CT2 加载链、Defender/UAC、Explorer/Obsidian、PowerShell、干净机复装——不许推断为通过）。
+
 ## 二、下一步的任务
 
 - **下一步（Next Single Action，按序）**：
@@ -116,7 +127,7 @@
   2. **（已完成）P1-1 ＋ P1-1-FIX 收口**：supervisor PASS（放行三条件已办：TASK 账本补行／README 落已知限制／P2 定级措辞更正）→ 推送 `main`；细节见 §一.3。
   3. **（已完成）冻结**：tag **`v1.0-mac`** 已打（落点 `5f06fdb`）并推送远端。
   4. **（已完成·接续）P1-9 走完角色链收口**：在制品先落盘 → code-reviewer（0 P0/P1）→ qa（BUG 0，HTTP 段由本窗口补位）→ supervisor（放行 0/2）→ 两账本 → 已推 `main`。15k flaky 与历史 P3-e **未修，继续挂账**。
-  5. **（当前项）Windows 版本仓施工**（已改为子目录方案，见 §一.6）：① Stage 0 建 `windows/` 副本＋隔离＋语法基线＋隐私扫描（TM 直做）② 按 `docs/pm/WINDOWS-MIGRATION-PLAN.md` 五阶段，逐阶段走 builder→code-reviewer→qa→supervisor，尽量一口气做完能做的部分 ③ 收尾出 Windows 端接续提示词 ④ **Mac 端远端仓库已名 `Video2Obsidian-Mac`（无需再改名）**；将来 Windows 端建远端仓库属影响共享状态的操作，动前再确认一次。
+  5. **（当前项）Windows 版本仓施工**（已改为子目录方案，见 §一.6）：① Stage 0 建仓**已完成**（`ebabf91`）② 五阶段逐阶段四角色链：Stage 1+2 **已收口**（`6e19fb5`）、Stage 3 ASR 适配层 **已收口**（见 §一.7）；**当前＝Stage 4 集成交付**（tmp 全流程＋崩溃恢复语义＋README 面向 Windows 改写；真实 CUDA/真机项列清单待 Windows 机器）③ 收尾出 Windows 端接续提示词 ④ **Mac 端远端仓库已名 `Video2Obsidian-Mac`（无需再改名）**；将来 Windows 端建远端仓库属影响共享状态的操作，动前再确认一次。
   4. 收尾：experience-recorder ＋ neat-freak 各一次（每阶段只派一次）。
 - **人要拍什么板（只问大事）**：
   1. **词库三铁律机械保证**（仍挂，不阻塞任何 P1）：「长 wrong 排前」「正词含 wrong 即删条」代码无机械保证。选项：① 只补口径文档（TM 建议）；② 补代码保证（须同改 `_user_rules_revision` 规范化，否则同内容异序被打进死路——见 P1-5 复检节技术约束）；③ 补断言钉现状。

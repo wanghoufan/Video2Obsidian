@@ -3,7 +3,7 @@
 Implements STAGE1-PLAN S1-T03 only::
 
     temp-wav 16k mono (FFmpeg, on-disk, re-runnable)
-    + mlx-whisper large-v3-turbo @ a4aaeec0 single file transcribe
+    + faster-whisper/CT2 large-v3-turbo single file transcribe
     + word_timestamps default OFF + no_speech_threshold 0.6
     + VAD observe-only record (never filters audio)
     + ASR Profile actual-value record + fstat before/after for T04.
@@ -20,9 +20,12 @@ audio mode, word default. By construction this module has no file
 splitting path, no prompt assembly, no parallel workers, and no
 audio filtering driven by VAD — those live in later Stages.
 
-Runtime: Stage0 venv only (mlx-whisper / silero-vad / numpy / FFmpeg
-binary). No new dependency. Heavy imports stay inside functions so a
-plain ``import src.stage1.asr`` never requires the venv.
+Runtime (Windows 端 Stage 3 起)：引擎统一走 ``asr_backend`` 这层薄适配
+（faster-whisper / CTranslate2，见
+``docs/pm/WINDOWS-MIGRATION-PLAN.md`` §1）。本模块不再直接 import 任何引擎，
+模型标识、加载、调用、片段结构全部从那一层取；FFmpeg 进程一律经
+``platform_win.run_ffmpeg``（平台单点）。真实 CUDA 调用只可能在 Windows
+真机发生，本机（macOS）只用桩验证。
 """
 
 from __future__ import annotations
@@ -31,12 +34,17 @@ import argparse
 import hashlib
 import json
 import os
-import subprocess
 import sys
 import time
 import wave
 
-from .ingest import fstat_capture
+if os.path.join(os.path.dirname(__file__), "..") not in sys.path:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import asr_backend  # noqa: E402  (Windows 端唯一 ASR 后端适配层)
+import platform_win  # noqa: E402  (平台适配单点：FFmpeg 进程)
+
+from .ingest import fstat_capture  # noqa: E402
 from .verify import (
     EXIT_BLOCK,
     EXIT_FAIL,
@@ -45,12 +53,15 @@ from .verify import (
     load_source_record,
 )
 
-# Stage0 frozen config (§9). Single source of truth for this Task.
-FROZEN_MODEL_REPO = "mlx-community/whisper-large-v3-turbo"
-FROZEN_MODEL_REVISION = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
+# Windows 端（Stage 3）：模型与调用契约全部出自 asr_backend，
+# 这里是同一批值的 stage1 侧名字，方便 stage7/8 沿用。
+FROZEN_MODEL_REPO = asr_backend.MODEL_ID
+# 版本不再写死在本文件：CT2 的 revision 由 models/MODEL_MANIFEST.json 冻结
+# （Windows 端不沿用任何 Mac 端那套模型版本标识）。
+FROZEN_MODEL_REVISION = asr_backend.MANIFEST_REVISION_TOKEN
 FROZEN_AUDIO_MODE = "temp"  # temp-wav 16k mono on disk, re-runnable
-FROZEN_WORD_DEFAULT = False
-FROZEN_NO_SPEECH_THRESHOLD = 0.6
+FROZEN_WORD_DEFAULT = asr_backend.DEFAULT_WORD_TIMESTAMPS
+FROZEN_NO_SPEECH_THRESHOLD = asr_backend.DEFAULT_NO_SPEECH_THRESHOLD
 FROZEN_VAD_THRESHOLDS = (0.3, 0.5)
 FROZEN_CHUNK_SIZE = "10min"  # recorded only, not executed here
 FROZEN_CHUNK_OVERLAP = "2s"  # recorded only, not executed here
@@ -79,32 +90,31 @@ def _write_json(path: str, payload: dict) -> None:
 def resolve_model_revision(
     repo: str = FROZEN_MODEL_REPO,
 ) -> dict:
-    """Resolve the locally cached model revision for *repo*.
+    """Resolve the pinned CT2 model revision through the manifest.
 
-    Reads the HF hub cache (refs/main + snapshots dir). Never downloads:
-    mismatch against the frozen value FAILs closed.
+    不再翻 Mac 端那套 HF 缓存，也绝不联网：Windows 端只认
+    ``models/MODEL_MANIFEST.json`` 冻结的 revision（来源/许可/SHA-256
+    一并校验）。校验不过时 ``revision_match`` 为 False，并带上人话
+    ``message`` 与 ``code``，由调用方 BLOCK。
     """
-    cache_root = os.environ.get(
-        "HF_HUB_CACHE",
-        os.path.expanduser("~/.cache/huggingface/hub"),
-    )
-    slug = "models--" + repo.replace("/", "--")
-    refs_main = os.path.join(cache_root, slug, "refs", "main")
-    snaps = os.path.join(cache_root, slug, "snapshots")
-    revision = None
-    if os.path.isfile(refs_main):
-        with open(refs_main, "r", encoding="utf-8") as fh:
-            revision = fh.read().strip()
-    snap_dirs: list[str] = []
-    if os.path.isdir(snaps):
-        snap_dirs = sorted(os.listdir(snaps))
+    try:
+        check = asr_backend.manifest.verify_model(repo, environ=None)
+    except asr_backend.manifest.ManifestBlock as exc:
+        check = {
+            "ok": False, "code": exc.code, "message": exc.message,
+            "revision": None, "verdict": "BLOCK", "detail": exc.detail,
+        }
     return {
         "repo": repo,
-        "revision_resolved": revision,
-        "revision_expected": FROZEN_MODEL_REVISION,
-        "revision_match": revision == FROZEN_MODEL_REVISION,
-        "snapshot_dirs": snap_dirs,
-        "cache_root": cache_root,
+        "revision_resolved": check.get("revision"),
+        "revision_expected": check.get("revision") or FROZEN_MODEL_REVISION,
+        "revision_match": bool(check.get("ok")),
+        "verdict": check.get("verdict", "BLOCK"),
+        "code": check.get("code"),
+        "message": check.get("message", ""),
+        "backend": asr_backend.BACKEND_ID,
+        "library": asr_backend.LIBRARY_ID,
+        "detail": check.get("detail", {}),
     }
 
 
@@ -115,8 +125,8 @@ def extract_temp_wav(source_path: str, wav_path: str) -> dict:
     failed transcribe can be retried from this file without re-decoding.
     """
     os.makedirs(os.path.dirname(os.path.abspath(wav_path)), exist_ok=True)
-    cmd = [
-        "ffmpeg",
+    # 进程调用一律走平台单点（Windows：随包 ffmpeg.exe 绝对路径 + 参数数组）。
+    args = [
         "-hide_banner",
         "-loglevel",
         "error",
@@ -132,7 +142,7 @@ def extract_temp_wav(source_path: str, wav_path: str) -> dict:
         wav_path,
     ]
     t0 = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    proc = platform_win.run_ffmpeg(args, timeout=3600)
     prep_s = time.time() - t0
     if proc.returncode != 0:
         raise AsrFail(f"ffmpeg temp-wav extract failed: {proc.stderr[-1000:]}")
@@ -176,26 +186,29 @@ def transcribe_wav_file(
             "no_speech_threshold deviates from frozen 0.6 without declaration"
         )
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    import mlx_whisper  # noqa: PLC0415  (venv-only, lazy)
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-    t0 = time.time()
-    result = mlx_whisper.transcribe(
+    # 引擎调用只有这一条路（asr_backend），本模块不直接接触任何引擎库。
+    result = asr_backend.transcribe_file(
         wav_path,
-        path_or_hf_repo=model_repo,
-        word_timestamps=word_timestamps,
         initial_prompt=None,
-        clip_timestamps="0",
+        language=None,
+        word_timestamps=word_timestamps,
         no_speech_threshold=no_speech_threshold,
-        verbose=False,
+        decode=DECODE_DEFAULTS,
     )
-    transcribe_s = time.time() - t0
-    text = result.get("text", "")
-    segments = result.get("segments", [])
+    text = result["text"]
+    segments = result["segments"]
+    if not result["monotonic"]:
+        raise AsrFail("engine segments broke the monotonic timeline contract")
     return {
         "text": text,
         "segments": segments,
-        "transcribe_s": round(transcribe_s, 1),
-        "asr_calls": 1,
+        "transcribe_s": result["transcribe_s"],
+        "asr_calls": result["asr_calls"],
+        "engine": asr_backend.BACKEND_ID,
+        "library": asr_backend.LIBRARY_ID,
+        "config": result["config"],
         "decode": {
             "word_timestamps": word_timestamps,
             "no_speech_threshold": no_speech_threshold,

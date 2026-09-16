@@ -1,6 +1,19 @@
-"""S7-T02 prompt assembly with real tokenizer count first."""
+"""S7-T02 prompt assembly with real tokenizer count first.
+
+Windows 端 Stage 3：分词器统一走 ``asr_backend``（模型自带的
+``tokenizer.json``，不联网、不用 Mac 端那套分词器）；计数口径与
+Mac 端一致：``" " + 去空格文本``，预算 200 token。
+"""
 
 from __future__ import annotations
+
+import os
+import sys
+
+if os.path.join(os.path.dirname(__file__), "..") not in sys.path:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import asr_backend  # noqa: E402  (Windows 端唯一 ASR 后端适配层)
 
 PROMPT_BUDGET_TOKENS = 200
 PROMPT_ORDER = "Global->Topic->Creator"
@@ -23,20 +36,22 @@ def _check_terms(terms, label: str) -> list:
     return out
 
 
-def _get_tokenizer():
-    from mlx_whisper.tokenizer import get_tokenizer  # noqa: PLC0415 (lazy, venv only)
+def _get_tokenizer(_load=None):
+    """Tokenizer comes from asr_backend (model-shipped tokenizer.json only)."""
+    return asr_backend.load_tokenizer(_load=_load)
 
-    return get_tokenizer(multilingual=True, language="zh")
 
+def count_tokens(text: str, _load=None) -> int:
+    """Token count with the real model tokenizer (via asr_backend).
 
-def count_tokens(text: str) -> int:
-    """Token count with the real model tokenizer."""
+    口径同 Mac 端：``" " + 去空格文本`` 计数，预算 200 token。
+    ``_load`` 是桩测注入点，透传给 asr_backend。
+    """
     if not isinstance(text, str):
         raise PromptBuilderError("text must be str")
     if text.strip() == "":
         return 0
-    tok = _get_tokenizer()
-    return len(tok.encode(" " + text.strip()))
+    return asr_backend.count_tokens(text, _load=_load)
 
 
 def build_initial_prompt(
